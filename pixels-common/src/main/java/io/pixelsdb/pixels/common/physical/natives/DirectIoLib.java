@@ -20,8 +20,10 @@
 package io.pixelsdb.pixels.common.physical.natives;
 
 import com.sun.jna.Native;
+import com.sun.jna.NativeLibrary;
 import com.sun.jna.Platform;
 import com.sun.jna.Pointer;
+import com.sun.jna.Function;
 import com.sun.jna.ptr.PointerByReference;
 import io.pixelsdb.pixels.common.utils.ConfigFactory;
 import org.apache.logging.log4j.LogManager;
@@ -51,6 +53,16 @@ import static io.pixelsdb.pixels.common.utils.JvmUtils.javaVersion;
 public class DirectIoLib
 {
     private static final Logger logger = LogManager.getLogger(DirectIoLib.class);
+    private static final NativeLibrary LIBC = NativeLibrary.getInstance(Platform.C_LIBRARY_NAME);
+    private static final Function CLOSE = LIBC.getFunction("close");
+    private static final Function PREAD = LIBC.getFunction("pread");
+    private static final Function OPEN = LIBC.getFunction("open");
+    private static final Function POSIX_MEMALIGN = LIBC.getFunction("posix_memalign");
+    private static final Function MALLOC = LIBC.getFunction("malloc");
+    private static final Function FREE = LIBC.getFunction("free");
+    private static final Function MMAP = LIBC.getFunction("mmap");
+    private static final Function MUNMAP = LIBC.getFunction("munmap");
+    private static final Function STRERROR = LIBC.getFunction("strerror");
     /**
      * The soft block size for use with transfer multiples and memory alignment multiples.
      */
@@ -163,7 +175,6 @@ public class DirectIoLib
 
                 if (compatible)
                 {
-                    Native.register(Platform.C_LIBRARY_NAME); // register native methods
                 } else
                 {
                     logger.error(String.format("O_DIRECT not supported on Linux version: %d.%d.%d", linuxVersion, majorRev, minorRev));
@@ -178,11 +189,20 @@ public class DirectIoLib
     private DirectIoLib() { }
 
     // -- native function hooks --
-    public static native int close(int fd);
+    public static int close(int fd)
+    {
+        return CLOSE.invokeInt(new Object[] {fd});
+    }
 
-    private static native long pread(int fd, Pointer buf, long count, long offset);
+    private static long pread(int fd, Pointer buf, long count, long offset)
+    {
+        return PREAD.invokeLong(new Object[] {fd, buf, count, offset});
+    }
 
-    private static native int open(String pathname, int flags);
+    private static int open(String pathname, int flags)
+    {
+        return OPEN.invokeInt(new Object[] {pathname, flags});
+    }
 
     /**
      * Given a pointer-to-pointer <tt>memptr</tt>, sets the dereferenced value to point to the start
@@ -195,20 +215,33 @@ public class DirectIoLib
      * @param size the number of bytes to allocate
      * @return 0 on success, one of the error codes in errno.h (however, errno is not set) on failure.
      */
-    private static native int posix_memalign(PointerByReference memptr, long alignment, long size);
+    private static int posix_memalign(PointerByReference memptr, long alignment, long size)
+    {
+        return POSIX_MEMALIGN.invokeInt(new Object[] {memptr, alignment, size});
+    }
 
-    private static native Pointer malloc(long size);
+    private static Pointer malloc(long size)
+    {
+        return (Pointer) MALLOC.invoke(Pointer.class, new Object[] {size});
+    }
 
     /**
      * @param ptr The pointer to the chunk of memory which needs freeing
      */
-    public static native void free(Pointer ptr);
+    public static void free(Pointer ptr)
+    {
+        FREE.invoke(Void.class, new Object[] {ptr});
+    }
 
-    private static native Pointer mmap(Pointer addr, long len, int prot, int flags, int fd, long off);
+    private static Pointer mmap(Pointer addr, long len, int prot, int flags, int fd, long off)
+    {
+        return (Pointer) MMAP.invoke(Pointer.class, new Object[] {addr, len, prot, flags, fd, off});
+    }
 
-    private static native int munmap(Pointer addr, long len);
-
-    private static native String strerror(int errnum);
+    private static int munmap(Pointer addr, long len)
+    {
+        return MUNMAP.invokeInt(new Object[] {addr, len});
+    }
 
     public static long getAddress(Pointer pointer) throws IllegalAccessException
     {
@@ -414,6 +447,11 @@ public class DirectIoLib
     private static String getLastError()
     {
         return strerror(Native.getLastError());
+    }
+
+    private static String strerror(int errnum)
+    {
+        return (String) STRERROR.invoke(String.class, new Object[] {errnum});
     }
 
     // -- alignment logic utility methods

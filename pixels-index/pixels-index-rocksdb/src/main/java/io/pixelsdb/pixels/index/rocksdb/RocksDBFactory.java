@@ -241,6 +241,13 @@ public class RocksDBFactory
         }
 
         RocksDB db = getRocksDB();
+        // getRocksDB() may have opened an existing database and populated
+        // cfHandles, so check again before attempting to create the family.
+        ColumnFamilyHandle existingHandle = cfHandles.get(cfName);
+        if (existingHandle != null)
+        {
+            return existingHandle;
+        }
         ColumnFamilyDescriptor newCF = createCFDescriptor(cfName.getBytes(StandardCharsets.UTF_8), keyLen);
         ColumnFamilyHandle handle = db.createColumnFamily(newCF);
         cfHandles.put(cfName, handle);
@@ -259,6 +266,19 @@ public class RocksDBFactory
             instance = createRocksDB(dbPath);
         }
         reference.incrementAndGet();
+        return instance;
+    }
+
+    /**
+     * Return the already-open shared database without changing its reference
+     * count. Callers must already own a factory reference.
+     */
+    static synchronized RocksDB getOpenRocksDB() throws RocksDBException, SinglePointIndexException
+    {
+        if (instance == null || instance.isClosed())
+        {
+            instance = createRocksDB(dbPath);
+        }
         return instance;
     }
 

@@ -288,7 +288,10 @@ public class PixelsRecordReaderImpl implements PixelsRecordReader
 
         // create column readers
         List<TypeDescription> columnSchemas = fileSchema.getChildren();
-        readers = new ColumnReader[targetColumnNum + (needReadHiddenColumn ? 1 : 0)];
+        // resultColumns preserves the requested projection order and may contain
+        // duplicate physical columns (for example, a DML row-id projection can
+        // read the primary-key column both as data and as $row_id).
+        readers = new ColumnReader[resultColumns.length + (needReadHiddenColumn ? 1 : 0)];
         for (int i = 0; i < resultColumns.length; i++)
         {
             int index = resultColumns[i];
@@ -1228,7 +1231,7 @@ public class PixelsRecordReaderImpl implements PixelsRecordReader
                         PixelsProto.RowGroupEncoding rgEncoding = rowGroupFooters[curRGIdx].getRowGroupEncoding();
                         for (int i = 0; i < includedColumnNum; i++)
                         {
-                            this.resultColumnsEncoded[i] = rgEncoding.getColumnChunkEncodings(targetColumns[i]).getKind() !=
+                            this.resultColumnsEncoded[i] = rgEncoding.getColumnChunkEncodings(resultColumns[i]).getKind() !=
                                     PixelsProto.ColumnEncoding.Kind.NONE && enableEncodedVector;
                         }
                     }
@@ -1326,7 +1329,7 @@ public class PixelsRecordReaderImpl implements PixelsRecordReader
                         PixelsProto.RowGroupEncoding rgEncoding = rowGroupFooters[curRGIdx].getRowGroupEncoding();
                         for (int i = 0; i < includedColumnNum; i++)
                         {
-                            this.resultColumnsEncoded[i] = rgEncoding.getColumnChunkEncodings(targetColumns[i]).getKind() !=
+                            this.resultColumnsEncoded[i] = rgEncoding.getColumnChunkEncodings(resultColumns[i]).getKind() !=
                                     PixelsProto.ColumnEncoding.Kind.NONE && enableEncodedVector;
                         }
                     }
