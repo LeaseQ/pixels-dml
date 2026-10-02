@@ -83,6 +83,7 @@
         <maven.plugin.dependency.version>2.10</maven.plugin.dependency.version>
         <maven.plugin.antrun.version>3.1.0</maven.plugin.antrun.version>
         <maven.plugin.surefire.version>2.22.2</maven.plugin.surefire.version>
+        <pixels.skip.tests>true</pixels.skip.tests>
         <maven.plugin.os-maven.version>1.6.2</maven.plugin.os-maven.version>
         <maven.plugin.protobuf.version>0.6.1</maven.plugin.protobuf.version>
         <maven.plugin.protoc-jar.version>3.3.0.1</maven.plugin.protoc-jar.version>
@@ -1049,7 +1050,7 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>${maven.plugin.surefire.version}</version>
                     <configuration>
-                        <skipTests>true</skipTests>
+                        <skipTests>${pixels.skip.tests}</skipTests>
                     </configuration>
                 </plugin>
 

@@ -9,10 +9,13 @@ import io.pixelsdb.pixels.common.exception.SinglePointIndexException;
 import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
+import org.rocksdb.RocksIterator;
 import org.rocksdb.WriteOptions;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 import static java.util.Objects.requireNonNull;
@@ -27,6 +30,39 @@ import static java.util.Objects.requireNonNull;
  */
 public final class PixelsTagIndex implements Closeable
 {
+    /**
+     * Tag records use a dedicated virtual-node namespace so they cannot be
+     * decoded as primary-index records in the primary index column family.
+     */
+    public static final int TAG_VNODE_ID = -1;
+
+    public static final class Entry
+    {
+        private final byte[] tag;
+        private final List<byte[]> primaryKeys;
+
+        private Entry(byte[] tag, List<byte[]> primaryKeys)
+        {
+            this.tag = tag.clone();
+            this.primaryKeys = List.copyOf(primaryKeys);
+        }
+
+        public byte[] tag()
+        {
+            return tag.clone();
+        }
+
+        public List<byte[]> primaryKeys()
+        {
+            List<byte[]> copies = new ArrayList<>(primaryKeys.size());
+            for (byte[] primaryKey : primaryKeys)
+            {
+                copies.add(primaryKey.clone());
+            }
+            return Collections.unmodifiableList(copies);
+        }
+    }
+
     private final RocksDB rocksDB;
     private final ColumnFamilyHandle columnFamilyHandle;
     private final WriteOptions writeOptions;
@@ -49,7 +85,7 @@ public final class PixelsTagIndex implements Closeable
     public PixelsTagIndex(long tableId, long indexId, int vNodeId)
             throws RocksDBException, SinglePointIndexException
     {
-        this.columnFamilyHandle = RocksDBFactory.getOrCreateColumnFamily(tableId, indexId, vNodeId);
+        this.columnFamilyHandle = RocksDBFactory.getOrCreateColumnFamily(tableId, indexId, TAG_VNODE_ID);
         this.rocksDB = RocksDBFactory.getOpenRocksDB();
         this.writeOptions = new WriteOptions();
         this.ownsFactoryReference = true;
@@ -75,6 +111,28 @@ public final class PixelsTagIndex implements Closeable
         requireNonNull(tag, "tag is null");
         byte[] value = readValue(tag);
         return value == null ? List.of() : PixelsTagIndexCodec.decode(value);
+    }
+
+    /**
+     * Returns a stable snapshot of every tag entry in this column family.
+     * The returned byte arrays are defensive copies and can be used after the
+     * iterator has been closed.
+     */
+    public synchronized List<Entry> entries()
+    {
+        List<Entry> entries = new ArrayList<>();
+        try (RocksIterator iterator = columnFamilyHandle == null
+                ? rocksDB.newIterator()
+                : rocksDB.newIterator(columnFamilyHandle))
+        {
+            iterator.seekToFirst();
+            while (iterator.isValid())
+            {
+                entries.add(new Entry(iterator.key(), PixelsTagIndexCodec.decode(iterator.value())));
+                iterator.next();
+            }
+        }
+        return List.copyOf(entries);
     }
 
     private byte[] readValue(byte[] tag) throws RocksDBException

@@ -23,11 +23,14 @@ import com.google.common.base.Joiner;
 import io.pixelsdb.pixels.cli.Main;
 import io.pixelsdb.pixels.common.exception.MetadataException;
 import io.pixelsdb.pixels.common.exception.RetinaException;
+import io.pixelsdb.pixels.common.index.MainIndex;
+import io.pixelsdb.pixels.common.index.MainIndexFactory;
 import io.pixelsdb.pixels.common.metadata.MetadataService;
 import io.pixelsdb.pixels.common.metadata.domain.Compact;
 import io.pixelsdb.pixels.common.metadata.domain.File;
 import io.pixelsdb.pixels.common.metadata.domain.Layout;
 import io.pixelsdb.pixels.common.metadata.domain.Path;
+import io.pixelsdb.pixels.common.metadata.domain.Table;
 import io.pixelsdb.pixels.common.physical.Status;
 import io.pixelsdb.pixels.common.physical.Storage;
 import io.pixelsdb.pixels.common.physical.StorageFactory;
@@ -37,6 +40,8 @@ import io.pixelsdb.pixels.common.utils.NetUtils;
 import io.pixelsdb.pixels.common.utils.PixelsFileNameUtils;
 import io.pixelsdb.pixels.core.compactor.CompactLayout;
 import io.pixelsdb.pixels.core.compactor.PixelsCompactor;
+import io.pixelsdb.pixels.index.IndexProto;
+import io.pixelsdb.pixels.index.rocksdb.PixelsTagIndex;
 import net.sourceforge.argparse4j.inf.Namespace;
 
 import java.io.IOException;
@@ -45,9 +50,12 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static java.util.Objects.requireNonNull;
@@ -107,6 +115,41 @@ public class CompactExecutor implements CommandExecutor
         long blockSize = Long.parseLong(configFactory.getProperty("block.size"));
         short replication = Short.parseShort(configFactory.getProperty("block.replication"));
 
+        // Tag updates are opt-in because the existing compaction command must remain
+        // compatible with tables that do not use the DML tag index.
+        String tagColumnName = configFactory.getProperty("dml.tag.column");
+        final boolean useTagCompactor = tagColumnName != null && !tagColumnName.trim().isEmpty();
+        final long primaryTableId;
+        final long primaryIndexId;
+        final MainIndex mainIndex;
+        final List<PixelsTagIndex.Entry> tagEntries;
+        if (useTagCompactor)
+        {
+            Table table = metadataService.getTable(schemaName, tableName);
+            io.pixelsdb.pixels.common.metadata.domain.SinglePointIndex primaryIndexMetadata =
+                    metadataService.getPrimaryIndex(table.getId());
+            if (primaryIndexMetadata == null)
+            {
+                throw new MetadataException("tag-aware compaction requires a primary index");
+            }
+            primaryTableId = table.getId();
+            primaryIndexId = primaryIndexMetadata.getId();
+            mainIndex = MainIndexFactory.Instance().getMainIndex(table.getId());
+            try (PixelsTagIndex tagIndex = new PixelsTagIndex(table.getId(), primaryIndexId, 0))
+            {
+                tagEntries = tagIndex.entries();
+            }
+            System.out.println("tag-aware compaction enabled for column '" + tagColumnName + "' with " +
+                    tagEntries.size() + " tag entries.");
+        }
+        else
+        {
+            primaryTableId = -1;
+            primaryIndexId = -1;
+            mainIndex = null;
+            tagEntries = java.util.Collections.emptyList();
+        }
+
         // Issue #998: compact need to exclude empty files
         List<Status> statuses = orderStorage.listStatus(layout.getOrderedPathUris());
         Iterator<Status> statusIterator = statuses.iterator();
@@ -149,8 +192,8 @@ public class CompactExecutor implements CommandExecutor
         }
 
         List<Path> targetPaths = layout.getCompactPaths();
-        ConcurrentLinkedQueue<File> compactFiles = new ConcurrentLinkedQueue<>();
-        ConcurrentLinkedQueue<Path> compactPaths = new ConcurrentLinkedQueue<>();
+        ConcurrentLinkedQueue<CompactionResult> compactionResults = new ConcurrentLinkedQueue<>();
+        List<Future<?>> compactionTasks = new ArrayList<>();
         int targetPathId = 0;
 
         // Issue #1305: iterate over each virtualNodeId group independently to preserve
@@ -231,29 +274,38 @@ public class CompactExecutor implements CommandExecutor
                 final Path finalTargetPath = targetPath;
                 long threadStart = System.currentTimeMillis();
 
-                compactExecutor.execute(() -> {
+                compactionTasks.add(compactExecutor.submit((Callable<Void>) () -> {
                     // Issue #192: run compaction in threads.
-                    try
+                    int numRowGroup;
+                    Map<Long, IndexProto.RowLocation> relocatedLocations = java.util.Collections.emptyMap();
+                    if (useTagCompactor)
+                    {
+                        PixelsTagCompactor pixelsTagCompactor = PixelsTagCompactor.create(
+                                sourcePaths, orderStorage, compactStorage, finalTargetFilePath,
+                                tagColumnName, tagEntries, primaryTableId, primaryIndexId,
+                                mainIndex, metadataService,
+                                blockSize, replication);
+                        numRowGroup = pixelsTagCompactor.compact();
+                        relocatedLocations = pixelsTagCompactor.getRelocatedLocations();
+                    }
+                    else
                     {
                         PixelsCompactor pixelsCompactor = compactorBuilder.build();
                         pixelsCompactor.compact();
                         pixelsCompactor.close();
-                        File compactFile = new File();
-                        compactFile.setName(finalTargetFileName);
-                        compactFile.setType(File.Type.REGULAR);
-                        compactFile.setNumRowGroup(pixelsCompactor.getNumRowGroup());
-                        compactFile.setPathId(finalTargetPath.getId());
-                        compactFiles.offer(compactFile);
-                        compactPaths.offer(finalTargetPath);
-                    } catch (IOException e)
-                    {
-                        System.err.println("write compact file '" + finalTargetFilePath + "' failed");
-                        e.printStackTrace();
-                        return;
+                        numRowGroup = pixelsCompactor.getNumRowGroup();
                     }
+                    File compactFile = new File();
+                    compactFile.setName(finalTargetFileName);
+                    compactFile.setType(File.Type.REGULAR);
+                    compactFile.setNumRowGroup(numRowGroup);
+                    compactFile.setPathId(finalTargetPath.getId());
+                    compactionResults.offer(new CompactionResult(
+                            compactFile, finalTargetPath, relocatedLocations));
                     System.out.println("Compact file '" + finalTargetFilePath + "' is built in " +
                             ((System.currentTimeMillis() - threadStart) / 1000.0) + "s");
-                });
+                    return null;
+                }));
 
                 i += batchSize;
             }
@@ -262,19 +314,47 @@ public class CompactExecutor implements CommandExecutor
         // Issue #192: wait for the compaction to complete.
         compactExecutor.shutdown();
         while (!compactExecutor.awaitTermination(100, TimeUnit.SECONDS));
+        throwIfAnyCompactionFailed(compactionTasks);
+        List<CompactionResult> results = new ArrayList<>(compactionResults);
+        List<File> compactFiles = new ArrayList<>(results.size());
+        for (CompactionResult result : results)
+        {
+            compactFiles.add(result.file());
+        }
         if (!metadataService.addFiles(compactFiles))
         {
             throw new MetadataException("failed to add compact files to metadata");
         }
 
+        if (useTagCompactor)
+        {
+            for (CompactionResult result : results)
+            {
+                if (result.relocatedLocations().isEmpty())
+                {
+                    continue;
+                }
+                long fileId = metadataService.getFileId(File.getFilePath(result.path(), result.file()));
+                for (Map.Entry<Long, IndexProto.RowLocation> entry : result.relocatedLocations().entrySet())
+                {
+                    IndexProto.RowLocation location = entry.getValue().toBuilder()
+                            .setFileId(fileId)
+                            .build();
+                    if (!mainIndex.putEntry(entry.getKey(), location))
+                    {
+                        throw new MetadataException("failed to update main index for compacted row " +
+                                entry.getKey());
+                    }
+                }
+            }
+        }
+
         if (retinaService.isEnabled())
         {
-            Iterator<File> fileIterator = compactFiles.iterator();
-            Iterator<Path> pathIterator = compactPaths.iterator();
-            while (fileIterator.hasNext() && pathIterator.hasNext())
+            for (CompactionResult result : results)
             {
-                File file = fileIterator.next();
-                Path path = pathIterator.next();
+                File file = result.file();
+                Path path = result.path();
                 try
                 {
                     retinaService.addVisibility(File.getFilePath(path, file));
@@ -289,5 +369,56 @@ public class CompactExecutor implements CommandExecutor
         System.out.println("Pixels files in '" + Joiner.on(";").join(layout.getOrderedPathUris()) + "' are compacted into '" +
                 Joiner.on(";").join(layout.getCompactPathUris()) + "' by " + threadNum + " threads in " +
                 (endTime - startTime) / 1000 + "s.");
+    }
+
+    private static final class CompactionResult
+    {
+        private final File file;
+        private final Path path;
+        private final Map<Long, IndexProto.RowLocation> relocatedLocations;
+
+        private CompactionResult(File file, Path path,
+                Map<Long, IndexProto.RowLocation> relocatedLocations)
+        {
+            this.file = file;
+            this.path = path;
+            this.relocatedLocations = relocatedLocations;
+        }
+
+        private File file()
+        {
+            return file;
+        }
+
+        private Path path()
+        {
+            return path;
+        }
+
+        private Map<Long, IndexProto.RowLocation> relocatedLocations()
+        {
+            return relocatedLocations;
+        }
+    }
+
+    static void throwIfAnyCompactionFailed(List<? extends Future<?>> compactionTasks)
+            throws MetadataException
+    {
+        for (Future<?> compactionTask : compactionTasks)
+        {
+            try
+            {
+                compactionTask.get();
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                throw new MetadataException("interrupted while waiting for Pixels compaction tasks", e);
+            }
+            catch (ExecutionException e)
+            {
+                throw new MetadataException("a Pixels compaction task failed", e.getCause());
+            }
+        }
     }
 }

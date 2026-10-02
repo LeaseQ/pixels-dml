@@ -82,4 +82,21 @@ class PixelsTagIndexTest
         assertArrayEquals(new byte[] {2}, primaryKeys.get(1));
         assertArrayEquals(new byte[] {3}, primaryKeys.get(2));
     }
+
+    @Test
+    void listsAllTagsAndTheirPrimaryKeys() throws Exception
+    {
+        index.append("vip".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                List.of(new byte[] {1}, new byte[] {2}));
+        index.append("gold".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                List.of(new byte[] {3}));
+
+        List<PixelsTagIndex.Entry> entries = index.entries();
+
+        assertEquals(2, entries.size());
+        assertArrayEquals("gold".getBytes(java.nio.charset.StandardCharsets.UTF_8), entries.get(0).tag());
+        assertArrayEquals(new byte[] {3}, entries.get(0).primaryKeys().get(0));
+        assertArrayEquals("vip".getBytes(java.nio.charset.StandardCharsets.UTF_8), entries.get(1).tag());
+        assertEquals(2, entries.get(1).primaryKeys().size());
+    }
 }

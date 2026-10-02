@@ -228,6 +228,11 @@ public class RocksDBFactory
         // Return cached handle if exists
         if (cfHandles.containsKey(cfName))
         {
+            // Every index wrapper owns one factory reference.  The existing
+            // handle fast path used to return without acquiring that
+            // reference, so closing a short-lived wrapper could close the
+            // shared RocksDB while another index was still using it.
+            getRocksDB();
             return cfHandles.get(cfName);
         }
 
