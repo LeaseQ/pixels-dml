@@ -84,6 +84,21 @@ class PixelsTagIndexTest
     }
 
     @Test
+    void latestTagReplacesThePreviousTagForTheSamePrimaryKey() throws Exception
+    {
+        byte[] primaryKey = new byte[] {1};
+        byte[] oldTag = "vip".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] latestTag = "gold".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        index.append(oldTag, List.of(primaryKey));
+        index.append(latestTag, List.of(primaryKey));
+
+        assertEquals(0, index.get(oldTag).size());
+        assertEquals(1, index.get(latestTag).size());
+        assertArrayEquals(primaryKey, index.get(latestTag).get(0));
+    }
+
+    @Test
     void listsAllTagsAndTheirPrimaryKeys() throws Exception
     {
         index.append("vip".getBytes(java.nio.charset.StandardCharsets.UTF_8),

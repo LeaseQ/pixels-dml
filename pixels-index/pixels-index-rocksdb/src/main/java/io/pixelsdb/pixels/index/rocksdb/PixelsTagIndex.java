@@ -10,11 +10,13 @@ import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
+import org.rocksdb.WriteBatch;
 import org.rocksdb.WriteOptions;
 
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -26,7 +28,8 @@ import static java.util.Objects.requireNonNull;
  * <p>The tag bytes are the RocksDB key. The value is a versioned list of
  * serialized primary keys, allowing one tag to refer to multiple rows. Appends
  * are serialized per index instance and are idempotent for an identical
- * primary-key byte sequence.</p>
+ * primary-key byte sequence. Appending a primary key to a new tag removes it
+ * from older tags, so the latest tag wins.</p>
  */
 public final class PixelsTagIndex implements Closeable
 {
@@ -95,14 +98,80 @@ public final class PixelsTagIndex implements Closeable
     {
         requireNonNull(tag, "tag is null");
         requireNonNull(primaryKeys, "primaryKeys is null");
-        byte[] merged = PixelsTagIndexCodec.append(readValue(tag), primaryKeys);
+        try (WriteBatch batch = new WriteBatch();
+             RocksIterator iterator = columnFamilyHandle == null
+                     ? rocksDB.newIterator()
+                     : rocksDB.newIterator(columnFamilyHandle))
+        {
+            // A primary key has one current tag. Remove it from every older
+            // tag before appending it to the latest tag. The synchronized
+            // method makes append order the update order for this index.
+            iterator.seekToFirst();
+            while (iterator.isValid())
+            {
+                if (!Arrays.equals(iterator.key(), tag))
+                {
+                    List<byte[]> existingPrimaryKeys = PixelsTagIndexCodec.decode(iterator.value());
+                    List<byte[]> remaining = new ArrayList<>();
+                    for (byte[] existingPrimaryKey : existingPrimaryKeys)
+                    {
+                        if (!contains(primaryKeys, existingPrimaryKey))
+                        {
+                            remaining.add(existingPrimaryKey);
+                        }
+                    }
+                    if (remaining.size() != existingPrimaryKeys.size())
+                    {
+                        if (remaining.isEmpty())
+                        {
+                            delete(batch, iterator.key());
+                        }
+                        else
+                        {
+                            put(batch, iterator.key(), PixelsTagIndexCodec.encode(remaining));
+                        }
+                    }
+                }
+                iterator.next();
+            }
+            put(batch, tag, PixelsTagIndexCodec.append(readValue(tag), primaryKeys));
+            rocksDB.write(writeOptions, batch);
+        }
+    }
+
+    private static boolean contains(List<byte[]> primaryKeys, byte[] candidate)
+    {
+        for (byte[] primaryKey : primaryKeys)
+        {
+            if (Arrays.equals(primaryKey, candidate))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void put(WriteBatch batch, byte[] key, byte[] value) throws RocksDBException
+    {
         if (columnFamilyHandle == null)
         {
-            rocksDB.put(writeOptions, tag, merged);
+            batch.put(key, value);
         }
         else
         {
-            rocksDB.put(columnFamilyHandle, writeOptions, tag, merged);
+            batch.put(columnFamilyHandle, key, value);
+        }
+    }
+
+    private void delete(WriteBatch batch, byte[] key) throws RocksDBException
+    {
+        if (columnFamilyHandle == null)
+        {
+            batch.delete(key);
+        }
+        else
+        {
+            batch.delete(columnFamilyHandle, key);
         }
     }
 
