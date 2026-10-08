@@ -6,12 +6,14 @@
 package io.pixelsdb.pixels.cli.executor;
 
 import io.pixelsdb.pixels.common.exception.MainIndexException;
+import io.pixelsdb.pixels.common.exception.IndexException;
 import io.pixelsdb.pixels.common.exception.MetadataException;
 import io.pixelsdb.pixels.common.exception.SinglePointIndexException;
 import io.pixelsdb.pixels.common.index.IndexOption;
 import io.pixelsdb.pixels.common.index.MainIndex;
 import io.pixelsdb.pixels.common.index.SinglePointIndex;
 import io.pixelsdb.pixels.common.index.SinglePointIndexFactory;
+import io.pixelsdb.pixels.common.index.service.IndexService;
 import io.pixelsdb.pixels.common.metadata.MetadataService;
 import io.pixelsdb.pixels.common.physical.Storage;
 import io.pixelsdb.pixels.common.utils.ConfigFactory;
@@ -36,7 +38,6 @@ import io.pixelsdb.pixels.core.vector.LongColumnVector;
 import io.pixelsdb.pixels.core.vector.ShortColumnVector;
 import io.pixelsdb.pixels.core.vector.VectorizedRowBatch;
 import io.pixelsdb.pixels.index.IndexProto;
-import io.pixelsdb.pixels.index.rocksdb.PixelsTagIndex;
 
 import com.google.protobuf.ByteString;
 
@@ -71,6 +72,7 @@ final class PixelsTagCompactor
     private final String tagColumnName;
     private final Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates;
     private final Map<PixelsTagCompactionUpdateMap.Location, Long> rowIdsBySourceLocation;
+    private final Map<Long, IndexProto.IndexKey> primaryKeysByRowId;
     private final Map<Long, IndexProto.RowLocation> relocatedLocations = new HashMap<>();
     private final MetadataService metadataService;
     private final long blockSize;
@@ -84,6 +86,7 @@ final class PixelsTagCompactor
             String tagColumnName,
             Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates,
             Map<PixelsTagCompactionUpdateMap.Location, Long> rowIdsBySourceLocation,
+            Map<Long, IndexProto.IndexKey> primaryKeysByRowId,
             MetadataService metadataService,
             long blockSize,
             short replication)
@@ -96,6 +99,8 @@ final class PixelsTagCompactor
         this.updates = Map.copyOf(requireNonNull(updates, "updates is null"));
         this.rowIdsBySourceLocation = Map.copyOf(requireNonNull(rowIdsBySourceLocation,
                 "rowIdsBySourceLocation is null"));
+        this.primaryKeysByRowId = Map.copyOf(requireNonNull(primaryKeysByRowId,
+                "primaryKeysByRowId is null"));
         this.metadataService = requireNonNull(metadataService, "metadataService is null");
         this.blockSize = blockSize;
         this.replication = replication;
@@ -107,49 +112,64 @@ final class PixelsTagCompactor
             Storage outputStorage,
             String targetPath,
             String tagColumnName,
-            List<PixelsTagIndex.Entry> tagEntries,
+            List<IndexProto.TagIndexEntry> tagEntries,
             long primaryTableId,
             long primaryIndexId,
-            MainIndex mainIndex,
+            IndexService indexService,
             MetadataService metadataService,
             long blockSize,
             short replication)
-            throws MainIndexException, SinglePointIndexException
+            throws IndexException, MainIndexException
     {
         requireNonNull(tagEntries, "tagEntries is null");
-        requireNonNull(mainIndex, "mainIndex is null");
+        requireNonNull(indexService, "indexService is null");
         requireNonNull(metadataService, "metadataService is null");
 
         Set<Long> rowIds = new HashSet<>();
         Map<ByteBuffer, Long> primaryKeyRowIds = new HashMap<>();
-        for (PixelsTagIndex.Entry entry : tagEntries)
+        Map<ByteBuffer, IndexProto.ResolvePrimaryEntry> resolvedByPrimaryKey = new HashMap<>();
+        Map<Long, IndexProto.IndexKey> primaryKeysByRowId = new HashMap<>();
+        List<IndexProto.IndexKey> primaryKeys = new ArrayList<>();
+        for (IndexProto.TagIndexEntry entry : tagEntries)
         {
-            for (byte[] encodedPrimaryKey : entry.primaryKeys())
+            for (ByteString encodedPrimaryKey : entry.getPrimaryKeysList())
             {
-                long rowId = lookupPrimaryRowId(primaryTableId, primaryIndexId,
-                        ByteString.copyFrom(encodedPrimaryKey), (key, bucketId) -> {
-                            SinglePointIndex primaryIndex = SinglePointIndexFactory.Instance().getSinglePointIndex(
-                                    primaryTableId, primaryIndexId,
-                                    IndexOption.builder().vNodeId(bucketId).build());
-                            return primaryIndex.getUniqueRowId(key);
-                        });
-                if (rowId < 0)
-                {
-                    throw new IllegalArgumentException("tag index primary key has no primary-index row id");
-                }
-                primaryKeyRowIds.put(ByteBuffer.wrap(encodedPrimaryKey), rowId);
-                rowIds.add(rowId);
+                primaryKeys.add(IndexProto.IndexKey.newBuilder()
+                        .setTableId(primaryTableId)
+                        .setIndexId(primaryIndexId)
+                        .setKey(encodedPrimaryKey)
+                        .setTimestamp(Long.MAX_VALUE)
+                        .build());
             }
+        }
+
+        for (IndexProto.ResolvePrimaryEntry resolved : indexService.resolvePrimaryEntries(
+                primaryTableId, primaryIndexId, primaryKeys))
+        {
+            long rowId = resolved.getRowId();
+            ByteBuffer primaryKey = ByteBuffer.wrap(resolved.getIndexKey().getKey().toByteArray());
+            primaryKeyRowIds.put(primaryKey, rowId);
+            resolvedByPrimaryKey.put(primaryKey, resolved);
+            primaryKeysByRowId.put(rowId, resolved.getIndexKey());
+            rowIds.add(rowId);
+        }
+        if (primaryKeyRowIds.size() != primaryKeys.stream()
+                .map(IndexProto.IndexKey::getKey)
+                .distinct()
+                .count())
+        {
+            throw new IllegalArgumentException("tag index primary key has no primary-index row id");
         }
 
         Map<Long, PixelsTagCompactionUpdateMap.Location> rowLocations = new HashMap<>();
         for (Long rowId : rowIds)
         {
-            IndexProto.RowLocation location = mainIndex.getLocation(rowId);
-            if (location == null)
-            {
-                throw new IllegalArgumentException("tag index row id has no main-index location: " + rowId);
-            }
+            IndexProto.RowLocation location = resolvedByPrimaryKey.values().stream()
+                    .filter(resolved -> resolved.getRowId() == rowId)
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException(
+                            "tag index row id has no primary-index location: " + rowId))
+                    .getRowLocation();
             rowLocations.put(rowId, new PixelsTagCompactionUpdateMap.Location(
                     location.getFileId(), location.getRgId(), location.getRgRowOffset()));
         }
@@ -161,25 +181,31 @@ final class PixelsTagCompactor
         }
 
         List<PixelsTagCompactionUpdateMap.Entry> entries = new ArrayList<>(tagEntries.size());
-        for (PixelsTagIndex.Entry entry : tagEntries)
+        for (IndexProto.TagIndexEntry entry : tagEntries)
         {
-            List<byte[]> encodedRowIds = new ArrayList<>(entry.primaryKeys().size());
-            for (byte[] encodedPrimaryKey : entry.primaryKeys())
+            List<byte[]> encodedRowIds = new ArrayList<>(entry.getPrimaryKeysCount());
+            for (ByteString encodedPrimaryKey : entry.getPrimaryKeysList())
             {
-                Long rowId = primaryKeyRowIds.get(ByteBuffer.wrap(encodedPrimaryKey));
+                Long rowId = primaryKeyRowIds.get(ByteBuffer.wrap(encodedPrimaryKey.toByteArray()));
                 if (rowId == null)
                 {
                     throw new IllegalArgumentException("tag index primary key resolution disappeared");
                 }
                 encodedRowIds.add(ByteBuffer.allocate(Long.BYTES).putLong(rowId).array());
             }
-            entries.add(new PixelsTagCompactionUpdateMap.Entry(entry.tag(), encodedRowIds));
+            entries.add(new PixelsTagCompactionUpdateMap.Entry(entry.getTag().toByteArray(), encodedRowIds));
         }
         Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates =
                 PixelsTagCompactionUpdateMap.build(entries, rowLocations);
         return new PixelsTagCompactor(
                 sourcePaths, inputStorage, outputStorage, targetPath, tagColumnName,
-                updates, rowIdsBySourceLocation, metadataService, blockSize, replication);
+                updates, rowIdsBySourceLocation, primaryKeysByRowId,
+                metadataService, blockSize, replication);
+    }
+
+    Map<Long, IndexProto.IndexKey> getPrimaryKeysByRowId()
+    {
+        return primaryKeysByRowId;
     }
 
     static long lookupPrimaryRowId(long tableId, long indexId, ByteString encodedPrimaryKey,

@@ -19,6 +19,7 @@
  */
 package io.pixelsdb.pixels.common.index.service;
 
+import com.google.protobuf.ByteString;
 import io.grpc.Internal;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -162,6 +163,68 @@ public class RPCIndexService implements IndexService
         else
         {
             throw new IndexException("Failed to lookup unique index, error code=" + response.getErrorCode());
+        }
+    }
+
+    @Override
+    public void appendTagIndexEntries(long tableId, long indexId,
+            List<IndexProto.TagIndexUpdate> updates) throws IndexException
+    {
+        IndexProto.AppendTagIndexEntriesResponse response = stub.appendTagIndexEntries(
+                IndexProto.AppendTagIndexEntriesRequest.newBuilder()
+                        .setTableId(tableId)
+                        .setIndexId(indexId)
+                        .addAllUpdates(updates)
+                        .build());
+        checkTagIndexResponse(response.getErrorCode(), "append tag index entries");
+    }
+
+    @Override
+    public List<ByteString> getTagIndexEntries(long tableId, long indexId, ByteString tag)
+            throws IndexException
+    {
+        IndexProto.GetTagIndexEntriesResponse response = stub.getTagIndexEntries(
+                IndexProto.GetTagIndexEntriesRequest.newBuilder()
+                        .setTableId(tableId)
+                        .setIndexId(indexId)
+                        .setTag(tag)
+                        .build());
+        checkTagIndexResponse(response.getErrorCode(), "get tag index entries");
+        return response.getPrimaryKeysList();
+    }
+
+    @Override
+    public List<IndexProto.TagIndexEntry> listTagIndexEntries(long tableId, long indexId)
+            throws IndexException
+    {
+        IndexProto.ListTagIndexEntriesResponse response = stub.listTagIndexEntries(
+                IndexProto.ListTagIndexEntriesRequest.newBuilder()
+                        .setTableId(tableId)
+                        .setIndexId(indexId)
+                        .build());
+        checkTagIndexResponse(response.getErrorCode(), "list tag index entries");
+        return response.getEntriesList();
+    }
+
+    @Override
+    public List<IndexProto.ResolvePrimaryEntry> resolvePrimaryEntries(long tableId, long indexId,
+            List<IndexProto.IndexKey> keys) throws IndexException
+    {
+        IndexProto.ResolvePrimaryEntriesResponse response = stub.resolvePrimaryEntries(
+                IndexProto.ResolvePrimaryEntriesRequest.newBuilder()
+                        .setTableId(tableId)
+                        .setIndexId(indexId)
+                        .addAllIndexKeys(keys)
+                        .build());
+        checkTagIndexResponse(response.getErrorCode(), "resolve primary entries");
+        return response.getEntriesList();
+    }
+
+    private static void checkTagIndexResponse(int errorCode, String operation) throws IndexException
+    {
+        if (errorCode != ErrorCode.SUCCESS)
+        {
+            throw new IndexException("Failed to " + operation + ", error code=" + errorCode);
         }
     }
 

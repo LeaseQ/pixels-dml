@@ -25,10 +25,13 @@ import io.pixelsdb.pixels.common.exception.MainIndexException;
 import io.pixelsdb.pixels.common.exception.RowIdException;
 import io.pixelsdb.pixels.common.exception.SinglePointIndexException;
 import io.pixelsdb.pixels.common.index.*;
+import io.pixelsdb.pixels.common.utils.IndexUtils;
 import io.pixelsdb.pixels.index.IndexProto;
 import io.pixelsdb.pixels.index.IndexServiceGrpc;
+import io.pixelsdb.pixels.index.rocksdb.PixelsTagIndex;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.rocksdb.RocksDBException;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -792,6 +795,136 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
         catch (SinglePointIndexException e)
         {
             builder.setErrorCode(ErrorCode.INDEX_REMOVE_SINGLE_POINT_INDEX_FAIL);
+        }
+        responseObserver.onNext(builder.build());
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void appendTagIndexEntries(IndexProto.AppendTagIndexEntriesRequest request,
+                                      StreamObserver<IndexProto.AppendTagIndexEntriesResponse> responseObserver)
+    {
+        IndexProto.AppendTagIndexEntriesResponse.Builder builder =
+                IndexProto.AppendTagIndexEntriesResponse.newBuilder();
+        try (PixelsTagIndex tagIndex = new PixelsTagIndex(request.getTableId(), request.getIndexId(), 0))
+        {
+            for (IndexProto.TagIndexUpdate update : request.getUpdatesList())
+            {
+                List<byte[]> primaryKeys = new ArrayList<>();
+                for (com.google.protobuf.ByteString primaryKey : update.getPrimaryKeysList())
+                {
+                    primaryKeys.add(primaryKey.toByteArray());
+                }
+                tagIndex.append(update.getTag().toByteArray(), primaryKeys);
+            }
+            builder.setErrorCode(ErrorCode.SUCCESS);
+        }
+        catch (RocksDBException | SinglePointIndexException | java.io.IOException e)
+        {
+            logger.error("Failed to append tag index entries", e);
+            builder.setErrorCode(ErrorCode.INDEX_PUT_SINGLE_POINT_INDEX_FAIL);
+        }
+        responseObserver.onNext(builder.build());
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void getTagIndexEntries(IndexProto.GetTagIndexEntriesRequest request,
+                                   StreamObserver<IndexProto.GetTagIndexEntriesResponse> responseObserver)
+    {
+        IndexProto.GetTagIndexEntriesResponse.Builder builder =
+                IndexProto.GetTagIndexEntriesResponse.newBuilder();
+        try (PixelsTagIndex tagIndex = new PixelsTagIndex(request.getTableId(), request.getIndexId(), 0))
+        {
+            for (byte[] primaryKey : tagIndex.get(request.getTag().toByteArray()))
+            {
+                builder.addPrimaryKeys(com.google.protobuf.ByteString.copyFrom(primaryKey));
+            }
+            builder.setErrorCode(ErrorCode.SUCCESS);
+        }
+        catch (RocksDBException | SinglePointIndexException | java.io.IOException e)
+        {
+            logger.error("Failed to get tag index entries", e);
+            builder.setErrorCode(ErrorCode.INDEX_GET_ROW_ID_FAIL);
+        }
+        responseObserver.onNext(builder.build());
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void listTagIndexEntries(IndexProto.ListTagIndexEntriesRequest request,
+                                    StreamObserver<IndexProto.ListTagIndexEntriesResponse> responseObserver)
+    {
+        IndexProto.ListTagIndexEntriesResponse.Builder builder =
+                IndexProto.ListTagIndexEntriesResponse.newBuilder();
+        try (PixelsTagIndex tagIndex = new PixelsTagIndex(request.getTableId(), request.getIndexId(), 0))
+        {
+            for (PixelsTagIndex.Entry entry : tagIndex.entries())
+            {
+                IndexProto.TagIndexEntry.Builder tagEntry = IndexProto.TagIndexEntry.newBuilder()
+                        .setTag(com.google.protobuf.ByteString.copyFrom(entry.tag()));
+                for (byte[] primaryKey : entry.primaryKeys())
+                {
+                    tagEntry.addPrimaryKeys(com.google.protobuf.ByteString.copyFrom(primaryKey));
+                }
+                builder.addEntries(tagEntry.build());
+            }
+            builder.setErrorCode(ErrorCode.SUCCESS);
+        }
+        catch (RocksDBException | SinglePointIndexException | java.io.IOException e)
+        {
+            logger.error("Failed to list tag index entries", e);
+            builder.setErrorCode(ErrorCode.INDEX_GET_ROW_ID_FAIL);
+        }
+        responseObserver.onNext(builder.build());
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void resolvePrimaryEntries(IndexProto.ResolvePrimaryEntriesRequest request,
+                                      StreamObserver<IndexProto.ResolvePrimaryEntriesResponse> responseObserver)
+    {
+        IndexProto.ResolvePrimaryEntriesResponse.Builder builder =
+                IndexProto.ResolvePrimaryEntriesResponse.newBuilder();
+        try
+        {
+            boolean failed = false;
+            MainIndex mainIndex = MainIndexFactory.Instance().getMainIndex(request.getTableId());
+            for (IndexProto.IndexKey key : request.getIndexKeysList())
+            {
+                int bucketId = IndexUtils.getBucketIdFromByteBuffer(key.getKey());
+                SinglePointIndex singlePointIndex = SinglePointIndexFactory.Instance()
+                        .getSinglePointIndex(request.getTableId(), request.getIndexId(),
+                                IndexOption.builder().vNodeId(bucketId).build());
+                long rowId = singlePointIndex.getUniqueRowId(key);
+                if (rowId < 0)
+                {
+                    builder.setErrorCode(ErrorCode.INDEX_ENTRY_NOT_FOUND);
+                    failed = true;
+                    break;
+                }
+                IndexProto.RowLocation location = mainIndex.getLocation(rowId);
+                if (location == null)
+                {
+                    builder.setErrorCode(ErrorCode.INDEX_GET_ROW_LOCATION_FAIL);
+                    failed = true;
+                    break;
+                }
+                builder.addEntries(IndexProto.ResolvePrimaryEntry.newBuilder()
+                        .setIndexKey(key)
+                        .setRowId(rowId)
+                        .setRowLocation(location)
+                        .build());
+            }
+            if (!failed)
+            {
+                builder.setErrorCode(ErrorCode.SUCCESS);
+            }
+        }
+        catch (SinglePointIndexException | MainIndexException e)
+        {
+            logger.error("Failed to resolve primary entries", e);
+            builder.setErrorCode(ErrorCode.INDEX_GET_ROW_ID_FAIL);
         }
         responseObserver.onNext(builder.build());
         responseObserver.onCompleted();

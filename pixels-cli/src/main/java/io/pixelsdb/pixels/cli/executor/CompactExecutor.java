@@ -22,9 +22,12 @@ package io.pixelsdb.pixels.cli.executor;
 import com.google.common.base.Joiner;
 import io.pixelsdb.pixels.cli.Main;
 import io.pixelsdb.pixels.common.exception.MetadataException;
+import io.pixelsdb.pixels.common.exception.IndexException;
 import io.pixelsdb.pixels.common.exception.RetinaException;
+import io.pixelsdb.pixels.common.index.IndexOption;
 import io.pixelsdb.pixels.common.index.MainIndex;
-import io.pixelsdb.pixels.common.index.MainIndexFactory;
+import io.pixelsdb.pixels.common.index.service.IndexService;
+import io.pixelsdb.pixels.common.index.service.IndexServiceProvider;
 import io.pixelsdb.pixels.common.metadata.MetadataService;
 import io.pixelsdb.pixels.common.metadata.domain.Compact;
 import io.pixelsdb.pixels.common.metadata.domain.File;
@@ -41,7 +44,6 @@ import io.pixelsdb.pixels.common.utils.PixelsFileNameUtils;
 import io.pixelsdb.pixels.core.compactor.CompactLayout;
 import io.pixelsdb.pixels.core.compactor.PixelsCompactor;
 import io.pixelsdb.pixels.index.IndexProto;
-import io.pixelsdb.pixels.index.rocksdb.PixelsTagIndex;
 import net.sourceforge.argparse4j.inf.Namespace;
 
 import java.io.IOException;
@@ -121,8 +123,9 @@ public class CompactExecutor implements CommandExecutor
         final boolean useTagCompactor = tagColumnName != null && !tagColumnName.trim().isEmpty();
         final long primaryTableId;
         final long primaryIndexId;
+        final IndexService indexService;
         final MainIndex mainIndex;
-        final List<PixelsTagIndex.Entry> tagEntries;
+        final List<IndexProto.TagIndexEntry> tagEntries;
         if (useTagCompactor)
         {
             Table table = metadataService.getTable(schemaName, tableName);
@@ -134,11 +137,9 @@ public class CompactExecutor implements CommandExecutor
             }
             primaryTableId = table.getId();
             primaryIndexId = primaryIndexMetadata.getId();
-            mainIndex = MainIndexFactory.Instance().getMainIndex(table.getId());
-            try (PixelsTagIndex tagIndex = new PixelsTagIndex(table.getId(), primaryIndexId, 0))
-            {
-                tagEntries = tagIndex.entries();
-            }
+            indexService = IndexServiceProvider.getService(IndexServiceProvider.ServiceMode.rpc);
+            mainIndex = null;
+            tagEntries = indexService.listTagIndexEntries(table.getId(), primaryIndexId);
             System.out.println("tag-aware compaction enabled for column '" + tagColumnName + "' with " +
                     tagEntries.size() + " tag entries.");
         }
@@ -146,6 +147,7 @@ public class CompactExecutor implements CommandExecutor
         {
             primaryTableId = -1;
             primaryIndexId = -1;
+            indexService = null;
             mainIndex = null;
             tagEntries = java.util.Collections.emptyList();
         }
@@ -278,15 +280,17 @@ public class CompactExecutor implements CommandExecutor
                     // Issue #192: run compaction in threads.
                     int numRowGroup;
                     Map<Long, IndexProto.RowLocation> relocatedLocations = java.util.Collections.emptyMap();
+                    Map<Long, IndexProto.IndexKey> primaryKeysByRowId = java.util.Collections.emptyMap();
                     if (useTagCompactor)
                     {
                         PixelsTagCompactor pixelsTagCompactor = PixelsTagCompactor.create(
                                 sourcePaths, orderStorage, compactStorage, finalTargetFilePath,
                                 tagColumnName, tagEntries, primaryTableId, primaryIndexId,
-                                mainIndex, metadataService,
+                                indexService, metadataService,
                                 blockSize, replication);
                         numRowGroup = pixelsTagCompactor.compact();
                         relocatedLocations = pixelsTagCompactor.getRelocatedLocations();
+                        primaryKeysByRowId = pixelsTagCompactor.getPrimaryKeysByRowId();
                     }
                     else
                     {
@@ -301,7 +305,7 @@ public class CompactExecutor implements CommandExecutor
                     compactFile.setNumRowGroup(numRowGroup);
                     compactFile.setPathId(finalTargetPath.getId());
                     compactionResults.offer(new CompactionResult(
-                            compactFile, finalTargetPath, relocatedLocations));
+                            compactFile, finalTargetPath, relocatedLocations, primaryKeysByRowId));
                     System.out.println("Compact file '" + finalTargetFilePath + "' is built in " +
                             ((System.currentTimeMillis() - threadStart) / 1000.0) + "s");
                     return null;
@@ -321,32 +325,40 @@ public class CompactExecutor implements CommandExecutor
         {
             compactFiles.add(result.file());
         }
-        if (!metadataService.addFiles(compactFiles))
-        {
-            throw new MetadataException("failed to add compact files to metadata");
-        }
-
         if (useTagCompactor)
         {
-            for (CompactionResult result : results)
+            MetadataPublication metadataPublication = new MetadataPublication()
             {
-                if (result.relocatedLocations().isEmpty())
+                @Override
+                public void addFiles(List<File> files) throws MetadataException
                 {
-                    continue;
-                }
-                long fileId = metadataService.getFileId(File.getFilePath(result.path(), result.file()));
-                for (Map.Entry<Long, IndexProto.RowLocation> entry : result.relocatedLocations().entrySet())
-                {
-                    IndexProto.RowLocation location = entry.getValue().toBuilder()
-                            .setFileId(fileId)
-                            .build();
-                    if (!mainIndex.putEntry(entry.getKey(), location))
+                    if (!metadataService.addFiles(files))
                     {
-                        throw new MetadataException("failed to update main index for compacted row " +
-                                entry.getKey());
+                        throw new MetadataException("failed to add compact files to metadata");
                     }
                 }
-            }
+
+                @Override
+                public long getFileId(String filePath) throws MetadataException
+                {
+                    return metadataService.getFileId(filePath);
+                }
+
+                @Override
+                public void deleteFiles(List<Long> fileIds) throws MetadataException
+                {
+                    if (!metadataService.deleteFiles(fileIds))
+                    {
+                        throw new MetadataException("failed to roll back compact files from metadata");
+                    }
+                }
+
+            };
+            publishCompactionResults(results, indexService, primaryTableId, primaryIndexId, metadataPublication);
+        }
+        else if (!metadataService.addFiles(compactFiles))
+        {
+            throw new MetadataException("failed to add compact files to metadata");
         }
 
         if (retinaService.isEnabled())
@@ -371,18 +383,167 @@ public class CompactExecutor implements CommandExecutor
                 (endTime - startTime) / 1000 + "s.");
     }
 
-    private static final class CompactionResult
+    interface MetadataPublication
+    {
+        void addFiles(List<File> files) throws MetadataException;
+
+        long getFileId(String filePath) throws MetadataException;
+
+        void deleteFiles(List<Long> fileIds) throws MetadataException;
+    }
+
+    static void publishCompactionResults(
+            List<CompactionResult> results,
+            MainIndex mainIndex,
+            MetadataPublication metadataPublication)
+            throws MetadataException
+    {
+        List<File> compactFiles = new ArrayList<>(results.size());
+        for (CompactionResult result : results)
+        {
+            compactFiles.add(result.file());
+        }
+        metadataPublication.addFiles(compactFiles);
+
+        List<Long> publishedFileIds = new ArrayList<>(results.size());
+        try
+        {
+            Map<CompactionResult, Long> fileIds = new LinkedHashMap<>();
+            for (CompactionResult result : results)
+            {
+                long fileId = metadataPublication.getFileId(File.getFilePath(result.path(), result.file()));
+                fileIds.put(result, fileId);
+                publishedFileIds.add(fileId);
+            }
+            for (CompactionResult result : results)
+            {
+                if (result.relocatedLocations().isEmpty())
+                {
+                    continue;
+                }
+                long fileId = fileIds.get(result);
+                for (Map.Entry<Long, IndexProto.RowLocation> entry : result.relocatedLocations().entrySet())
+                {
+                    IndexProto.RowLocation location = entry.getValue().toBuilder()
+                            .setFileId(fileId)
+                            .build();
+                    if (!mainIndex.putEntry(entry.getKey(), location))
+                    {
+                        throw new MetadataException("failed to update main index for compacted row " +
+                                entry.getKey());
+                    }
+                }
+            }
+        }
+        catch (MetadataException failure)
+        {
+            rollbackPublishedFiles(metadataPublication, publishedFileIds, failure);
+            throw failure;
+        }
+        catch (RuntimeException failure)
+        {
+            rollbackPublishedFiles(metadataPublication, publishedFileIds, failure);
+            throw new MetadataException("failed to publish compacted Pixels files", failure);
+        }
+    }
+
+    static void publishCompactionResults(
+            List<CompactionResult> results,
+            IndexService indexService,
+            long tableId,
+            long indexId,
+            MetadataPublication metadataPublication)
+            throws MetadataException
+    {
+        List<File> compactFiles = new ArrayList<>(results.size());
+        for (CompactionResult result : results)
+        {
+            compactFiles.add(result.file());
+        }
+        metadataPublication.addFiles(compactFiles);
+
+        List<Long> publishedFileIds = new ArrayList<>(results.size());
+        try
+        {
+            for (CompactionResult result : results)
+            {
+                long fileId = metadataPublication.getFileId(File.getFilePath(result.path(), result.file()));
+                publishedFileIds.add(fileId);
+                for (Map.Entry<Long, IndexProto.RowLocation> relocated : result.relocatedLocations().entrySet())
+                {
+                    IndexProto.IndexKey primaryKey = result.primaryKeysByRowId().get(relocated.getKey());
+                    if (primaryKey == null)
+                    {
+                        throw new MetadataException("missing primary key for compacted row " + relocated.getKey());
+                    }
+                    IndexProto.PrimaryIndexEntry entry = IndexProto.PrimaryIndexEntry.newBuilder()
+                            .setIndexKey(primaryKey)
+                            .setRowId(relocated.getKey())
+                            .setRowLocation(relocated.getValue().toBuilder().setFileId(fileId).build())
+                            .build();
+                    int bucketId = io.pixelsdb.pixels.common.utils.IndexUtils
+                            .getBucketIdFromByteBuffer(primaryKey.getKey());
+                    if (!indexService.putPrimaryIndexEntry(entry,
+                            IndexOption.builder().vNodeId(bucketId).build()))
+                    {
+                        throw new MetadataException("failed to update IndexServer for compacted row " +
+                                relocated.getKey());
+                    }
+                }
+            }
+        }
+        catch (MetadataException failure)
+        {
+            rollbackPublishedFiles(metadataPublication, publishedFileIds, failure);
+            throw failure;
+        }
+        catch (IndexException | RuntimeException failure)
+        {
+            rollbackPublishedFiles(metadataPublication, publishedFileIds, failure);
+            throw new MetadataException("failed to publish compacted Pixels index locations", failure);
+        }
+    }
+
+    private static void rollbackPublishedFiles(
+            MetadataPublication metadataPublication,
+            List<Long> publishedFileIds,
+            Exception failure)
+    {
+        if (publishedFileIds.isEmpty())
+        {
+            return;
+        }
+        try
+        {
+            metadataPublication.deleteFiles(publishedFileIds);
+        }
+        catch (MetadataException cleanupFailure)
+        {
+            failure.addSuppressed(cleanupFailure);
+        }
+    }
+
+    static final class CompactionResult
     {
         private final File file;
         private final Path path;
         private final Map<Long, IndexProto.RowLocation> relocatedLocations;
+        private final Map<Long, IndexProto.IndexKey> primaryKeysByRowId;
 
-        private CompactionResult(File file, Path path,
+        CompactionResult(File file, Path path,
                 Map<Long, IndexProto.RowLocation> relocatedLocations)
+        {
+            this(file, path, relocatedLocations, java.util.Collections.emptyMap());
+        }
+
+        CompactionResult(File file, Path path,
+                Map<Long, IndexProto.RowLocation> relocatedLocations,
+                Map<Long, IndexProto.IndexKey> primaryKeysByRowId)
         {
             this.file = file;
             this.path = path;
             this.relocatedLocations = relocatedLocations;
+            this.primaryKeysByRowId = primaryKeysByRowId;
         }
 
         private File file()
@@ -398,6 +559,11 @@ public class CompactExecutor implements CommandExecutor
         private Map<Long, IndexProto.RowLocation> relocatedLocations()
         {
             return relocatedLocations;
+        }
+
+        private Map<Long, IndexProto.IndexKey> primaryKeysByRowId()
+        {
+            return primaryKeysByRowId;
         }
     }
 

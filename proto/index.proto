@@ -57,6 +57,13 @@ service IndexService {
   rpc OpenIndex (OpenIndexRequest) returns (OpenIndexResponse);
   rpc CloseIndex (CloseIndexRequest) returns (CloseIndexResponse);
   rpc RemoveIndex (RemoveIndexRequest) returns (RemoveIndexResponse);
+  // DML tag index operations. The tag index is owned by the IndexServer so all
+  // Trino workers and compaction processes observe the same mapping.
+  rpc AppendTagIndexEntries (AppendTagIndexEntriesRequest) returns (AppendTagIndexEntriesResponse);
+  rpc GetTagIndexEntries (GetTagIndexEntriesRequest) returns (GetTagIndexEntriesResponse);
+  rpc ListTagIndexEntries (ListTagIndexEntriesRequest) returns (ListTagIndexEntriesResponse);
+  // Resolve primary keys together with their row ids and current locations.
+  rpc ResolvePrimaryEntries (ResolvePrimaryEntriesRequest) returns (ResolvePrimaryEntriesResponse);
 }
 
 message IndexKey {
@@ -306,4 +313,62 @@ message RemoveIndexRequest {
 
 message RemoveIndexResponse {
   int32 errorCode = 1;
+}
+
+message TagIndexUpdate {
+  bytes tag = 1;
+  repeated bytes primaryKeys = 2;
+}
+
+message TagIndexEntry {
+  bytes tag = 1;
+  repeated bytes primaryKeys = 2;
+}
+
+message AppendTagIndexEntriesRequest {
+  uint64 tableId = 1;
+  uint64 indexId = 2;
+  repeated TagIndexUpdate updates = 3;
+}
+
+message AppendTagIndexEntriesResponse {
+  int32 errorCode = 1;
+}
+
+message GetTagIndexEntriesRequest {
+  uint64 tableId = 1;
+  uint64 indexId = 2;
+  bytes tag = 3;
+}
+
+message GetTagIndexEntriesResponse {
+  int32 errorCode = 1;
+  repeated bytes primaryKeys = 2;
+}
+
+message ListTagIndexEntriesRequest {
+  uint64 tableId = 1;
+  uint64 indexId = 2;
+}
+
+message ListTagIndexEntriesResponse {
+  int32 errorCode = 1;
+  repeated TagIndexEntry entries = 2;
+}
+
+message ResolvePrimaryEntriesRequest {
+  uint64 tableId = 1;
+  uint64 indexId = 2;
+  repeated IndexKey indexKeys = 3;
+}
+
+message ResolvePrimaryEntry {
+  IndexKey indexKey = 1;
+  uint64 rowId = 2;
+  RowLocation rowLocation = 3;
+}
+
+message ResolvePrimaryEntriesResponse {
+  int32 errorCode = 1;
+  repeated ResolvePrimaryEntry entries = 2;
 }

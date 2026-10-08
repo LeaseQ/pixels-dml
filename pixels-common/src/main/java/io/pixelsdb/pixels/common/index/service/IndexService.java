@@ -19,6 +19,7 @@
  */
 package io.pixelsdb.pixels.common.index.service;
 
+import com.google.protobuf.ByteString;
 import io.pixelsdb.pixels.common.exception.IndexException;
 import io.pixelsdb.pixels.common.index.IndexOption;
 import io.pixelsdb.pixels.common.index.ResolvedPrimary;
@@ -54,6 +55,42 @@ public interface IndexService
      * @return the row locations or null if the index entry is not found
      */
     List<IndexProto.RowLocation> lookupNonUniqueIndex(IndexProto.IndexKey key, IndexOption indexOption) throws IndexException;
+
+    /**
+     * Append DML tag-to-primary-key mappings to the shared tag index.
+     * Implementations must apply updates in list order so a later tag replaces
+     * an earlier tag for the same primary key.
+     */
+    default void appendTagIndexEntries(long tableId, long indexId,
+            List<IndexProto.TagIndexUpdate> updates) throws IndexException
+    {
+        throw new UnsupportedOperationException(
+                "appendTagIndexEntries is not supported by this IndexService scheme");
+    }
+
+    /** Return the primary keys currently associated with one tag. */
+    default List<ByteString> getTagIndexEntries(long tableId, long indexId, ByteString tag)
+            throws IndexException
+    {
+        throw new UnsupportedOperationException(
+                "getTagIndexEntries is not supported by this IndexService scheme");
+    }
+
+    /** Return all tag mappings for compaction. */
+    default List<IndexProto.TagIndexEntry> listTagIndexEntries(long tableId, long indexId)
+            throws IndexException
+    {
+        throw new UnsupportedOperationException(
+                "listTagIndexEntries is not supported by this IndexService scheme");
+    }
+
+    /** Resolve primary keys to their row ids and current main-index locations. */
+    default List<IndexProto.ResolvePrimaryEntry> resolvePrimaryEntries(long tableId, long indexId,
+            List<IndexProto.IndexKey> keys) throws IndexException
+    {
+        throw new UnsupportedOperationException(
+                "resolvePrimaryEntries is not supported by this IndexService scheme");
+    }
 
     /**
      * Put an index entry into the primary index.
@@ -348,4 +385,3 @@ public interface IndexService
                 "deleteMainIndexRange is not supported by this IndexService scheme");
     }
 }
-
