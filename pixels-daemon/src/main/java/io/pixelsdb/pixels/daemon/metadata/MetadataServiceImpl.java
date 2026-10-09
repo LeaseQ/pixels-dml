@@ -23,6 +23,7 @@ import com.alibaba.fastjson.JSON;
 import com.google.common.collect.ImmutableList;
 import com.google.protobuf.ProtocolStringList;
 import io.grpc.stub.StreamObserver;
+import io.pixelsdb.pixels.common.exception.MetadataException;
 import io.pixelsdb.pixels.common.metadata.domain.*;
 import io.pixelsdb.pixels.common.node.NodeService;
 import io.pixelsdb.pixels.common.physical.Storage;
@@ -36,6 +37,8 @@ import io.pixelsdb.pixels.daemon.metadata.dao.*;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.net.URI;
+import java.util.Locale;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -68,6 +71,129 @@ public class MetadataServiceImpl extends MetadataServiceGrpc.MetadataServiceImpl
     private final SchemaVersionDao schemaVersionDao = DaoFactory.Instance().getSchemaVersionDao();
 
     public MetadataServiceImpl () { }
+
+    /**
+     * Split and normalize a metadata file URI using the same scheme-bearing form used by PATHS.
+     * PATHS stores a directory URI (normally without a trailing slash), while storage status
+     * objects contain the full file URI.  Keeping this conversion in one place avoids subtly
+     * different handling in getFileId and getFileType.
+     */
+    static FilePathParts parseFilePathUri(String filePathUri) throws MetadataException
+    {
+        if (filePathUri == null || filePathUri.trim().isEmpty())
+        {
+            throw new MetadataException("file path URI is empty");
+        }
+
+        String input = filePathUri.trim();
+        int schemeSeparator = input.indexOf("://");
+        if (schemeSeparator <= 0)
+        {
+            throw new MetadataException("file path URI does not contain a storage scheme prefix: " + filePathUri);
+        }
+        String scheme = input.substring(0, schemeSeparator).toLowerCase(Locale.ROOT);
+        if (!Storage.Scheme.isValid(scheme))
+        {
+            throw new MetadataException("unsupported storage scheme in file path URI: " + filePathUri);
+        }
+
+        final String normalized;
+        try
+        {
+            URI uri = URI.create(input).normalize();
+            // URI schemes are case-insensitive; PATHS uses the lower-case enum spelling.
+            String uriString = uri.toString();
+            String uriSuffix = uriString.substring(uriString.indexOf(':'));
+            // java.net.URI may collapse an empty file authority from file:///path to file:/path.
+            // PATHS and LocalFS use the explicit file:// form, so restore that form before
+            // looking up the directory URI.
+            if (uriSuffix.startsWith(":/") && !uriSuffix.startsWith("://"))
+            {
+                uriSuffix = "://" + uriSuffix.substring(1);
+            }
+            normalized = scheme + uriSuffix;
+        }
+        catch (IllegalArgumentException e)
+        {
+            throw new MetadataException("invalid file path URI: " + filePathUri, e);
+        }
+
+        String fileUri = stripTrailingSlashes(normalized);
+        int lastSlashIndex = fileUri.lastIndexOf('/');
+        int schemePathStart = fileUri.indexOf("://") + 3;
+        if (lastSlashIndex < schemePathStart || lastSlashIndex == fileUri.length() - 1)
+        {
+            throw new MetadataException("file path URI does not contain a file name: " + filePathUri);
+        }
+        String directoryUri = stripTrailingSlashes(fileUri.substring(0, lastSlashIndex));
+        String fileName = fileUri.substring(lastSlashIndex + 1);
+        if (directoryUri.isEmpty() || fileName.isEmpty())
+        {
+            throw new MetadataException("file path URI does not contain a directory and file name: " + filePathUri);
+        }
+        return new FilePathParts(directoryUri, fileName);
+    }
+
+    /**
+     * Resolve a PATHS row and turn a missing row into a descriptive metadata error instead of
+     * allowing a null path to cause a NullPointerException in the RPC handler.
+     */
+    static MetadataProto.Path resolvePath(PathDao pathDao, String directoryUri) throws MetadataException
+    {
+        String normalizedDirectoryUri = stripTrailingSlashes(directoryUri);
+        MetadataProto.Path path = pathDao.getByPathUri(normalizedDirectoryUri);
+        // Be tolerant of metadata created by older versions that retained the trailing slash.
+        if (path == null && !normalizedDirectoryUri.endsWith("/") && !isUriRoot(normalizedDirectoryUri))
+        {
+            path = pathDao.getByPathUri(normalizedDirectoryUri + "/");
+        }
+        if (path == null)
+        {
+            throw new MetadataException("path metadata not found for directory URI '" +
+                    normalizedDirectoryUri + "'");
+        }
+        return path;
+    }
+
+    private static String stripTrailingSlashes(String uri)
+    {
+        String normalized = uri;
+        int schemePathStart = normalized.indexOf("://");
+        int minimumLength = schemePathStart < 0 ? 0 : schemePathStart + 3;
+        while (normalized.length() > minimumLength + 1 && normalized.endsWith("/"))
+        {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized;
+    }
+
+    private static boolean isUriRoot(String uri)
+    {
+        int schemePathStart = uri.indexOf("://");
+        return schemePathStart >= 0 && uri.length() == schemePathStart + 4 && uri.endsWith("/");
+    }
+
+    static final class FilePathParts
+    {
+        private final String directoryUri;
+        private final String fileName;
+
+        FilePathParts(String directoryUri, String fileName)
+        {
+            this.directoryUri = directoryUri;
+            this.fileName = fileName;
+        }
+
+        String getDirectoryUri()
+        {
+            return directoryUri;
+        }
+
+        String getFileName()
+        {
+            return fileName;
+        }
+    }
 
     /**
      * Build the initial schema version proto object without range index.
@@ -1386,29 +1512,27 @@ public class MetadataServiceImpl extends MetadataServiceGrpc.MetadataServiceImpl
                 .setToken(request.getHeader().getToken());
 
         MetadataProto.GetFileIdResponse.Builder responseBuilder = MetadataProto.GetFileIdResponse.newBuilder();
-        String dirPathUri = request.getFilePathUri();
-        int lastSlashIndex = dirPathUri.lastIndexOf("/");
-        String fileName = dirPathUri.substring(lastSlashIndex + 1);
-        dirPathUri = dirPathUri.substring(0, lastSlashIndex);
-        if (Storage.Scheme.fromPath(dirPathUri) == null)
+        try
         {
-            headerBuilder.setErrorCode(METADATA_GET_FILE_ID_FAILED)
-                    .setErrorMsg("the file path uri does not contain storage scheme prefix");
-            responseBuilder.setHeader(headerBuilder);
-        }
-        else
-        {
-            MetadataProto.Path path = this.pathDao.getByPathUri(dirPathUri);
-            MetadataProto.File file = this.fileDao.getByPathIdAndFileName(path.getId(), fileName);
+            FilePathParts parts = parseFilePathUri(request.getFilePathUri());
+            MetadataProto.Path path = resolvePath(this.pathDao, parts.getDirectoryUri());
+            MetadataProto.File file = this.fileDao.getByPathIdAndFileName(path.getId(), parts.getFileName());
             if (file != null)
             {
                 headerBuilder.setErrorCode(SUCCESS).setErrorMsg("");
                 responseBuilder.setFileId(file.getId()).setHeader(headerBuilder);
-            } else
+            }
+            else
             {
-                headerBuilder.setErrorCode(METADATA_GET_FILE_ID_FAILED).setErrorMsg("get file id by path uri failed");
+                headerBuilder.setErrorCode(METADATA_GET_FILE_ID_FAILED)
+                        .setErrorMsg("file metadata not found for '" + request.getFilePathUri() + "'");
                 responseBuilder.setHeader(headerBuilder);
             }
+        }
+        catch (MetadataException e)
+        {
+            headerBuilder.setErrorCode(METADATA_GET_FILE_ID_FAILED).setErrorMsg(e.getMessage());
+            responseBuilder.setHeader(headerBuilder);
         }
 
         responseObserver.onNext(responseBuilder.build());
@@ -1423,29 +1547,27 @@ public class MetadataServiceImpl extends MetadataServiceGrpc.MetadataServiceImpl
                 .setToken(request.getHeader().getToken());
 
         MetadataProto.GetFileTypeResponse.Builder responseBuilder = MetadataProto.GetFileTypeResponse.newBuilder();
-        String dirPathUri = request.getFilePathUri();
-        int lastSlashIndex = dirPathUri.lastIndexOf("/");
-        String fileName = dirPathUri.substring(lastSlashIndex + 1);
-        dirPathUri = dirPathUri.substring(0, lastSlashIndex);
-        if (Storage.Scheme.fromPath(dirPathUri) == null)
+        try
         {
-            headerBuilder.setErrorCode(METADATA_GET_FILE_TYPE_FAILED)
-                    .setErrorMsg("the file path uri does not contain storage scheme prefix");
-            responseBuilder.setHeader(headerBuilder);
-        }
-        else
-        {
-            MetadataProto.Path path = this.pathDao.getByPathUri(dirPathUri);
-            MetadataProto.File file = this.fileDao.getByPathIdAndFileName(path.getId(), fileName);
+            FilePathParts parts = parseFilePathUri(request.getFilePathUri());
+            MetadataProto.Path path = resolvePath(this.pathDao, parts.getDirectoryUri());
+            MetadataProto.File file = this.fileDao.getByPathIdAndFileName(path.getId(), parts.getFileName());
             if (file != null)
             {
                 headerBuilder.setErrorCode(SUCCESS).setErrorMsg("");
                 responseBuilder.setFileType(file.getType()).setHeader(headerBuilder);
-            } else
+            }
+            else
             {
-                headerBuilder.setErrorCode(METADATA_GET_FILE_TYPE_FAILED).setErrorMsg("get file type by path uri failed");
+                headerBuilder.setErrorCode(METADATA_GET_FILE_TYPE_FAILED)
+                        .setErrorMsg("file metadata not found for '" + request.getFilePathUri() + "'");
                 responseBuilder.setHeader(headerBuilder);
             }
+        }
+        catch (MetadataException e)
+        {
+            headerBuilder.setErrorCode(METADATA_GET_FILE_TYPE_FAILED).setErrorMsg(e.getMessage());
+            responseBuilder.setHeader(headerBuilder);
         }
 
         responseObserver.onNext(responseBuilder.build());
