@@ -43,11 +43,38 @@ class CompactExecutorPublicationTest
         assertEquals(List.of(101L), publication.deletedFileIds);
     }
 
+    @Test
+    void publishesTemporaryFileByAtomicallyRetiringItsSources()
+            throws MetadataException
+    {
+        File file = new File();
+        file.setName("compact.pxl");
+        file.setType(File.Type.TEMPORARY_GC);
+        file.setPathId(7L);
+        file.setNumRowGroup(1);
+        Path path = new Path();
+        path.setUri("file:///compact");
+        CompactExecutor.CompactionResult result = new CompactExecutor.CompactionResult(
+                file, path, List.of(11L, 12L), Map.of(), Map.of());
+        RecordingPublication publication = new RecordingPublication(101L);
+
+        CompactExecutor.publishCompactionResults(List.of(result), publication, 12345L);
+
+        assertEquals(File.Type.TEMPORARY_GC, publication.addedFiles.get(0).getType());
+        assertEquals(101L, publication.swappedNewFileId);
+        assertEquals(List.of(11L, 12L), publication.swappedOldFileIds);
+        assertEquals(12345L, publication.swapCleanupAt);
+    }
+
     private static final class RecordingPublication implements CompactExecutor.MetadataPublication
     {
         private final long fileId;
         private int addCalls;
         private List<Long> deletedFileIds = List.of();
+        private List<File> addedFiles = List.of();
+        private long swappedNewFileId = -1L;
+        private List<Long> swappedOldFileIds = List.of();
+        private long swapCleanupAt = -1L;
 
         private RecordingPublication(long fileId)
         {
@@ -58,6 +85,7 @@ class CompactExecutorPublicationTest
         public void addFiles(List<File> files)
         {
             addCalls++;
+            addedFiles = List.copyOf(files);
         }
 
         @Override
@@ -70,6 +98,14 @@ class CompactExecutorPublicationTest
         public void deleteFiles(List<Long> fileIds)
         {
             deletedFileIds = List.copyOf(fileIds);
+        }
+
+        @Override
+        public void atomicSwapFiles(long newFileId, List<Long> oldFileIds, long cleanupAt)
+        {
+            swappedNewFileId = newFileId;
+            swappedOldFileIds = List.copyOf(oldFileIds);
+            swapCleanupAt = cleanupAt;
         }
     }
 
