@@ -229,11 +229,14 @@ public class CompactExecutor implements CommandExecutor
                         : compactLayout;
 
                 List<String> sourcePaths = new ArrayList<>();
+                List<Long> oldFileIds = new ArrayList<>();
                 for (int j = 0; j < batchSize; ++j)
                 {
                     if (!groupStatuses.get(i + j).getPath().endsWith("/"))
                     {
-                        sourcePaths.add(groupStatuses.get(i + j).getPath());
+                        String sourcePath = groupStatuses.get(i + j).getPath();
+                        sourcePaths.add(sourcePath);
+                        oldFileIds.add(metadataService.getFileId(sourcePath));
                     }
                 }
 
@@ -274,6 +277,7 @@ public class CompactExecutor implements CommandExecutor
                 final String finalTargetFileName = targetFileName;
                 final String finalTargetFilePath = targetFilePath;
                 final Path finalTargetPath = targetPath;
+                final List<Long> finalOldFileIds = List.copyOf(oldFileIds);
                 long threadStart = System.currentTimeMillis();
 
                 compactionTasks.add(compactExecutor.submit((Callable<Void>) () -> {
@@ -301,11 +305,14 @@ public class CompactExecutor implements CommandExecutor
                     }
                     File compactFile = new File();
                     compactFile.setName(finalTargetFileName);
-                    compactFile.setType(File.Type.REGULAR);
+                    // Keep the new file hidden until indexes have been updated and the
+                    // metadata transaction atomically swaps it with its source files.
+                    compactFile.setType(File.Type.TEMPORARY_GC);
                     compactFile.setNumRowGroup(numRowGroup);
                     compactFile.setPathId(finalTargetPath.getId());
                     compactionResults.offer(new CompactionResult(
-                            compactFile, finalTargetPath, relocatedLocations, primaryKeysByRowId));
+                            compactFile, finalTargetPath, finalOldFileIds,
+                            relocatedLocations, primaryKeysByRowId));
                     System.out.println("Compact file '" + finalTargetFilePath + "' is built in " +
                             ((System.currentTimeMillis() - threadStart) / 1000.0) + "s");
                     return null;
@@ -320,45 +327,48 @@ public class CompactExecutor implements CommandExecutor
         while (!compactExecutor.awaitTermination(100, TimeUnit.SECONDS));
         throwIfAnyCompactionFailed(compactionTasks);
         List<CompactionResult> results = new ArrayList<>(compactionResults);
-        List<File> compactFiles = new ArrayList<>(results.size());
-        for (CompactionResult result : results)
+        long cleanupAt = getRetireDeadline(configFactory);
+        MetadataPublication metadataPublication = new MetadataPublication()
         {
-            compactFiles.add(result.file());
-        }
+            @Override
+            public void addFiles(List<File> files) throws MetadataException
+            {
+                if (!metadataService.addFiles(files))
+                {
+                    throw new MetadataException("failed to add compact files to metadata");
+                }
+            }
+
+            @Override
+            public long getFileId(String filePath) throws MetadataException
+            {
+                return metadataService.getFileId(filePath);
+            }
+
+            @Override
+            public void deleteFiles(List<Long> fileIds) throws MetadataException
+            {
+                if (!metadataService.deleteFiles(fileIds))
+                {
+                    throw new MetadataException("failed to roll back compact files from metadata");
+                }
+            }
+
+            @Override
+            public void atomicSwapFiles(long newFileId, List<Long> oldFileIds, long deadline)
+                    throws MetadataException
+            {
+                metadataService.atomicSwapFiles(newFileId, oldFileIds, deadline);
+            }
+        };
         if (useTagCompactor)
         {
-            MetadataPublication metadataPublication = new MetadataPublication()
-            {
-                @Override
-                public void addFiles(List<File> files) throws MetadataException
-                {
-                    if (!metadataService.addFiles(files))
-                    {
-                        throw new MetadataException("failed to add compact files to metadata");
-                    }
-                }
-
-                @Override
-                public long getFileId(String filePath) throws MetadataException
-                {
-                    return metadataService.getFileId(filePath);
-                }
-
-                @Override
-                public void deleteFiles(List<Long> fileIds) throws MetadataException
-                {
-                    if (!metadataService.deleteFiles(fileIds))
-                    {
-                        throw new MetadataException("failed to roll back compact files from metadata");
-                    }
-                }
-
-            };
-            publishCompactionResults(results, indexService, primaryTableId, primaryIndexId, metadataPublication);
+            publishCompactionResults(results, indexService, primaryTableId, primaryIndexId,
+                    metadataPublication, cleanupAt);
         }
-        else if (!metadataService.addFiles(compactFiles))
+        else
         {
-            throw new MetadataException("failed to add compact files to metadata");
+            publishCompactionResults(results, metadataPublication, cleanupAt);
         }
 
         if (retinaService.isEnabled())
@@ -390,12 +400,26 @@ public class CompactExecutor implements CommandExecutor
         long getFileId(String filePath) throws MetadataException;
 
         void deleteFiles(List<Long> fileIds) throws MetadataException;
+
+        void atomicSwapFiles(long newFileId, List<Long> oldFileIds, long cleanupAt)
+                throws MetadataException;
+    }
+
+    private static long getRetireDeadline(ConfigFactory configFactory)
+    {
+        String delayHours = configFactory.getProperty("retina.storage.gc.file.retire.delay.hours");
+        double hours = delayHours == null ? 24.0 : Double.parseDouble(delayHours);
+        if (hours < 0)
+        {
+            throw new IllegalArgumentException("retire delay must be non-negative");
+        }
+        return System.currentTimeMillis() + (long) (hours * 3_600_000L);
     }
 
     static void publishCompactionResults(
             List<CompactionResult> results,
-            MainIndex mainIndex,
-            MetadataPublication metadataPublication)
+            MetadataPublication metadataPublication,
+            long cleanupAt)
             throws MetadataException
     {
         List<File> compactFiles = new ArrayList<>(results.size());
@@ -408,13 +432,41 @@ public class CompactExecutor implements CommandExecutor
         List<Long> publishedFileIds = new ArrayList<>(results.size());
         try
         {
-            Map<CompactionResult, Long> fileIds = new LinkedHashMap<>();
-            for (CompactionResult result : results)
-            {
-                long fileId = metadataPublication.getFileId(File.getFilePath(result.path(), result.file()));
-                fileIds.put(result, fileId);
-                publishedFileIds.add(fileId);
-            }
+            Map<CompactionResult, Long> fileIds = getPublishedFileIds(results, metadataPublication,
+                    publishedFileIds);
+            atomicSwapCompactionResults(results, fileIds, metadataPublication, cleanupAt);
+        }
+        catch (MetadataException failure)
+        {
+            rollbackPublishedFiles(metadataPublication, publishedFileIds, failure);
+            throw failure;
+        }
+        catch (RuntimeException failure)
+        {
+            rollbackPublishedFiles(metadataPublication, publishedFileIds, failure);
+            throw new MetadataException("failed to publish compacted Pixels files", failure);
+        }
+    }
+
+    static void publishCompactionResults(
+            List<CompactionResult> results,
+            MainIndex mainIndex,
+            MetadataPublication metadataPublication,
+            long cleanupAt)
+            throws MetadataException
+    {
+        List<File> compactFiles = new ArrayList<>(results.size());
+        for (CompactionResult result : results)
+        {
+            compactFiles.add(result.file());
+        }
+        metadataPublication.addFiles(compactFiles);
+
+        List<Long> publishedFileIds = new ArrayList<>(results.size());
+        try
+        {
+            Map<CompactionResult, Long> fileIds = getPublishedFileIds(results, metadataPublication,
+                    publishedFileIds);
             for (CompactionResult result : results)
             {
                 if (result.relocatedLocations().isEmpty())
@@ -434,6 +486,7 @@ public class CompactExecutor implements CommandExecutor
                     }
                 }
             }
+            atomicSwapCompactionResults(results, fileIds, metadataPublication, cleanupAt);
         }
         catch (MetadataException failure)
         {
@@ -452,7 +505,8 @@ public class CompactExecutor implements CommandExecutor
             IndexService indexService,
             long tableId,
             long indexId,
-            MetadataPublication metadataPublication)
+            MetadataPublication metadataPublication,
+            long cleanupAt)
             throws MetadataException
     {
         List<File> compactFiles = new ArrayList<>(results.size());
@@ -465,10 +519,11 @@ public class CompactExecutor implements CommandExecutor
         List<Long> publishedFileIds = new ArrayList<>(results.size());
         try
         {
+            Map<CompactionResult, Long> fileIds = getPublishedFileIds(results, metadataPublication,
+                    publishedFileIds);
             for (CompactionResult result : results)
             {
-                long fileId = metadataPublication.getFileId(File.getFilePath(result.path(), result.file()));
-                publishedFileIds.add(fileId);
+                long fileId = fileIds.get(result);
                 for (Map.Entry<Long, IndexProto.RowLocation> relocated : result.relocatedLocations().entrySet())
                 {
                     IndexProto.IndexKey primaryKey = result.primaryKeysByRowId().get(relocated.getKey());
@@ -491,6 +546,7 @@ public class CompactExecutor implements CommandExecutor
                     }
                 }
             }
+            atomicSwapCompactionResults(results, fileIds, metadataPublication, cleanupAt);
         }
         catch (MetadataException failure)
         {
@@ -501,6 +557,56 @@ public class CompactExecutor implements CommandExecutor
         {
             rollbackPublishedFiles(metadataPublication, publishedFileIds, failure);
             throw new MetadataException("failed to publish compacted Pixels index locations", failure);
+        }
+    }
+
+    static void publishCompactionResults(
+            List<CompactionResult> results,
+            MainIndex mainIndex,
+            MetadataPublication metadataPublication)
+            throws MetadataException
+    {
+        publishCompactionResults(results, mainIndex, metadataPublication, System.currentTimeMillis());
+    }
+
+    static void publishCompactionResults(
+            List<CompactionResult> results,
+            IndexService indexService,
+            long tableId,
+            long indexId,
+            MetadataPublication metadataPublication)
+            throws MetadataException
+    {
+        publishCompactionResults(results, indexService, tableId, indexId,
+                metadataPublication, System.currentTimeMillis());
+    }
+
+    private static Map<CompactionResult, Long> getPublishedFileIds(
+            List<CompactionResult> results,
+            MetadataPublication metadataPublication,
+            List<Long> publishedFileIds)
+            throws MetadataException
+    {
+        Map<CompactionResult, Long> fileIds = new LinkedHashMap<>();
+        for (CompactionResult result : results)
+        {
+            long fileId = metadataPublication.getFileId(File.getFilePath(result.path(), result.file()));
+            fileIds.put(result, fileId);
+            publishedFileIds.add(fileId);
+        }
+        return fileIds;
+    }
+
+    private static void atomicSwapCompactionResults(
+            List<CompactionResult> results,
+            Map<CompactionResult, Long> fileIds,
+            MetadataPublication metadataPublication,
+            long cleanupAt)
+            throws MetadataException
+    {
+        for (CompactionResult result : results)
+        {
+            metadataPublication.atomicSwapFiles(fileIds.get(result), result.oldFileIds(), cleanupAt);
         }
     }
 
@@ -527,21 +633,32 @@ public class CompactExecutor implements CommandExecutor
     {
         private final File file;
         private final Path path;
+        private final List<Long> oldFileIds;
         private final Map<Long, IndexProto.RowLocation> relocatedLocations;
         private final Map<Long, IndexProto.IndexKey> primaryKeysByRowId;
 
         CompactionResult(File file, Path path,
                 Map<Long, IndexProto.RowLocation> relocatedLocations)
         {
-            this(file, path, relocatedLocations, java.util.Collections.emptyMap());
+            this(file, path, java.util.Collections.emptyList(), relocatedLocations,
+                    java.util.Collections.emptyMap());
         }
 
         CompactionResult(File file, Path path,
                 Map<Long, IndexProto.RowLocation> relocatedLocations,
                 Map<Long, IndexProto.IndexKey> primaryKeysByRowId)
         {
+            this(file, path, java.util.Collections.emptyList(), relocatedLocations, primaryKeysByRowId);
+        }
+
+        CompactionResult(File file, Path path,
+                List<Long> oldFileIds,
+                Map<Long, IndexProto.RowLocation> relocatedLocations,
+                Map<Long, IndexProto.IndexKey> primaryKeysByRowId)
+        {
             this.file = file;
             this.path = path;
+            this.oldFileIds = List.copyOf(oldFileIds);
             this.relocatedLocations = relocatedLocations;
             this.primaryKeysByRowId = primaryKeysByRowId;
         }
@@ -554,6 +671,11 @@ public class CompactExecutor implements CommandExecutor
         private Path path()
         {
             return path;
+        }
+
+        private List<Long> oldFileIds()
+        {
+            return oldFileIds;
         }
 
         private Map<Long, IndexProto.RowLocation> relocatedLocations()
