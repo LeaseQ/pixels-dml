@@ -808,20 +808,26 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                 IndexProto.AppendTagIndexEntriesResponse.newBuilder();
         try (PixelsTagIndex tagIndex = new PixelsTagIndex(request.getTableId(), request.getIndexId(), 0))
         {
-            for (IndexProto.TagIndexUpdate update : request.getUpdatesList())
-            {
-                List<byte[]> primaryKeys = new ArrayList<>();
-                for (com.google.protobuf.ByteString primaryKey : update.getPrimaryKeysList())
-                {
-                    primaryKeys.add(primaryKey.toByteArray());
-                }
-                tagIndex.append(update.getTag().toByteArray(), primaryKeys);
-            }
+            List<PixelsTagIndex.VersionedUpdate> updates = request.getUpdatesList().stream()
+                    .map(update -> new PixelsTagIndex.VersionedUpdate(
+                            update.getTag().toByteArray(), update.getTransactionTimestamp(),
+                            update.getPrimaryKeysList().stream()
+                                    .map(com.google.protobuf.ByteString::toByteArray).toList()))
+                    .toList();
+            logger.info("append tag index entries: tableId={}, indexId={}, updates={}, timestamps={}",
+                    request.getTableId(), request.getIndexId(), updates.size(),
+                    updates.stream().map(PixelsTagIndex.VersionedUpdate::transactionTimestamp).toList());
+            tagIndex.appendBatch(updates);
             builder.setErrorCode(ErrorCode.SUCCESS);
         }
         catch (RocksDBException | SinglePointIndexException | java.io.IOException e)
         {
             logger.error("Failed to append tag index entries", e);
+            builder.setErrorCode(ErrorCode.INDEX_PUT_SINGLE_POINT_INDEX_FAIL);
+        }
+        catch (RuntimeException e)
+        {
+            logger.error("Invalid tag index update request", e);
             builder.setErrorCode(ErrorCode.INDEX_PUT_SINGLE_POINT_INDEX_FAIL);
         }
         responseObserver.onNext(builder.build());
