@@ -60,6 +60,8 @@ service IndexService {
   // DML tag index operations. The tag index is owned by the IndexServer so all
   // Trino workers and compaction processes observe the same mapping.
   rpc AppendTagIndexEntries (AppendTagIndexEntriesRequest) returns (AppendTagIndexEntriesResponse);
+  // Remove tag-index versions older than a transaction low watermark.
+  rpc CompactTagIndex (CompactTagIndexRequest) returns (CompactTagIndexResponse);
   rpc GetTagIndexEntries (GetTagIndexEntriesRequest) returns (GetTagIndexEntriesResponse);
   rpc ListTagIndexEntries (ListTagIndexEntriesRequest) returns (ListTagIndexEntriesResponse);
   // Resolve primary keys together with their row ids and current locations.
@@ -318,6 +320,7 @@ message RemoveIndexResponse {
 message TagIndexUpdate {
   bytes tag = 1;
   repeated bytes primaryKeys = 2;
+  int64 transactionTimestamp = 3;
 }
 
 message TagIndexEntry {
@@ -335,10 +338,22 @@ message AppendTagIndexEntriesResponse {
   int32 errorCode = 1;
 }
 
+message CompactTagIndexRequest {
+  uint64 tableId = 1;
+  uint64 indexId = 2;
+  int64 safeTimestamp = 3;
+}
+
+message CompactTagIndexResponse {
+  int32 errorCode = 1;
+  uint64 removedPrimaryKeys = 2;
+}
+
 message GetTagIndexEntriesRequest {
   uint64 tableId = 1;
   uint64 indexId = 2;
   bytes tag = 3;
+  bool prefix = 4;
 }
 
 message GetTagIndexEntriesResponse {
