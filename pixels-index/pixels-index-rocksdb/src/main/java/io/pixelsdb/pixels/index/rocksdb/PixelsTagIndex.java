@@ -38,6 +38,8 @@ import static java.util.Objects.requireNonNull;
  */
 public final class PixelsTagIndex implements Closeable
 {
+    private static final int VALUE_CACHE_MAX_ENTRIES = 8192;
+    private static final long VALUE_CACHE_MAX_BYTES = 128L * 1024 * 1024;
     private static final byte VERSIONED_KEY_MARKER = 1;
     private static final int VERSIONED_KEY_HEADER_SIZE = 1 + Integer.BYTES;
     private static final int TRANSACTION_TIMESTAMP_SIZE = Long.BYTES;
@@ -153,6 +155,14 @@ public final class PixelsTagIndex implements Closeable
     private final ColumnFamilyHandle columnFamilyHandle;
     private final WriteOptions writeOptions;
     private final boolean ownsFactoryReference;
+    /**
+     * Values already read or written by this long-lived index instance.  The
+     * IndexServer keeps one instance per table/index, so repeated UPDATE
+     * batches do not have to read the same versioned record from RocksDB.
+     */
+    private final Map<ByteBuffer, List<byte[]>> valueCache =
+            new LinkedHashMap<>(128, 0.75f, true);
+    private long valueCacheBytes;
 
     /**
      * Constructor used by unit tests or callers that own the RocksDB handle.
@@ -204,34 +214,87 @@ public final class PixelsTagIndex implements Closeable
         if (updates.isEmpty()) {
             return;
         }
-        Map<ByteBuffer, LatestValue> latestByPrimaryKey = new LinkedHashMap<>();
+        if (updates.size() == 1)
+        {
+            appendSingleVersionedUpdate(updates.get(0));
+            return;
+        }
+        Map<ByteBuffer, VersionedKey> latestByPrimaryKey = new LinkedHashMap<>();
         for (VersionedUpdate update : updates) {
             requireNonNull(update, "update is null");
             if (update.transactionTimestamp() <= 0) {
                 throw new IllegalArgumentException("batched tag updates require a positive transaction timestamp");
             }
+            // One immutable version key is enough for all primary keys in this
+            // update.  Cloning the tag and allocating a LatestValue per row
+            // becomes material for million-row UPDATE batches.
+            VersionedKey versionedKey = new VersionedKey(update.tag(), update.transactionTimestamp());
             for (byte[] primaryKey : update.primaryKeys()) {
                 ByteBuffer key = ByteBuffer.wrap(primaryKey);
-                LatestValue previous = latestByPrimaryKey.get(key);
-                if (previous == null || update.transactionTimestamp() >= previous.timestamp()) {
-                    latestByPrimaryKey.put(key, new LatestValue(update.tag(), update.transactionTimestamp()));
+                VersionedKey previous = latestByPrimaryKey.get(key);
+                if (previous == null || versionedKey.timestamp() >= previous.timestamp()) {
+                    latestByPrimaryKey.put(key, versionedKey);
                 }
             }
         }
         Map<VersionedKey, List<byte[]>> grouped = new LinkedHashMap<>();
-        for (Map.Entry<ByteBuffer, LatestValue> entry : latestByPrimaryKey.entrySet()) {
-            LatestValue value = entry.getValue();
-            VersionedKey key = new VersionedKey(value.tag(), value.timestamp());
-            grouped.computeIfAbsent(key, ignored -> new ArrayList<>())
-                    .add(entry.getKey().array().clone());
+        for (Map.Entry<ByteBuffer, VersionedKey> entry : latestByPrimaryKey.entrySet()) {
+            grouped.computeIfAbsent(entry.getValue(), ignored -> new ArrayList<>())
+                    .add(entry.getKey().array());
         }
         try (WriteBatch batch = new WriteBatch()) {
-            for (Map.Entry<VersionedKey, List<byte[]>> entry : grouped.entrySet()) {
-                byte[] indexKey = createVersionedKey(entry.getKey().tag(), entry.getKey().timestamp());
-                put(batch, indexKey, PixelsTagIndexCodec.append(readValue(indexKey), entry.getValue()));
+            List<VersionedKey> versionedKeys = new ArrayList<>(grouped.keySet());
+            List<byte[]> indexKeys = new ArrayList<>(versionedKeys.size());
+            for (VersionedKey versionedKey : versionedKeys)
+            {
+                indexKeys.add(createVersionedKey(versionedKey.tag(), versionedKey.timestamp()));
             }
+            List<List<byte[]>> existingValues = readPrimaryKeysCached(indexKeys);
+            Map<ByteBuffer, List<byte[]>> updatedValues = new LinkedHashMap<>();
+            boolean changed = false;
+            for (int i = 0; i < versionedKeys.size(); i++) {
+                VersionedKey versionedKey = versionedKeys.get(i);
+                byte[] indexKey = indexKeys.get(i);
+                List<byte[]> existing = existingValues.get(i);
+                List<byte[]> merged = PixelsTagIndexCodec.append(existing, grouped.get(versionedKey));
+                if (merged.size() != existing.size())
+                {
+                    put(batch, indexKey, PixelsTagIndexCodec.encode(merged));
+                    changed = true;
+                }
+                updatedValues.put(ByteBuffer.wrap(indexKey.clone()), merged);
+            }
+            if (changed)
+            {
+                rocksDB.write(writeOptions, batch);
+            }
+            for (Map.Entry<ByteBuffer, List<byte[]>> entry : updatedValues.entrySet())
+            {
+                cachePut(entry.getKey().array(), entry.getValue());
+            }
+        }
+    }
+
+    private void appendSingleVersionedUpdate(VersionedUpdate update) throws RocksDBException
+    {
+        requireNonNull(update, "update is null");
+        if (update.transactionTimestamp() <= 0)
+        {
+            throw new IllegalArgumentException("batched tag updates require a positive transaction timestamp");
+        }
+        byte[] indexKey = createVersionedKey(update.tag(), update.transactionTimestamp());
+        List<byte[]> existing = readPrimaryKeysCached(indexKey);
+        List<byte[]> merged = PixelsTagIndexCodec.append(existing, update.primaryKeys());
+        if (merged.size() == existing.size())
+        {
+            return;
+        }
+        try (WriteBatch batch = new WriteBatch())
+        {
+            put(batch, indexKey, PixelsTagIndexCodec.encode(merged));
             rocksDB.write(writeOptions, batch);
         }
+        cachePut(indexKey, merged);
     }
 
     /**
@@ -297,6 +360,7 @@ public final class PixelsTagIndex implements Closeable
             }
             if (removed > 0) {
                 rocksDB.write(writeOptions, batch);
+                clearCache();
             }
         }
         return removed;
@@ -340,8 +404,10 @@ public final class PixelsTagIndex implements Closeable
                 }
                 iterator.next();
             }
-            put(batch, tag, PixelsTagIndexCodec.append(readValue(tag), primaryKeys));
+            byte[] value = PixelsTagIndexCodec.append(readValue(tag), primaryKeys);
+            put(batch, tag, value);
             rocksDB.write(writeOptions, batch);
+            clearCache();
         }
     }
 
@@ -468,6 +534,108 @@ public final class PixelsTagIndex implements Closeable
         return rocksDB.get(columnFamilyHandle, tag);
     }
 
+    private List<byte[]> readPrimaryKeysCached(byte[] key) throws RocksDBException
+    {
+        ByteBuffer cacheKey = ByteBuffer.wrap(key);
+        if (valueCache.containsKey(cacheKey))
+        {
+            return valueCache.get(cacheKey);
+        }
+        byte[] value = readValue(key);
+        List<byte[]> primaryKeys = value == null ? List.of() : PixelsTagIndexCodec.decode(value);
+        cachePut(key, primaryKeys);
+        return primaryKeys;
+    }
+
+    private List<List<byte[]>> readPrimaryKeysCached(List<byte[]> keys) throws RocksDBException
+    {
+        List<List<byte[]>> result = new ArrayList<>(Collections.nCopies(keys.size(), null));
+        List<Integer> missingIndexes = new ArrayList<>();
+        List<byte[]> missingKeys = new ArrayList<>();
+        for (int i = 0; i < keys.size(); i++)
+        {
+            byte[] key = keys.get(i);
+            ByteBuffer cacheKey = ByteBuffer.wrap(key);
+            if (valueCache.containsKey(cacheKey))
+            {
+                result.set(i, valueCache.get(cacheKey));
+            }
+            else
+            {
+                missingIndexes.add(i);
+                missingKeys.add(key);
+            }
+        }
+        if (missingKeys.isEmpty())
+        {
+            return result;
+        }
+
+        List<byte[]> values = columnFamilyHandle == null
+                ? rocksDB.multiGetAsList(missingKeys)
+                : rocksDB.multiGetAsList(
+                        Collections.nCopies(missingKeys.size(), columnFamilyHandle), missingKeys);
+        for (int i = 0; i < missingIndexes.size(); i++)
+        {
+            byte[] value = values.get(i);
+            List<byte[]> primaryKeys = value == null ? List.of() : PixelsTagIndexCodec.decode(value);
+            int resultIndex = missingIndexes.get(i);
+            result.set(resultIndex, primaryKeys);
+            cachePut(keys.get(resultIndex), primaryKeys);
+        }
+        return result;
+    }
+
+    private void cachePut(byte[] key, List<byte[]> value)
+    {
+        ByteBuffer cacheKey = ByteBuffer.wrap(key.clone());
+        List<byte[]> previous = valueCache.remove(cacheKey);
+        if (previous != null)
+        {
+            valueCacheBytes -= estimateValueBytes(previous);
+        }
+
+        long weight = estimateValueBytes(value);
+        if (weight > VALUE_CACHE_MAX_BYTES)
+        {
+            return;
+        }
+        valueCache.put(cacheKey, value);
+        valueCacheBytes += weight;
+        while (valueCacheBytes > VALUE_CACHE_MAX_BYTES || valueCache.size() > VALUE_CACHE_MAX_ENTRIES)
+        {
+            java.util.Iterator<Map.Entry<ByteBuffer, List<byte[]>>> iterator =
+                    valueCache.entrySet().iterator();
+            if (!iterator.hasNext())
+            {
+                break;
+            }
+            Map.Entry<ByteBuffer, List<byte[]>> eldest = iterator.next();
+            valueCacheBytes -= estimateValueBytes(eldest.getValue());
+            iterator.remove();
+        }
+    }
+
+    private static long estimateValueBytes(List<byte[]> value)
+    {
+        long bytes = 64L;
+        for (byte[] primaryKey : value)
+        {
+            bytes += 16L + primaryKey.length;
+            if (bytes > VALUE_CACHE_MAX_BYTES)
+            {
+                return VALUE_CACHE_MAX_BYTES + 1;
+            }
+        }
+        return bytes;
+    }
+
+    private void clearCache()
+    {
+        valueCache.clear();
+        valueCacheBytes = 0L;
+    }
+
     private static byte[] createVersionedKeyPrefix(byte[] tag)
     {
         ByteBuffer buffer = ByteBuffer.allocate(VERSIONED_KEY_HEADER_SIZE + tag.length);
@@ -532,6 +700,7 @@ public final class PixelsTagIndex implements Closeable
     @Override
     public void close() throws IOException
     {
+        clearCache();
         writeOptions.close();
         if (ownsFactoryReference)
         {

@@ -27,6 +27,7 @@ import io.pixelsdb.pixels.core.TypeDescription;
 import io.pixelsdb.pixels.core.encoding.EncodingLevel;
 import io.pixelsdb.pixels.core.reader.PixelsReaderOption;
 import io.pixelsdb.pixels.core.reader.PixelsRecordReader;
+import io.pixelsdb.pixels.core.utils.PrimaryKeyBytes;
 import io.pixelsdb.pixels.core.vector.BinaryColumnVector;
 import io.pixelsdb.pixels.core.vector.BooleanColumnVector;
 import io.pixelsdb.pixels.core.vector.ByteColumnVector;
@@ -58,6 +59,8 @@ import static java.util.Objects.requireNonNull;
 final class PixelsTagCompactor
 {
     private static final int READ_BATCH_SIZE = 1024;
+    /** Keep source-row resolution requests bounded for wide or composite primary keys. */
+    static final int MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC = 16_384;
 
     @FunctionalInterface
     interface PrimaryLookup
@@ -71,12 +74,73 @@ final class PixelsTagCompactor
     private final String targetPath;
     private final String tagColumnName;
     private final Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates;
-    private final Map<PixelsTagCompactionUpdateMap.Location, Long> rowIdsBySourceLocation;
     private final Map<Long, IndexProto.IndexKey> primaryKeysByRowId;
     private final Map<Long, IndexProto.RowLocation> relocatedLocations = new HashMap<>();
+    private final IndexService indexService;
+    private final long primaryTableId;
+    private final long primaryIndexId;
+    private final List<String> primaryKeyColumnNames;
+    private final List<TypeDescription> primaryKeyTypes;
     private final MetadataService metadataService;
     private final long blockSize;
     private final short replication;
+    private long primaryResolveRowCount;
+    private int primaryResolveRpcCount;
+    private long primaryResolveNanos;
+
+    /**
+     * Immutable snapshot of the durable tag index used by all compaction tasks.
+     * Resolving this once is important: the same tag rows are visible to every
+     * source-file task, so resolving them in each task multiplies index RPCs by
+     * the compaction concurrency.
+     */
+    static final class TagIndexSnapshot
+    {
+        private final Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates;
+        private final int taggedRowCount;
+        private final int primaryResolveRowCount;
+        private final int primaryResolveRpcCount;
+        private final long primaryResolveNanos;
+
+        private TagIndexSnapshot(
+                Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates,
+                int taggedRowCount,
+                int primaryResolveRowCount,
+                int primaryResolveRpcCount,
+                long primaryResolveNanos)
+        {
+            this.updates = Map.copyOf(requireNonNull(updates, "updates is null"));
+            this.taggedRowCount = taggedRowCount;
+            this.primaryResolveRowCount = primaryResolveRowCount;
+            this.primaryResolveRpcCount = primaryResolveRpcCount;
+            this.primaryResolveNanos = primaryResolveNanos;
+        }
+
+        Map<PixelsTagCompactionUpdateMap.Location, byte[]> getUpdates()
+        {
+            return updates;
+        }
+
+        int getTaggedRowCount()
+        {
+            return taggedRowCount;
+        }
+
+        int getPrimaryResolveRowCount()
+        {
+            return primaryResolveRowCount;
+        }
+
+        int getPrimaryResolveRpcCount()
+        {
+            return primaryResolveRpcCount;
+        }
+
+        long getPrimaryResolveNanos()
+        {
+            return primaryResolveNanos;
+        }
+    }
 
     private PixelsTagCompactor(
             List<String> sourcePaths,
@@ -85,8 +149,12 @@ final class PixelsTagCompactor
             String targetPath,
             String tagColumnName,
             Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates,
-            Map<PixelsTagCompactionUpdateMap.Location, Long> rowIdsBySourceLocation,
             Map<Long, IndexProto.IndexKey> primaryKeysByRowId,
+            IndexService indexService,
+            long primaryTableId,
+            long primaryIndexId,
+            List<String> primaryKeyColumnNames,
+            List<TypeDescription> primaryKeyTypes,
             MetadataService metadataService,
             long blockSize,
             short replication)
@@ -97,10 +165,23 @@ final class PixelsTagCompactor
         this.targetPath = requireNonNull(targetPath, "targetPath is null");
         this.tagColumnName = requireNonNull(tagColumnName, "tagColumnName is null");
         this.updates = Map.copyOf(requireNonNull(updates, "updates is null"));
-        this.rowIdsBySourceLocation = Map.copyOf(requireNonNull(rowIdsBySourceLocation,
-                "rowIdsBySourceLocation is null"));
-        this.primaryKeysByRowId = Map.copyOf(requireNonNull(primaryKeysByRowId,
+        // Tag rows are resolved before the rewrite; source rows are resolved in
+        // bounded batches while they are read, so this map must remain mutable
+        // until compact() has finished.
+        this.primaryKeysByRowId = new HashMap<>(requireNonNull(primaryKeysByRowId,
                 "primaryKeysByRowId is null"));
+        this.indexService = requireNonNull(indexService, "indexService is null");
+        this.primaryTableId = primaryTableId;
+        this.primaryIndexId = primaryIndexId;
+        this.primaryKeyColumnNames = List.copyOf(requireNonNull(primaryKeyColumnNames,
+                "primaryKeyColumnNames is null"));
+        this.primaryKeyTypes = List.copyOf(requireNonNull(primaryKeyTypes,
+                "primaryKeyTypes is null"));
+        if (this.primaryKeyColumnNames.isEmpty() ||
+                this.primaryKeyColumnNames.size() != this.primaryKeyTypes.size())
+        {
+            throw new IllegalArgumentException("primary-key column names and types must have the same non-zero size");
+        }
         this.metadataService = requireNonNull(metadataService, "metadataService is null");
         this.blockSize = blockSize;
         this.replication = replication;
@@ -116,68 +197,106 @@ final class PixelsTagCompactor
             long primaryTableId,
             long primaryIndexId,
             IndexService indexService,
+            List<String> primaryKeyColumnNames,
+            List<TypeDescription> primaryKeyTypes,
             MetadataService metadataService,
             long blockSize,
             short replication)
             throws IndexException, MainIndexException
     {
-        requireNonNull(tagEntries, "tagEntries is null");
+        TagIndexSnapshot snapshot = prepareTagIndexSnapshot(
+                tagEntries, primaryTableId, primaryIndexId, indexService);
+        return create(sourcePaths, inputStorage, outputStorage, targetPath, tagColumnName,
+                snapshot, primaryTableId, primaryIndexId, indexService, primaryKeyColumnNames,
+                primaryKeyTypes, metadataService, blockSize, replication);
+    }
+
+    static PixelsTagCompactor create(
+            List<String> sourcePaths,
+            Storage inputStorage,
+            Storage outputStorage,
+            String targetPath,
+            String tagColumnName,
+            TagIndexSnapshot snapshot,
+            long primaryTableId,
+            long primaryIndexId,
+            IndexService indexService,
+            List<String> primaryKeyColumnNames,
+            List<TypeDescription> primaryKeyTypes,
+            MetadataService metadataService,
+            long blockSize,
+            short replication)
+            throws MainIndexException
+    {
+        requireNonNull(snapshot, "snapshot is null");
         requireNonNull(indexService, "indexService is null");
         requireNonNull(metadataService, "metadataService is null");
+        return new PixelsTagCompactor(
+                sourcePaths, inputStorage, outputStorage, targetPath, tagColumnName,
+                snapshot.getUpdates(), java.util.Collections.emptyMap(), indexService,
+                primaryTableId, primaryIndexId,
+                primaryKeyColumnNames, primaryKeyTypes, metadataService, blockSize, replication);
+    }
 
-        Set<Long> rowIds = new HashSet<>();
+    static TagIndexSnapshot prepareTagIndexSnapshot(
+            List<IndexProto.TagIndexEntry> tagEntries,
+            long primaryTableId,
+            long primaryIndexId,
+            IndexService indexService)
+            throws IndexException
+    {
+        requireNonNull(tagEntries, "tagEntries is null");
+        requireNonNull(indexService, "indexService is null");
+
         Map<ByteBuffer, Long> primaryKeyRowIds = new HashMap<>();
-        Map<ByteBuffer, IndexProto.ResolvePrimaryEntry> resolvedByPrimaryKey = new HashMap<>();
         Map<Long, IndexProto.IndexKey> primaryKeysByRowId = new HashMap<>();
-        List<IndexProto.IndexKey> primaryKeys = new ArrayList<>();
+        Map<Long, PixelsTagCompactionUpdateMap.Location> rowLocations = new HashMap<>();
+        Set<ByteBuffer> distinctPrimaryKeys = new HashSet<>();
+        List<IndexProto.IndexKey> pendingKeys = new ArrayList<>(MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC);
+        int resolveRpcCount = 0;
+        int resolvedRowCount = 0;
+        long resolveNanos = 0L;
+
         for (IndexProto.TagIndexEntry entry : tagEntries)
         {
             for (ByteString encodedPrimaryKey : entry.getPrimaryKeysList())
             {
-                primaryKeys.add(IndexProto.IndexKey.newBuilder()
-                        .setTableId(primaryTableId)
-                        .setIndexId(primaryIndexId)
-                        .setKey(encodedPrimaryKey)
-                        .setTimestamp(Long.MAX_VALUE)
-                        .build());
+                ByteBuffer primaryKey = ByteBuffer.wrap(encodedPrimaryKey.toByteArray());
+                if (distinctPrimaryKeys.add(primaryKey))
+                {
+                    pendingKeys.add(IndexProto.IndexKey.newBuilder()
+                            .setTableId(primaryTableId)
+                            .setIndexId(primaryIndexId)
+                            .setKey(encodedPrimaryKey)
+                            .setTimestamp(Long.MAX_VALUE)
+                            .build());
+                }
+                if (pendingKeys.size() >= MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC)
+                {
+                    long start = System.nanoTime();
+                    List<IndexProto.ResolvePrimaryEntry> resolvedEntries = indexService.resolvePrimaryEntries(
+                            primaryTableId, primaryIndexId, pendingKeys);
+                    resolveNanos += System.nanoTime() - start;
+                    resolveRpcCount++;
+                    resolvedRowCount += recordTagRows(
+                            pendingKeys, resolvedEntries, primaryKeyRowIds, primaryKeysByRowId, rowLocations);
+                    pendingKeys.clear();
+                }
             }
         }
-
-        for (IndexProto.ResolvePrimaryEntry resolved : indexService.resolvePrimaryEntries(
-                primaryTableId, primaryIndexId, primaryKeys))
+        if (!pendingKeys.isEmpty())
         {
-            long rowId = resolved.getRowId();
-            ByteBuffer primaryKey = ByteBuffer.wrap(resolved.getIndexKey().getKey().toByteArray());
-            primaryKeyRowIds.put(primaryKey, rowId);
-            resolvedByPrimaryKey.put(primaryKey, resolved);
-            primaryKeysByRowId.put(rowId, resolved.getIndexKey());
-            rowIds.add(rowId);
+            long start = System.nanoTime();
+            List<IndexProto.ResolvePrimaryEntry> resolvedEntries = indexService.resolvePrimaryEntries(
+                    primaryTableId, primaryIndexId, pendingKeys);
+            resolveNanos += System.nanoTime() - start;
+            resolveRpcCount++;
+            resolvedRowCount += recordTagRows(
+                    pendingKeys, resolvedEntries, primaryKeyRowIds, primaryKeysByRowId, rowLocations);
         }
-        if (primaryKeyRowIds.size() != primaryKeys.stream()
-                .map(IndexProto.IndexKey::getKey)
-                .distinct()
-                .count())
+        if (primaryKeyRowIds.size() != distinctPrimaryKeys.size())
         {
             throw new IllegalArgumentException("tag index primary key has no primary-index row id");
-        }
-
-        Map<Long, PixelsTagCompactionUpdateMap.Location> rowLocations = new HashMap<>();
-        for (Long rowId : rowIds)
-        {
-            IndexProto.RowLocation location = resolvedByPrimaryKey.values().stream()
-                    .filter(resolved -> resolved.getRowId() == rowId)
-                    .findFirst()
-                    .orElseThrow(() -> new IllegalArgumentException(
-                            "tag index row id has no primary-index location: " + rowId))
-                    .getRowLocation();
-            rowLocations.put(rowId, new PixelsTagCompactionUpdateMap.Location(
-                    location.getFileId(), location.getRgId(), location.getRgRowOffset()));
-        }
-
-        Map<PixelsTagCompactionUpdateMap.Location, Long> rowIdsBySourceLocation = new HashMap<>();
-        for (Map.Entry<Long, PixelsTagCompactionUpdateMap.Location> entry : rowLocations.entrySet())
-        {
-            rowIdsBySourceLocation.put(entry.getValue(), entry.getKey());
         }
 
         List<PixelsTagCompactionUpdateMap.Entry> entries = new ArrayList<>(tagEntries.size());
@@ -197,15 +316,80 @@ final class PixelsTagCompactor
         }
         Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates =
                 PixelsTagCompactionUpdateMap.build(entries, rowLocations);
-        return new PixelsTagCompactor(
-                sourcePaths, inputStorage, outputStorage, targetPath, tagColumnName,
-                updates, rowIdsBySourceLocation, primaryKeysByRowId,
-                metadataService, blockSize, replication);
+        return new TagIndexSnapshot(updates, primaryKeyRowIds.size(),
+                resolvedRowCount, resolveRpcCount, resolveNanos);
+    }
+
+    private static int recordTagRows(
+            List<IndexProto.IndexKey> requestedKeys,
+            List<IndexProto.ResolvePrimaryEntry> resolvedEntries,
+            Map<ByteBuffer, Long> primaryKeyRowIds,
+            Map<Long, IndexProto.IndexKey> primaryKeysByRowId,
+            Map<Long, PixelsTagCompactionUpdateMap.Location> rowLocations)
+    {
+        if (resolvedEntries.size() != requestedKeys.size())
+        {
+            throw new IllegalArgumentException("primary resolve response size does not match tag index request");
+        }
+        for (int i = 0; i < resolvedEntries.size(); i++)
+        {
+            IndexProto.ResolvePrimaryEntry resolved = resolvedEntries.get(i);
+            if (resolved.getRowId() < 0 || !resolved.hasIndexKey() || !resolved.hasRowLocation())
+            {
+                throw new IllegalArgumentException("tag index primary resolve response contains an invalid row");
+            }
+            IndexProto.IndexKey requestedKey = requestedKeys.get(i);
+            if (!requestedKey.getKey().equals(resolved.getIndexKey().getKey()))
+            {
+                throw new IllegalArgumentException("primary resolve response order does not match tag index request");
+            }
+            long rowId = resolved.getRowId();
+            IndexProto.IndexKey previousKey = primaryKeysByRowId.put(rowId, resolved.getIndexKey());
+            if (previousKey != null && !previousKey.equals(resolved.getIndexKey()))
+            {
+                throw new IllegalArgumentException("multiple primary keys resolve to the same row id: " + rowId);
+            }
+            primaryKeyRowIds.put(ByteBuffer.wrap(resolved.getIndexKey().getKey().toByteArray()), rowId);
+            IndexProto.RowLocation location = resolved.getRowLocation();
+            rowLocations.put(rowId, new PixelsTagCompactionUpdateMap.Location(
+                    location.getFileId(), location.getRgId(), location.getRgRowOffset()));
+        }
+        return resolvedEntries.size();
+    }
+
+    static Map<Long, PixelsTagCompactionUpdateMap.Location> buildRowLocationsByRowId(
+            List<IndexProto.ResolvePrimaryEntry> resolvedEntries)
+    {
+        requireNonNull(resolvedEntries, "resolvedEntries is null");
+        Map<Long, PixelsTagCompactionUpdateMap.Location> rowLocations =
+                new HashMap<>(resolvedEntries.size() * 4 / 3 + 1);
+        for (IndexProto.ResolvePrimaryEntry resolved : resolvedEntries)
+        {
+            IndexProto.RowLocation location = resolved.getRowLocation();
+            rowLocations.put(resolved.getRowId(), new PixelsTagCompactionUpdateMap.Location(
+                    location.getFileId(), location.getRgId(), location.getRgRowOffset()));
+        }
+        return rowLocations;
     }
 
     Map<Long, IndexProto.IndexKey> getPrimaryKeysByRowId()
     {
         return primaryKeysByRowId;
+    }
+
+    long getPrimaryResolveRowCount()
+    {
+        return primaryResolveRowCount;
+    }
+
+    int getPrimaryResolveRpcCount()
+    {
+        return primaryResolveRpcCount;
+    }
+
+    long getPrimaryResolveNanos()
+    {
+        return primaryResolveNanos;
     }
 
     static long lookupPrimaryRowId(long tableId, long indexId, ByteString encodedPrimaryKey,
@@ -257,6 +441,7 @@ final class PixelsTagCompactor
         {
             throw new IllegalArgumentException("tag column is not present in Pixels schema: " + tagColumnName);
         }
+        int[] primaryKeyOrdinals = resolvePrimaryKeyOrdinals(schema);
 
         ConfigFactory config = ConfigFactory.Instance();
         PixelsWriter writer = PixelsWriterImpl.newBuilder()
@@ -279,7 +464,7 @@ final class PixelsTagCompactor
             OutputRowPosition outputPosition = new OutputRowPosition();
             for (String sourcePath : sourcePaths)
             {
-                compactSource(schema, tagColumn, writer, sourcePath, footerCache, outputPosition);
+                compactSource(schema, tagColumn, primaryKeyOrdinals, writer, sourcePath, footerCache, outputPosition);
             }
             int rowGroupCount = writer.getNumRowGroup();
             writer.close();
@@ -295,6 +480,7 @@ final class PixelsTagCompactor
     private void compactSource(
             TypeDescription schema,
             int tagColumn,
+            int[] primaryKeyOrdinals,
             PixelsWriter writer,
             String sourcePath,
             PixelsFooterCache footerCache,
@@ -310,6 +496,9 @@ final class PixelsTagCompactor
         try
         {
             String[] columns = schema.getFieldNames().toArray(new String[0]);
+            List<IndexProto.IndexKey> pendingPrimaryKeys = new ArrayList<>(MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC);
+            List<IndexProto.RowLocation> pendingOutputLocations =
+                    new ArrayList<>(MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC);
             for (int rowGroupId = 0; rowGroupId < reader.getRowGroupNum(); rowGroupId++)
             {
                 PixelsReaderOption option = new PixelsReaderOption()
@@ -323,13 +512,28 @@ final class PixelsTagCompactor
                     VectorizedRowBatch rowBatch = recordReader.readBatch(READ_BATCH_SIZE);
                     if (rowBatch.size > 0)
                     {
-                        recordRelocatedRows(rowBatch, sourceFileId, rowGroupId, rowOffset, outputPosition);
+                        for (int position = 0; position < rowBatch.size; position++)
+                        {
+                            ByteString primaryKey = ByteString.copyFrom(PrimaryKeyBytes.fromColumnVectors(
+                                    primaryKeyTypes, rowBatch.cols, primaryKeyOrdinals, position));
+                            pendingPrimaryKeys.add(IndexProto.IndexKey.newBuilder()
+                                    .setTableId(primaryTableId)
+                                    .setIndexId(primaryIndexId)
+                                    .setKey(primaryKey)
+                                    .setTimestamp(Long.MAX_VALUE)
+                                    .build());
+                            pendingOutputLocations.add(outputPosition.location(0, position));
+                        }
                         applyUpdates(rowBatch, sourceFileId, rowGroupId, rowOffset, tagColumn,
                                 schema.getChildren().get(tagColumn));
                         attachHiddenColumn(rowBatch);
                         boolean rowGroupRemainsOpen = writer.addRowBatch(rowBatch);
                         outputPosition.advance(rowBatch.size, !rowGroupRemainsOpen);
                         rowOffset += rowBatch.size;
+                        if (pendingPrimaryKeys.size() >= MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC)
+                        {
+                            resolveAndRecordPrimaryRows(pendingPrimaryKeys, pendingOutputLocations);
+                        }
                     }
                     if (rowBatch.endOfFile)
                     {
@@ -337,6 +541,7 @@ final class PixelsTagCompactor
                     }
                 }
             }
+            resolveAndRecordPrimaryRows(pendingPrimaryKeys, pendingOutputLocations);
         }
         finally
         {
@@ -344,22 +549,89 @@ final class PixelsTagCompactor
         }
     }
 
-    private void recordRelocatedRows(
-            VectorizedRowBatch rowBatch,
-            long sourceFileId,
-            int sourceRowGroupId,
-            int sourceRowOffset,
-            OutputRowPosition outputPosition)
+    private void resolveAndRecordPrimaryRows(
+            List<IndexProto.IndexKey> primaryKeys,
+            List<IndexProto.RowLocation> outputLocations)
+            throws IOException
     {
-        for (int position = 0; position < rowBatch.size; position++)
+        if (primaryKeys.isEmpty())
         {
-            Long rowId = rowIdsBySourceLocation.get(new PixelsTagCompactionUpdateMap.Location(
-                    sourceFileId, sourceRowGroupId, sourceRowOffset + position));
-            if (rowId != null)
-            {
-                relocatedLocations.put(rowId, outputPosition.location(0, position));
-            }
+            return;
         }
+        try
+        {
+            long start = System.nanoTime();
+            List<IndexProto.ResolvePrimaryEntry> resolvedEntries = indexService.resolvePrimaryEntries(
+                    primaryTableId, primaryIndexId, primaryKeys);
+            primaryResolveNanos += System.nanoTime() - start;
+            primaryResolveRpcCount++;
+            primaryResolveRowCount += resolvedEntries.size();
+            recordResolvedRows(resolvedEntries, outputLocations, relocatedLocations, primaryKeysByRowId);
+        }
+        catch (IndexException e)
+        {
+            throw new IOException("failed to resolve primary rows during tag-aware compaction", e);
+        }
+        finally
+        {
+            primaryKeys.clear();
+            outputLocations.clear();
+        }
+    }
+
+    static void recordResolvedRows(
+            List<IndexProto.ResolvePrimaryEntry> resolvedEntries,
+            List<IndexProto.RowLocation> outputLocations,
+            Map<Long, IndexProto.RowLocation> relocatedLocations,
+            Map<Long, IndexProto.IndexKey> primaryKeysByRowId)
+    {
+        requireNonNull(resolvedEntries, "resolvedEntries is null");
+        requireNonNull(outputLocations, "outputLocations is null");
+        requireNonNull(relocatedLocations, "relocatedLocations is null");
+        requireNonNull(primaryKeysByRowId, "primaryKeysByRowId is null");
+        if (resolvedEntries.size() != outputLocations.size())
+        {
+            throw new IllegalArgumentException("primary resolve response size does not match the source batch");
+        }
+        for (int i = 0; i < resolvedEntries.size(); i++)
+        {
+            IndexProto.ResolvePrimaryEntry resolved = resolvedEntries.get(i);
+            if (resolved.getRowId() < 0 || !resolved.hasIndexKey())
+            {
+                throw new IllegalArgumentException("primary resolve response contains an invalid row");
+            }
+            relocatedLocations.put(resolved.getRowId(), outputLocations.get(i));
+            primaryKeysByRowId.put(resolved.getRowId(), resolved.getIndexKey());
+        }
+    }
+
+    private int[] resolvePrimaryKeyOrdinals(TypeDescription schema)
+    {
+        int[] ordinals = new int[primaryKeyColumnNames.size()];
+        List<String> fieldNames = schema.getFieldNames();
+        for (int i = 0; i < primaryKeyColumnNames.size(); i++)
+        {
+            String primaryKeyColumnName = primaryKeyColumnNames.get(i);
+            int ordinal = fieldNames.indexOf(primaryKeyColumnName);
+            if (ordinal < 0)
+            {
+                for (int candidate = 0; candidate < fieldNames.size(); candidate++)
+                {
+                    if (fieldNames.get(candidate).equalsIgnoreCase(primaryKeyColumnName))
+                    {
+                        ordinal = candidate;
+                        break;
+                    }
+                }
+            }
+            if (ordinal < 0)
+            {
+                throw new IllegalArgumentException(
+                        "primary-key column is not present in the Pixels schema: " + primaryKeyColumnName);
+            }
+            ordinals[i] = ordinal;
+        }
+        return ordinals;
     }
 
     Map<Long, IndexProto.RowLocation> getRelocatedLocations()

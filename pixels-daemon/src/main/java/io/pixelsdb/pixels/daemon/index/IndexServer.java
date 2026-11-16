@@ -21,6 +21,7 @@ package io.pixelsdb.pixels.daemon.index;
 
 import io.grpc.ServerBuilder;
 import io.pixelsdb.pixels.common.server.Server;
+import io.pixelsdb.pixels.common.utils.ConfigFactory;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -35,15 +36,28 @@ import static com.google.common.base.Preconditions.checkArgument;
  */
 public class IndexServer implements Server
 {
+    private static final int DEFAULT_MAX_INBOUND_MESSAGE_SIZE = 64 * 1024 * 1024;
     private static final Logger log = LogManager.getLogger(IndexServer.class);
     private volatile boolean running = false;
+    private final IndexServiceImpl indexService;
     private final io.grpc.Server rpcServer;
 
     public IndexServer(int port)
     {
         checkArgument(port > 0 && port <= 65535, "illegal rpc port");
+        int maxInboundMessageSize = getMaxInboundMessageSize();
+        checkArgument(maxInboundMessageSize > 0, "illegal index server inbound message size");
+        this.indexService = new IndexServiceImpl();
         this.rpcServer = ServerBuilder.forPort(port)
-                .addService(new IndexServiceImpl()).build();
+                .maxInboundMessageSize(maxInboundMessageSize)
+                .addService(indexService).build();
+    }
+
+    private static int getMaxInboundMessageSize()
+    {
+        String configured = ConfigFactory.Instance().getProperty(
+                "index.server.max.inbound.message.size");
+        return configured == null ? DEFAULT_MAX_INBOUND_MESSAGE_SIZE : Integer.parseInt(configured);
     }
 
     @Override
@@ -63,6 +77,7 @@ public class IndexServer implements Server
         {
             log.error("Interrupted when shutdown index server", e);
         }
+        this.indexService.close();
     }
 
     @Override

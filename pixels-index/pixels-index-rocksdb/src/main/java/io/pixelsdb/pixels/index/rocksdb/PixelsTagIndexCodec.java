@@ -7,8 +7,9 @@ package io.pixelsdb.pixels.index.rocksdb;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
 
@@ -95,20 +96,135 @@ public final class PixelsTagIndexCodec
     public static byte[] append(byte[] existing, List<byte[]> primaryKeys)
     {
         requireNonNull(primaryKeys, "primaryKeys is null");
-        List<byte[]> merged = new ArrayList<>();
-        if (existing != null)
+        return encode(append(existing == null ? List.of() : decode(existing), primaryKeys));
+    }
+
+    /**
+     * Merge decoded primary keys without the quadratic scan used by the
+     * original encoded-value append path.  The returned list owns copies of
+     * newly added keys and preserves the existing order.
+     */
+    static List<byte[]> append(List<byte[]> existing, List<byte[]> primaryKeys)
+    {
+        requireNonNull(existing, "existing is null");
+        requireNonNull(primaryKeys, "primaryKeys is null");
+        if (allEightByteKeys(existing, primaryKeys))
         {
-            merged.addAll(decode(existing));
+            return appendEightByteKeys(existing, primaryKeys);
+        }
+        List<byte[]> merged = new ArrayList<>(existing.size() + primaryKeys.size());
+        Set<ByteBuffer> seen = new HashSet<>(Math.max(16, existing.size() + primaryKeys.size()));
+        for (byte[] existingKey : existing)
+        {
+            requireNonNull(existingKey, "existing primary key is null");
+            merged.add(existingKey);
+            seen.add(ByteBuffer.wrap(existingKey));
         }
         for (byte[] primaryKey : primaryKeys)
         {
             requireNonNull(primaryKey, "primary key is null");
-            boolean alreadyPresent = merged.stream().anyMatch(existingKey -> Arrays.equals(existingKey, primaryKey));
-            if (!alreadyPresent)
+            if (seen.add(ByteBuffer.wrap(primaryKey)))
             {
                 merged.add(primaryKey.clone());
             }
         }
-        return encode(merged);
+        return merged;
+    }
+
+    private static boolean allEightByteKeys(List<byte[]> existing, List<byte[]> primaryKeys)
+    {
+        for (byte[] primaryKey : existing)
+        {
+            if (primaryKey == null || primaryKey.length != Long.BYTES)
+            {
+                return false;
+            }
+        }
+        for (byte[] primaryKey : primaryKeys)
+        {
+            if (primaryKey == null || primaryKey.length != Long.BYTES)
+            {
+                return false;
+            }
+        }
+        long total = (long) existing.size() + primaryKeys.size();
+        // Keep the specialized table bounded.  Larger or variable-length
+        // inputs use the general byte-array path below.
+        return total <= 8_000_000L;
+    }
+
+    private static List<byte[]> appendEightByteKeys(List<byte[]> existing, List<byte[]> primaryKeys)
+    {
+        int expectedSize = (int) ((long) existing.size() + primaryKeys.size());
+        int capacity = tableSizeFor(Math.max(16L, (long) expectedSize * 2));
+        long[] keys = new long[capacity];
+        boolean[] occupied = new boolean[capacity];
+        List<byte[]> merged = new ArrayList<>(expectedSize);
+        for (byte[] primaryKey : existing)
+        {
+            long key = readLong(primaryKey);
+            if (add(keys, occupied, key))
+            {
+                merged.add(primaryKey);
+            }
+        }
+        for (byte[] primaryKey : primaryKeys)
+        {
+            long key = readLong(primaryKey);
+            if (add(keys, occupied, key))
+            {
+                merged.add(primaryKey.clone());
+            }
+        }
+        return merged;
+    }
+
+    private static int tableSizeFor(long expectedSize)
+    {
+        int capacity = 1;
+        while (capacity < expectedSize && capacity < (1 << 30))
+        {
+            capacity <<= 1;
+        }
+        return capacity;
+    }
+
+    private static boolean add(long[] keys, boolean[] occupied, long key)
+    {
+        int mask = keys.length - 1;
+        int slot = hash(key) & mask;
+        while (occupied[slot])
+        {
+            if (keys[slot] == key)
+            {
+                return false;
+            }
+            slot = (slot + 1) & mask;
+        }
+        occupied[slot] = true;
+        keys[slot] = key;
+        return true;
+    }
+
+    private static int hash(long key)
+    {
+        key ^= key >>> 33;
+        key *= 0xff51afd7ed558ccdL;
+        key ^= key >>> 33;
+        key *= 0xc4ceb9fe1a85ec53L;
+        key ^= key >>> 33;
+        return (int) (key ^ (key >>> 32));
+    }
+
+    private static long readLong(byte[] bytes)
+    {
+        return ((long) (bytes[0] & 0xff) << 56) |
+                ((long) (bytes[1] & 0xff) << 48) |
+                ((long) (bytes[2] & 0xff) << 40) |
+                ((long) (bytes[3] & 0xff) << 32) |
+                ((long) (bytes[4] & 0xff) << 24) |
+                ((long) (bytes[5] & 0xff) << 16) |
+                ((long) (bytes[6] & 0xff) << 8) |
+                (bytes[7] & 0xffL);
     }
 }

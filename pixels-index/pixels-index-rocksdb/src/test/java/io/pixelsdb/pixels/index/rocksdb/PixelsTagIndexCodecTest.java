@@ -47,4 +47,23 @@ class PixelsTagIndexCodecTest
         assertArrayEquals(new byte[] {2}, decoded.get(1));
         assertArrayEquals(new byte[] {3}, decoded.get(2));
     }
+
+    @Test
+    void appendMergesEightBytePrimaryKeysWithoutDuplicatingEntries()
+    {
+        List<byte[]> existingKeys = List.of(longKey(1L), longKey(2L));
+        List<byte[]> incomingKeys = List.of(longKey(2L), longKey(3L), longKey(3L));
+
+        List<byte[]> merged = PixelsTagIndexCodec.append(existingKeys, incomingKeys);
+
+        assertEquals(3, merged.size());
+        assertArrayEquals(longKey(1L), merged.get(0));
+        assertArrayEquals(longKey(2L), merged.get(1));
+        assertArrayEquals(longKey(3L), merged.get(2));
+    }
+
+    private static byte[] longKey(long value)
+    {
+        return java.nio.ByteBuffer.allocate(Long.BYTES).putLong(value).array();
+    }
 }

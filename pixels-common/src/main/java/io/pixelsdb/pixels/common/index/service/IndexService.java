@@ -76,6 +76,18 @@ public interface IndexService
                 "getTagIndexEntries is not supported by this IndexService scheme");
     }
 
+    /** Return primary keys for one tag, optionally matching versioned tag keys by prefix. */
+    default List<ByteString> getTagIndexEntries(long tableId, long indexId, ByteString tag,
+            boolean prefix) throws IndexException
+    {
+        if (!prefix)
+        {
+            return getTagIndexEntries(tableId, indexId, tag);
+        }
+        throw new UnsupportedOperationException(
+                "prefix tag lookup is not supported by this IndexService scheme");
+    }
+
     /** Return all tag mappings for compaction. */
     default List<IndexProto.TagIndexEntry> listTagIndexEntries(long tableId, long indexId)
             throws IndexException

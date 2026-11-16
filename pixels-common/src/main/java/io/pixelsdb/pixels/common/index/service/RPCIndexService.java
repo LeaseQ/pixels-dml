@@ -45,6 +45,7 @@ import java.util.concurrent.TimeUnit;
  */
 public class RPCIndexService implements IndexService
 {
+    private static final int DEFAULT_MAX_INBOUND_MESSAGE_SIZE = 64 * 1024 * 1024;
     private static final Logger logger = LogManager.getLogger(RPCIndexService.class);
     private static final RPCIndexService defaultInstance;
     private static final Map<HostAddress, RPCIndexService> otherInstances = new HashMap<>();
@@ -109,10 +110,23 @@ public class RPCIndexService implements IndexService
     {
         assert (host != null);
         assert (port > 0 && port <= 65535);
+        int maxInboundMessageSize = getMaxInboundMessageSize();
+        if (maxInboundMessageSize <= 0)
+        {
+            throw new IllegalArgumentException("illegal index server inbound message size");
+        }
         this.channel = ManagedChannelBuilder.forAddress(host, port)
+                .maxInboundMessageSize(maxInboundMessageSize)
                 .usePlaintext().build();
         this.stub = IndexServiceGrpc.newBlockingStub(channel);
         this.isShutDown = false;
+    }
+
+    private static int getMaxInboundMessageSize()
+    {
+        String configured = ConfigFactory.Instance().getProperty(
+                "index.server.max.inbound.message.size");
+        return configured == null ? DEFAULT_MAX_INBOUND_MESSAGE_SIZE : Integer.parseInt(configured);
     }
 
     private synchronized void shutdown() throws InterruptedException
@@ -183,11 +197,20 @@ public class RPCIndexService implements IndexService
     public List<ByteString> getTagIndexEntries(long tableId, long indexId, ByteString tag)
             throws IndexException
     {
+        return getTagIndexEntries(tableId, indexId, tag, false);
+    }
+
+    @Override
+    public List<ByteString> getTagIndexEntries(long tableId, long indexId, ByteString tag,
+            boolean prefix)
+            throws IndexException
+    {
         IndexProto.GetTagIndexEntriesResponse response = stub.getTagIndexEntries(
                 IndexProto.GetTagIndexEntriesRequest.newBuilder()
                         .setTableId(tableId)
                         .setIndexId(indexId)
                         .setTag(tag)
+                        .setPrefix(prefix)
                         .build());
         checkTagIndexResponse(response.getErrorCode(), "get tag index entries");
         return response.getPrimaryKeysList();

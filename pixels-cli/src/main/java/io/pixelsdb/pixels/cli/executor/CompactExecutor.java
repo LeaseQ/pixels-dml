@@ -30,6 +30,7 @@ import io.pixelsdb.pixels.common.index.service.IndexService;
 import io.pixelsdb.pixels.common.index.service.IndexServiceProvider;
 import io.pixelsdb.pixels.common.metadata.MetadataService;
 import io.pixelsdb.pixels.common.metadata.domain.Compact;
+import io.pixelsdb.pixels.common.metadata.domain.Column;
 import io.pixelsdb.pixels.common.metadata.domain.File;
 import io.pixelsdb.pixels.common.metadata.domain.Layout;
 import io.pixelsdb.pixels.common.metadata.domain.Path;
@@ -43,6 +44,7 @@ import io.pixelsdb.pixels.common.utils.NetUtils;
 import io.pixelsdb.pixels.common.utils.PixelsFileNameUtils;
 import io.pixelsdb.pixels.core.compactor.CompactLayout;
 import io.pixelsdb.pixels.core.compactor.PixelsCompactor;
+import io.pixelsdb.pixels.core.TypeDescription;
 import io.pixelsdb.pixels.index.IndexProto;
 import net.sourceforge.argparse4j.inf.Namespace;
 
@@ -68,6 +70,8 @@ import static java.util.Objects.requireNonNull;
  */
 public class CompactExecutor implements CommandExecutor
 {
+    /** Keep relocation RPCs comfortably below the configured gRPC message limit. */
+    static final int MAX_PRIMARY_RELOCATION_ENTRIES_PER_RPC = 16_384;
     private final RetinaService retinaService = RetinaService.Instance();
 
     @Override
@@ -126,6 +130,9 @@ public class CompactExecutor implements CommandExecutor
         final IndexService indexService;
         final MainIndex mainIndex;
         final List<IndexProto.TagIndexEntry> tagEntries;
+        final PixelsTagCompactor.TagIndexSnapshot tagIndexSnapshot;
+        final List<String> primaryKeyColumnNames;
+        final List<TypeDescription> primaryKeyTypes;
         if (useTagCompactor)
         {
             Table table = metadataService.getTable(schemaName, tableName);
@@ -140,8 +147,28 @@ public class CompactExecutor implements CommandExecutor
             indexService = IndexServiceProvider.getService(IndexServiceProvider.ServiceMode.rpc);
             mainIndex = null;
             tagEntries = indexService.listTagIndexEntries(table.getId(), primaryIndexId);
+            tagIndexSnapshot = PixelsTagCompactor.prepareTagIndexSnapshot(
+                    tagEntries, primaryTableId, primaryIndexId, indexService);
+            List<Column> tableColumns = metadataService.getColumns(schemaName, tableName, false);
+            primaryKeyColumnNames = new ArrayList<>();
+            primaryKeyTypes = new ArrayList<>();
+            for (Integer keyColumnId : primaryIndexMetadata.getKeyColumns().getKeyColumnIds())
+            {
+                Column primaryKeyColumn = tableColumns.stream()
+                        .filter(column -> column.getId() == keyColumnId)
+                        .findFirst()
+                        .orElseThrow(() -> new MetadataException(
+                                "primary-key column is not present in metadata: " + keyColumnId));
+                primaryKeyColumnNames.add(primaryKeyColumn.getName());
+                primaryKeyTypes.add(TypeDescription.fromString(primaryKeyColumn.getType()));
+            }
             System.out.println("tag-aware compaction enabled for column '" + tagColumnName + "' with " +
                     tagEntries.size() + " tag entries.");
+            System.out.println("[PIXELS_TAG_INDEX_METRIC] tag_entries=" + tagEntries.size() +
+                    " tagged_rows=" + tagIndexSnapshot.getTaggedRowCount() +
+                    " resolve_rows=" + tagIndexSnapshot.getPrimaryResolveRowCount() +
+                    " resolve_rpc_count=" + tagIndexSnapshot.getPrimaryResolveRpcCount() +
+                    " resolve_ms=" + tagIndexSnapshot.getPrimaryResolveNanos() / 1_000_000.0);
         }
         else
         {
@@ -150,6 +177,9 @@ public class CompactExecutor implements CommandExecutor
             indexService = null;
             mainIndex = null;
             tagEntries = java.util.Collections.emptyList();
+            tagIndexSnapshot = null;
+            primaryKeyColumnNames = java.util.Collections.emptyList();
+            primaryKeyTypes = java.util.Collections.emptyList();
         }
 
         // Issue #998: compact need to exclude empty files
@@ -285,16 +315,22 @@ public class CompactExecutor implements CommandExecutor
                     int numRowGroup;
                     Map<Long, IndexProto.RowLocation> relocatedLocations = java.util.Collections.emptyMap();
                     Map<Long, IndexProto.IndexKey> primaryKeysByRowId = java.util.Collections.emptyMap();
+                    long primaryResolveRowCount = 0L;
+                    int primaryResolveRpcCount = 0;
+                    long primaryResolveNanos = 0L;
                     if (useTagCompactor)
                     {
                         PixelsTagCompactor pixelsTagCompactor = PixelsTagCompactor.create(
                                 sourcePaths, orderStorage, compactStorage, finalTargetFilePath,
-                                tagColumnName, tagEntries, primaryTableId, primaryIndexId,
-                                indexService, metadataService,
+                                tagColumnName, tagIndexSnapshot, primaryTableId, primaryIndexId,
+                                indexService, primaryKeyColumnNames, primaryKeyTypes, metadataService,
                                 blockSize, replication);
                         numRowGroup = pixelsTagCompactor.compact();
                         relocatedLocations = pixelsTagCompactor.getRelocatedLocations();
                         primaryKeysByRowId = pixelsTagCompactor.getPrimaryKeysByRowId();
+                        primaryResolveRowCount = pixelsTagCompactor.getPrimaryResolveRowCount();
+                        primaryResolveRpcCount = pixelsTagCompactor.getPrimaryResolveRpcCount();
+                        primaryResolveNanos = pixelsTagCompactor.getPrimaryResolveNanos();
                     }
                     else
                     {
@@ -312,7 +348,8 @@ public class CompactExecutor implements CommandExecutor
                     compactFile.setPathId(finalTargetPath.getId());
                     compactionResults.offer(new CompactionResult(
                             compactFile, finalTargetPath, finalOldFileIds,
-                            relocatedLocations, primaryKeysByRowId));
+                            relocatedLocations, primaryKeysByRowId,
+                            primaryResolveRowCount, primaryResolveRpcCount, primaryResolveNanos));
                     System.out.println("Compact file '" + finalTargetFilePath + "' is built in " +
                             ((System.currentTimeMillis() - threadStart) / 1000.0) + "s");
                     return null;
@@ -521,31 +558,27 @@ public class CompactExecutor implements CommandExecutor
         {
             Map<CompactionResult, Long> fileIds = getPublishedFileIds(results, metadataPublication,
                     publishedFileIds);
+            int relocationRpcCount = 0;
+            long relocatedRowCount = 0;
+            long primaryResolveRowCount = 0L;
+            long primaryResolveRpcCount = 0L;
+            long primaryResolveNanos = 0L;
             for (CompactionResult result : results)
             {
+                primaryResolveRowCount += result.primaryResolveRowCount();
+                primaryResolveRpcCount += result.primaryResolveRpcCount();
+                primaryResolveNanos += result.primaryResolveNanos();
                 long fileId = fileIds.get(result);
-                for (Map.Entry<Long, IndexProto.RowLocation> relocated : result.relocatedLocations().entrySet())
-                {
-                    IndexProto.IndexKey primaryKey = result.primaryKeysByRowId().get(relocated.getKey());
-                    if (primaryKey == null)
-                    {
-                        throw new MetadataException("missing primary key for compacted row " + relocated.getKey());
-                    }
-                    IndexProto.PrimaryIndexEntry entry = IndexProto.PrimaryIndexEntry.newBuilder()
-                            .setIndexKey(primaryKey)
-                            .setRowId(relocated.getKey())
-                            .setRowLocation(relocated.getValue().toBuilder().setFileId(fileId).build())
-                            .build();
-                    int bucketId = io.pixelsdb.pixels.common.utils.IndexUtils
-                            .getBucketIdFromByteBuffer(primaryKey.getKey());
-                    if (!indexService.putPrimaryIndexEntry(entry,
-                            IndexOption.builder().vNodeId(bucketId).build()))
-                    {
-                        throw new MetadataException("failed to update IndexServer for compacted row " +
-                                relocated.getKey());
-                    }
-                }
+                relocationRpcCount += updatePrimaryIndexLocations(
+                        indexService, tableId, indexId, fileId,
+                        result.relocatedLocations(), result.primaryKeysByRowId());
+                relocatedRowCount += result.relocatedLocations().size();
             }
+            System.out.println("[PIXELS_COMPACTION_RESOLVE_METRIC] rows=" + primaryResolveRowCount +
+                    " resolve_rpc_count=" + primaryResolveRpcCount +
+                    " resolve_ms=" + primaryResolveNanos / 1_000_000.0);
+            System.out.println("[PIXELS_COMPACTION_INDEX_METRIC] relocated_rows=" + relocatedRowCount +
+                    " relocation_rpc_count=" + relocationRpcCount);
             atomicSwapCompactionResults(results, fileIds, metadataPublication, cleanupAt);
         }
         catch (MetadataException failure)
@@ -558,6 +591,68 @@ public class CompactExecutor implements CommandExecutor
             rollbackPublishedFiles(metadataPublication, publishedFileIds, failure);
             throw new MetadataException("failed to publish compacted Pixels index locations", failure);
         }
+    }
+
+    /**
+     * Relocate the rows of one compacted output file using the existing batch
+     * primary-index RPC.  Entries are grouped by vnode because a single-point
+     * index instance is selected by the vnode in IndexOption.  The old code
+     * called the single-entry RPC once per row, making a million-row
+     * compaction a million network round trips.
+     */
+    static int updatePrimaryIndexLocations(
+            IndexService indexService,
+            long tableId,
+            long indexId,
+            long fileId,
+            Map<Long, IndexProto.RowLocation> relocatedLocations,
+            Map<Long, IndexProto.IndexKey> primaryKeysByRowId)
+            throws IndexException, MetadataException
+    {
+        requireNonNull(indexService, "indexService is null");
+        requireNonNull(relocatedLocations, "relocatedLocations is null");
+        requireNonNull(primaryKeysByRowId, "primaryKeysByRowId is null");
+        if (relocatedLocations.isEmpty())
+        {
+            return 0;
+        }
+
+        Map<Integer, List<IndexProto.PrimaryIndexEntry>> entriesByBucket = new LinkedHashMap<>();
+        for (Map.Entry<Long, IndexProto.RowLocation> relocated : relocatedLocations.entrySet())
+        {
+            long rowId = relocated.getKey();
+            IndexProto.IndexKey primaryKey = primaryKeysByRowId.get(rowId);
+            if (primaryKey == null)
+            {
+                throw new MetadataException("missing primary key for compacted row " + rowId);
+            }
+            IndexProto.PrimaryIndexEntry entry = IndexProto.PrimaryIndexEntry.newBuilder()
+                    .setIndexKey(primaryKey)
+                    .setRowId(rowId)
+                    .setRowLocation(relocated.getValue().toBuilder().setFileId(fileId).build())
+                    .build();
+            int bucketId = io.pixelsdb.pixels.common.utils.IndexUtils
+                    .getBucketIdFromByteBuffer(primaryKey.getKey());
+            entriesByBucket.computeIfAbsent(bucketId, ignored -> new ArrayList<>()).add(entry);
+        }
+
+        int rpcCount = 0;
+        for (Map.Entry<Integer, List<IndexProto.PrimaryIndexEntry>> bucket : entriesByBucket.entrySet())
+        {
+            List<IndexProto.PrimaryIndexEntry> entries = bucket.getValue();
+            for (int offset = 0; offset < entries.size(); offset += MAX_PRIMARY_RELOCATION_ENTRIES_PER_RPC)
+            {
+                int end = Math.min(entries.size(), offset + MAX_PRIMARY_RELOCATION_ENTRIES_PER_RPC);
+                List<IndexProto.PrimaryIndexEntry> batch = entries.subList(offset, end);
+                if (!indexService.putPrimaryIndexEntries(tableId, indexId, batch,
+                        IndexOption.builder().vNodeId(bucket.getKey()).build()))
+                {
+                    throw new MetadataException("failed to update IndexServer for compacted primary rows");
+                }
+                rpcCount++;
+            }
+        }
+        return rpcCount;
     }
 
     static void publishCompactionResults(
@@ -636,6 +731,9 @@ public class CompactExecutor implements CommandExecutor
         private final List<Long> oldFileIds;
         private final Map<Long, IndexProto.RowLocation> relocatedLocations;
         private final Map<Long, IndexProto.IndexKey> primaryKeysByRowId;
+        private final long primaryResolveRowCount;
+        private final int primaryResolveRpcCount;
+        private final long primaryResolveNanos;
 
         CompactionResult(File file, Path path,
                 Map<Long, IndexProto.RowLocation> relocatedLocations)
@@ -656,11 +754,26 @@ public class CompactExecutor implements CommandExecutor
                 Map<Long, IndexProto.RowLocation> relocatedLocations,
                 Map<Long, IndexProto.IndexKey> primaryKeysByRowId)
         {
+            this(file, path, oldFileIds, relocatedLocations, primaryKeysByRowId,
+                    0L, 0, 0L);
+        }
+
+        CompactionResult(File file, Path path,
+                List<Long> oldFileIds,
+                Map<Long, IndexProto.RowLocation> relocatedLocations,
+                Map<Long, IndexProto.IndexKey> primaryKeysByRowId,
+                long primaryResolveRowCount,
+                int primaryResolveRpcCount,
+                long primaryResolveNanos)
+        {
             this.file = file;
             this.path = path;
             this.oldFileIds = List.copyOf(oldFileIds);
             this.relocatedLocations = relocatedLocations;
             this.primaryKeysByRowId = primaryKeysByRowId;
+            this.primaryResolveRowCount = primaryResolveRowCount;
+            this.primaryResolveRpcCount = primaryResolveRpcCount;
+            this.primaryResolveNanos = primaryResolveNanos;
         }
 
         private File file()
@@ -686,6 +799,21 @@ public class CompactExecutor implements CommandExecutor
         private Map<Long, IndexProto.IndexKey> primaryKeysByRowId()
         {
             return primaryKeysByRowId;
+        }
+
+        private long primaryResolveRowCount()
+        {
+            return primaryResolveRowCount;
+        }
+
+        private int primaryResolveRpcCount()
+        {
+            return primaryResolveRpcCount;
+        }
+
+        private long primaryResolveNanos()
+        {
+            return primaryResolveNanos;
         }
     }
 

@@ -33,8 +33,11 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.rocksdb.RocksDBException;
 
+import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * @author hank, Rolland1944
@@ -43,8 +46,85 @@ import java.util.List;
 public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
 {
     private static final Logger logger = LogManager.getLogger(IndexServiceImpl.class);
+    private final Map<TagIndexKey, PixelsTagIndex> tagIndexes = new HashMap<>();
 
     public IndexServiceImpl() { }
+
+    private synchronized PixelsTagIndex getTagIndex(long tableId, long indexId)
+            throws RocksDBException, SinglePointIndexException
+    {
+        TagIndexKey key = new TagIndexKey(tableId, indexId);
+        PixelsTagIndex tagIndex = tagIndexes.get(key);
+        if (tagIndex == null)
+        {
+            tagIndex = new PixelsTagIndex(tableId, indexId, 0);
+            tagIndexes.put(key, tagIndex);
+        }
+        return tagIndex;
+    }
+
+    private synchronized void closeTagIndex(long tableId, long indexId)
+    {
+        PixelsTagIndex tagIndex = tagIndexes.remove(new TagIndexKey(tableId, indexId));
+        if (tagIndex != null)
+        {
+            try
+            {
+                tagIndex.close();
+            }
+            catch (IOException e)
+            {
+                logger.warn("Failed to close tag index: tableId={}, indexId={}", tableId, indexId, e);
+            }
+        }
+    }
+
+    /** Close all long-lived tag-index handles owned by this IndexServer service. */
+    public synchronized void close()
+    {
+        for (Map.Entry<TagIndexKey, PixelsTagIndex> entry : tagIndexes.entrySet())
+        {
+            try
+            {
+                entry.getValue().close();
+            }
+            catch (IOException e)
+            {
+                logger.warn("Failed to close tag index: tableId={}, indexId={}",
+                        entry.getKey().tableId, entry.getKey().indexId, e);
+            }
+        }
+        tagIndexes.clear();
+    }
+
+    private static final class TagIndexKey
+    {
+        private final long tableId;
+        private final long indexId;
+
+        private TagIndexKey(long tableId, long indexId)
+        {
+            this.tableId = tableId;
+            this.indexId = indexId;
+        }
+
+        @Override
+        public boolean equals(Object other)
+        {
+            if (!(other instanceof TagIndexKey))
+            {
+                return false;
+            }
+            TagIndexKey key = (TagIndexKey) other;
+            return tableId == key.tableId && indexId == key.indexId;
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return 31 * Long.hashCode(tableId) + Long.hashCode(indexId);
+        }
+    }
 
     @Override
     public void allocateRowIdBatch(IndexProto.AllocateRowIdBatchRequest request,
@@ -757,6 +837,7 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             {
                 MainIndexFactory.Instance().closeIndex(tableId, false);
             }
+            closeTagIndex(tableId, indexId);
             builder.setErrorCode(ErrorCode.SUCCESS);
         }
         catch (MainIndexException e)
@@ -786,6 +867,7 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             {
                 MainIndexFactory.Instance().closeIndex(tableId, true);
             }
+            closeTagIndex(tableId, indexId);
             builder.setErrorCode(ErrorCode.SUCCESS);
         }
         catch (MainIndexException e)
@@ -806,21 +888,33 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
     {
         IndexProto.AppendTagIndexEntriesResponse.Builder builder =
                 IndexProto.AppendTagIndexEntriesResponse.newBuilder();
-        try (PixelsTagIndex tagIndex = new PixelsTagIndex(request.getTableId(), request.getIndexId(), 0))
+        long start = System.nanoTime();
+        long decodeStart = 0L;
+        long decodeNanos = 0L;
+        long storageStart = 0L;
+        long storageNanos = 0L;
+        long primaryKeyCount = request.getUpdatesList().stream()
+                .mapToLong(IndexProto.TagIndexUpdate::getPrimaryKeysCount)
+                .sum();
+        try
         {
+            PixelsTagIndex tagIndex = getTagIndex(request.getTableId(), request.getIndexId());
+            decodeStart = System.nanoTime();
             List<PixelsTagIndex.VersionedUpdate> updates = request.getUpdatesList().stream()
                     .map(update -> new PixelsTagIndex.VersionedUpdate(
                             update.getTag().toByteArray(), update.getTransactionTimestamp(),
                             update.getPrimaryKeysList().stream()
                                     .map(com.google.protobuf.ByteString::toByteArray).toList()))
                     .toList();
-            logger.info("append tag index entries: tableId={}, indexId={}, updates={}, timestamps={}",
-                    request.getTableId(), request.getIndexId(), updates.size(),
-                    updates.stream().map(PixelsTagIndex.VersionedUpdate::transactionTimestamp).toList());
+            decodeNanos = System.nanoTime() - decodeStart;
+            logger.debug("append tag index entries: tableId={}, indexId={}, updates={}",
+                    request.getTableId(), request.getIndexId(), updates.size());
+            storageStart = System.nanoTime();
             tagIndex.appendBatch(updates);
+            storageNanos = System.nanoTime() - storageStart;
             builder.setErrorCode(ErrorCode.SUCCESS);
         }
-        catch (RocksDBException | SinglePointIndexException | java.io.IOException e)
+        catch (RocksDBException | SinglePointIndexException e)
         {
             logger.error("Failed to append tag index entries", e);
             builder.setErrorCode(ErrorCode.INDEX_PUT_SINGLE_POINT_INDEX_FAIL);
@@ -829,6 +923,14 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
         {
             logger.error("Invalid tag index update request", e);
             builder.setErrorCode(ErrorCode.INDEX_PUT_SINGLE_POINT_INDEX_FAIL);
+        }
+        finally
+        {
+            logger.info("[PIXELS_TAG_INDEX_METRIC] tableId={}, indexId={}, updates={}, primaryKeys={}, " +
+                            "requestBytes={}, decodeMs={}, storageMs={}, serviceMs={}",
+                    request.getTableId(), request.getIndexId(), request.getUpdatesCount(), primaryKeyCount,
+                    request.getSerializedSize(), decodeNanos / 1_000_000.0,
+                    storageNanos / 1_000_000.0, (System.nanoTime() - start) / 1_000_000.0);
         }
         responseObserver.onNext(builder.build());
         responseObserver.onCompleted();
@@ -840,15 +942,19 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
     {
         IndexProto.GetTagIndexEntriesResponse.Builder builder =
                 IndexProto.GetTagIndexEntriesResponse.newBuilder();
-        try (PixelsTagIndex tagIndex = new PixelsTagIndex(request.getTableId(), request.getIndexId(), 0))
+        try
         {
-            for (byte[] primaryKey : tagIndex.get(request.getTag().toByteArray()))
+            PixelsTagIndex tagIndex = getTagIndex(request.getTableId(), request.getIndexId());
+            List<byte[]> primaryKeys = request.getPrefix()
+                    ? tagIndex.getByTagPrefix(request.getTag().toByteArray())
+                    : tagIndex.get(request.getTag().toByteArray());
+            for (byte[] primaryKey : primaryKeys)
             {
                 builder.addPrimaryKeys(com.google.protobuf.ByteString.copyFrom(primaryKey));
             }
             builder.setErrorCode(ErrorCode.SUCCESS);
         }
-        catch (RocksDBException | SinglePointIndexException | java.io.IOException e)
+        catch (RocksDBException | SinglePointIndexException e)
         {
             logger.error("Failed to get tag index entries", e);
             builder.setErrorCode(ErrorCode.INDEX_GET_ROW_ID_FAIL);
@@ -863,8 +969,9 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
     {
         IndexProto.ListTagIndexEntriesResponse.Builder builder =
                 IndexProto.ListTagIndexEntriesResponse.newBuilder();
-        try (PixelsTagIndex tagIndex = new PixelsTagIndex(request.getTableId(), request.getIndexId(), 0))
+        try
         {
+            PixelsTagIndex tagIndex = getTagIndex(request.getTableId(), request.getIndexId());
             for (PixelsTagIndex.Entry entry : tagIndex.entries())
             {
                 IndexProto.TagIndexEntry.Builder tagEntry = IndexProto.TagIndexEntry.newBuilder()
@@ -877,7 +984,7 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             }
             builder.setErrorCode(ErrorCode.SUCCESS);
         }
-        catch (RocksDBException | SinglePointIndexException | java.io.IOException e)
+        catch (RocksDBException | SinglePointIndexException e)
         {
             logger.error("Failed to list tag index entries", e);
             builder.setErrorCode(ErrorCode.INDEX_GET_ROW_ID_FAIL);
@@ -892,16 +999,28 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
     {
         IndexProto.ResolvePrimaryEntriesResponse.Builder builder =
                 IndexProto.ResolvePrimaryEntriesResponse.newBuilder();
+        long start = System.nanoTime();
+        int resolvedCount = 0;
         try
         {
             boolean failed = false;
             MainIndex mainIndex = MainIndexFactory.Instance().getMainIndex(request.getTableId());
+            Map<Integer, SinglePointIndex> singlePointIndexes = new HashMap<>();
             for (IndexProto.IndexKey key : request.getIndexKeysList())
             {
                 int bucketId = IndexUtils.getBucketIdFromByteBuffer(key.getKey());
-                SinglePointIndex singlePointIndex = SinglePointIndexFactory.Instance()
-                        .getSinglePointIndex(request.getTableId(), request.getIndexId(),
+                SinglePointIndex singlePointIndex = singlePointIndexes.computeIfAbsent(bucketId, ignored -> {
+                    try
+                    {
+                        return SinglePointIndexFactory.Instance().getSinglePointIndex(
+                                request.getTableId(), request.getIndexId(),
                                 IndexOption.builder().vNodeId(bucketId).build());
+                    }
+                    catch (SinglePointIndexException e)
+                    {
+                        throw new IndexLookupRuntimeException(e);
+                    }
+                });
                 long rowId = singlePointIndex.getUniqueRowId(key);
                 if (rowId < 0)
                 {
@@ -921,18 +1040,33 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                         .setRowId(rowId)
                         .setRowLocation(location)
                         .build());
+                resolvedCount++;
             }
             if (!failed)
             {
                 builder.setErrorCode(ErrorCode.SUCCESS);
             }
         }
-        catch (SinglePointIndexException | MainIndexException e)
+        catch (SinglePointIndexException | MainIndexException | IndexLookupRuntimeException e)
         {
             logger.error("Failed to resolve primary entries", e);
             builder.setErrorCode(ErrorCode.INDEX_GET_ROW_ID_FAIL);
         }
+        finally
+        {
+            logger.info("[PIXELS_PRIMARY_RESOLVE_METRIC] tableId={}, indexId={}, keys={}, resolved={}, " +
+                            "serviceMs={}", request.getTableId(), request.getIndexId(),
+                    request.getIndexKeysCount(), resolvedCount, (System.nanoTime() - start) / 1_000_000.0);
+        }
         responseObserver.onNext(builder.build());
         responseObserver.onCompleted();
+    }
+
+    private static final class IndexLookupRuntimeException extends RuntimeException
+    {
+        private IndexLookupRuntimeException(SinglePointIndexException cause)
+        {
+            super(cause);
+        }
     }
 }

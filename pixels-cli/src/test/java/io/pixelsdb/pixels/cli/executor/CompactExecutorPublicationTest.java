@@ -7,6 +7,7 @@ package io.pixelsdb.pixels.cli.executor;
 
 import io.pixelsdb.pixels.common.exception.MetadataException;
 import io.pixelsdb.pixels.common.index.MainIndex;
+import io.pixelsdb.pixels.common.index.service.IndexService;
 import io.pixelsdb.pixels.common.metadata.domain.File;
 import io.pixelsdb.pixels.common.metadata.domain.Path;
 import io.pixelsdb.pixels.index.IndexProto;
@@ -14,9 +15,15 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
 class CompactExecutorPublicationTest
 {
@@ -64,6 +71,55 @@ class CompactExecutorPublicationTest
         assertEquals(101L, publication.swappedNewFileId);
         assertEquals(List.of(11L, 12L), publication.swappedOldFileIds);
         assertEquals(12345L, publication.swapCleanupAt);
+    }
+
+    @Test
+    void publishesTagCompactionWithBatchPrimaryIndexRelocation()
+            throws Exception
+    {
+        File file = new File();
+        file.setName("compact.pxl");
+        file.setType(File.Type.TEMPORARY_GC);
+        file.setPathId(7L);
+        file.setNumRowGroup(1);
+        Path path = new Path();
+        path.setUri("file:///compact");
+
+        Map<Long, IndexProto.RowLocation> relocated = Map.of(
+                11L, IndexProto.RowLocation.newBuilder().setRgId(0).setRgRowOffset(0).build(),
+                12L, IndexProto.RowLocation.newBuilder().setRgId(0).setRgRowOffset(1).build());
+        Map<Long, IndexProto.IndexKey> primaryKeys = Map.of(
+                11L, primaryKey("key-11"),
+                12L, primaryKey("key-12"));
+        CompactExecutor.CompactionResult result = new CompactExecutor.CompactionResult(
+                file, path, List.of(101L), relocated, primaryKeys);
+        RecordingPublication publication = new RecordingPublication(303L);
+        IndexService indexService = mock(IndexService.class);
+        AtomicInteger relocationCalls = new AtomicInteger();
+        AtomicInteger relocatedRows = new AtomicInteger();
+        doAnswer(invocation -> {
+            relocationCalls.incrementAndGet();
+            relocatedRows.addAndGet(((List<?>) invocation.getArgument(2)).size());
+            return true;
+        }).when(indexService).putPrimaryIndexEntries(anyLong(), anyLong(), anyList(), any());
+
+        CompactExecutor.publishCompactionResults(
+                List.of(result), indexService, 101L, 202L, publication, 12345L);
+
+        assertEquals(2, relocatedRows.get());
+        assertEquals(2, relocationCalls.get());
+        assertEquals(303L, publication.swappedNewFileId);
+        assertEquals(List.of(101L), publication.swappedOldFileIds);
+    }
+
+    private static IndexProto.IndexKey primaryKey(String value)
+    {
+        return IndexProto.IndexKey.newBuilder()
+                .setTableId(101L)
+                .setIndexId(202L)
+                .setKey(com.google.protobuf.ByteString.copyFromUtf8(value))
+                .setTimestamp(Long.MAX_VALUE)
+                .build();
     }
 
     private static final class RecordingPublication implements CompactExecutor.MetadataPublication
