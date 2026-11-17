@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
 
@@ -348,7 +349,7 @@ public final class PixelsTagIndex implements Closeable
                 Set<ByteBuffer> keep = retained.get(record.logicalKey);
                 List<byte[]> remaining = record.primaryKeys.stream()
                         .filter(primaryKey -> keep != null && keep.contains(ByteBuffer.wrap(primaryKey)))
-                        .toList();
+                        .collect(Collectors.toList());
                 removed += record.primaryKeys.size() - remaining.size();
                 if (remaining.isEmpty()) {
                     delete(batch, record.physicalKey);
@@ -501,7 +502,7 @@ public final class PixelsTagIndex implements Closeable
                             ignored -> new TagEntryBuilder(value.tag()))
                     .add(entry.getKey().array());
         }
-        return grouped.values().stream().map(TagEntryBuilder::build).toList();
+        return grouped.values().stream().map(TagEntryBuilder::build).collect(Collectors.toList());
     }
 
     private static final class TagEntryBuilder

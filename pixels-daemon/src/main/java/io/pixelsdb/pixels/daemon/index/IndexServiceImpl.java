@@ -38,6 +38,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * @author hank, Rolland1944
@@ -904,8 +905,9 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                     .map(update -> new PixelsTagIndex.VersionedUpdate(
                             update.getTag().toByteArray(), update.getTransactionTimestamp(),
                             update.getPrimaryKeysList().stream()
-                                    .map(com.google.protobuf.ByteString::toByteArray).toList()))
-                    .toList();
+                                    .map(com.google.protobuf.ByteString::toByteArray)
+                                    .collect(Collectors.toList())))
+                    .collect(Collectors.toList());
             decodeNanos = System.nanoTime() - decodeStart;
             logger.debug("append tag index entries: tableId={}, indexId={}, updates={}",
                     request.getTableId(), request.getIndexId(), updates.size());
