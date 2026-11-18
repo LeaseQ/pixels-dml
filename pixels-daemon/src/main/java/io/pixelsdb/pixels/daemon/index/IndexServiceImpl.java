@@ -29,6 +29,7 @@ import io.pixelsdb.pixels.common.utils.IndexUtils;
 import io.pixelsdb.pixels.index.IndexProto;
 import io.pixelsdb.pixels.index.IndexServiceGrpc;
 import io.pixelsdb.pixels.index.rocksdb.PixelsTagIndex;
+import io.pixelsdb.pixels.index.rocksdb.TagIndexKeyCodec;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.rocksdb.RocksDBException;
@@ -903,7 +904,8 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             decodeStart = System.nanoTime();
             List<PixelsTagIndex.VersionedUpdate> updates = request.getUpdatesList().stream()
                     .map(update -> new PixelsTagIndex.VersionedUpdate(
-                            update.getTag().toByteArray(), update.getTransactionTimestamp(),
+                            TagIndexKeyCodec.encode(update.getColumnName(), update.getTag().toByteArray()),
+                            update.getTransactionTimestamp(),
                             update.getPrimaryKeysList().stream()
                                     .map(com.google.protobuf.ByteString::toByteArray)
                                     .collect(Collectors.toList())))
@@ -948,8 +950,8 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
         {
             PixelsTagIndex tagIndex = getTagIndex(request.getTableId(), request.getIndexId());
             List<byte[]> primaryKeys = request.getPrefix()
-                    ? tagIndex.getByTagPrefix(request.getTag().toByteArray())
-                    : tagIndex.get(request.getTag().toByteArray());
+                    ? tagIndex.getByTagPrefix(request.getColumnName(), request.getTag().toByteArray())
+                    : tagIndex.get(request.getColumnName(), request.getTag().toByteArray());
             for (byte[] primaryKey : primaryKeys)
             {
                 builder.addPrimaryKeys(com.google.protobuf.ByteString.copyFrom(primaryKey));
@@ -977,7 +979,8 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             for (PixelsTagIndex.Entry entry : tagIndex.entries())
             {
                 IndexProto.TagIndexEntry.Builder tagEntry = IndexProto.TagIndexEntry.newBuilder()
-                        .setTag(com.google.protobuf.ByteString.copyFrom(entry.tag()));
+                        .setTag(com.google.protobuf.ByteString.copyFrom(TagIndexKeyCodec.tag(entry.tag())))
+                        .setColumnName(TagIndexKeyCodec.columnName(entry.tag()));
                 for (byte[] primaryKey : entry.primaryKeys())
                 {
                     tagEntry.addPrimaryKeys(com.google.protobuf.ByteString.copyFrom(primaryKey));

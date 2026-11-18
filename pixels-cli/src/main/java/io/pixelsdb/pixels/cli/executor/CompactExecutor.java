@@ -146,7 +146,12 @@ public class CompactExecutor implements CommandExecutor
             primaryIndexId = primaryIndexMetadata.getId();
             indexService = IndexServiceProvider.getService(IndexServiceProvider.ServiceMode.rpc);
             mainIndex = null;
-            tagEntries = indexService.listTagIndexEntries(table.getId(), primaryIndexId);
+            List<IndexProto.TagIndexEntry> allTagEntries =
+                    indexService.listTagIndexEntries(table.getId(), primaryIndexId);
+            tagEntries = allTagEntries.stream()
+                    .filter(entry -> entry.getColumnName().isEmpty() ||
+                            entry.getColumnName().equalsIgnoreCase(tagColumnName))
+                    .collect(java.util.stream.Collectors.toList());
             tagIndexSnapshot = PixelsTagCompactor.prepareTagIndexSnapshot(
                     tagEntries, primaryTableId, primaryIndexId, indexService);
             List<Column> tableColumns = metadataService.getColumns(schemaName, tableName, false);

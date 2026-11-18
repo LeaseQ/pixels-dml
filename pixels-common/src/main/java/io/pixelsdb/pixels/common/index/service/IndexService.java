@@ -88,6 +88,18 @@ public interface IndexService
                 "prefix tag lookup is not supported by this IndexService scheme");
     }
 
+    /** Return primary keys for a tag scoped to one tag column. */
+    default List<ByteString> getTagIndexEntries(long tableId, long indexId, ByteString tag,
+            boolean prefix, String columnName) throws IndexException
+    {
+        if (columnName == null || columnName.isEmpty())
+        {
+            return getTagIndexEntries(tableId, indexId, tag, prefix);
+        }
+        throw new UnsupportedOperationException(
+                "column-scoped tag lookup is not supported by this IndexService scheme");
+    }
+
     /** Return all tag mappings for compaction. */
     default List<IndexProto.TagIndexEntry> listTagIndexEntries(long tableId, long indexId)
             throws IndexException

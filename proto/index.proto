@@ -321,11 +321,13 @@ message TagIndexUpdate {
   bytes tag = 1;
   repeated bytes primaryKeys = 2;
   int64 transactionTimestamp = 3;
+  string columnName = 4;
 }
 
 message TagIndexEntry {
   bytes tag = 1;
   repeated bytes primaryKeys = 2;
+  string columnName = 3;
 }
 
 message AppendTagIndexEntriesRequest {
@@ -354,6 +356,7 @@ message GetTagIndexEntriesRequest {
   uint64 indexId = 2;
   bytes tag = 3;
   bool prefix = 4;
+  string columnName = 5;
 }
 
 message GetTagIndexEntriesResponse {

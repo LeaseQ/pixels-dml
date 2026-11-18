@@ -111,6 +111,41 @@ public final class PixelsTagIndex implements Closeable
         private long timestamp() { return timestamp; }
     }
 
+    /** A primary key has one latest value per tag column, not one per table. */
+    private static final class PrimaryColumnKey
+    {
+        private final ByteBuffer primaryKey;
+        private final String columnName;
+
+        private PrimaryColumnKey(byte[] primaryKey, String columnName)
+        {
+            this.primaryKey = ByteBuffer.wrap(primaryKey.clone());
+            this.columnName = columnName;
+        }
+
+        private byte[] primaryKey()
+        {
+            return primaryKey.array().clone();
+        }
+
+        @Override
+        public boolean equals(Object other)
+        {
+            if (!(other instanceof PrimaryColumnKey))
+            {
+                return false;
+            }
+            PrimaryColumnKey that = (PrimaryColumnKey) other;
+            return primaryKey.equals(that.primaryKey) && columnName.equals(that.columnName);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return 31 * primaryKey.hashCode() + columnName.hashCode();
+        }
+    }
+
     private static final class VersionedRecord
     {
         private final byte[] physicalKey;
@@ -220,7 +255,7 @@ public final class PixelsTagIndex implements Closeable
             appendSingleVersionedUpdate(updates.get(0));
             return;
         }
-        Map<ByteBuffer, VersionedKey> latestByPrimaryKey = new LinkedHashMap<>();
+        Map<PrimaryColumnKey, VersionedKey> latestByPrimaryKey = new LinkedHashMap<>();
         for (VersionedUpdate update : updates) {
             requireNonNull(update, "update is null");
             if (update.transactionTimestamp() <= 0) {
@@ -230,8 +265,9 @@ public final class PixelsTagIndex implements Closeable
             // update.  Cloning the tag and allocating a LatestValue per row
             // becomes material for million-row UPDATE batches.
             VersionedKey versionedKey = new VersionedKey(update.tag(), update.transactionTimestamp());
+            String columnName = TagIndexKeyCodec.columnName(update.tag());
             for (byte[] primaryKey : update.primaryKeys()) {
-                ByteBuffer key = ByteBuffer.wrap(primaryKey);
+                PrimaryColumnKey key = new PrimaryColumnKey(primaryKey, columnName);
                 VersionedKey previous = latestByPrimaryKey.get(key);
                 if (previous == null || versionedKey.timestamp() >= previous.timestamp()) {
                     latestByPrimaryKey.put(key, versionedKey);
@@ -239,9 +275,9 @@ public final class PixelsTagIndex implements Closeable
             }
         }
         Map<VersionedKey, List<byte[]>> grouped = new LinkedHashMap<>();
-        for (Map.Entry<ByteBuffer, VersionedKey> entry : latestByPrimaryKey.entrySet()) {
+        for (Map.Entry<PrimaryColumnKey, VersionedKey> entry : latestByPrimaryKey.entrySet()) {
             grouped.computeIfAbsent(entry.getValue(), ignored -> new ArrayList<>())
-                    .add(entry.getKey().array());
+                    .add(entry.getKey().primaryKey());
         }
         try (WriteBatch batch = new WriteBatch()) {
             List<VersionedKey> versionedKeys = new ArrayList<>(grouped.keySet());
@@ -309,7 +345,7 @@ public final class PixelsTagIndex implements Closeable
             return 0;
         }
         Map<ByteBuffer, VersionedRecord> records = new LinkedHashMap<>();
-        Map<ByteBuffer, List<VersionedKey>> versions = new LinkedHashMap<>();
+        Map<PrimaryColumnKey, List<VersionedKey>> versions = new LinkedHashMap<>();
         try (RocksIterator iterator = columnFamilyHandle == null
                 ? rocksDB.newIterator() : rocksDB.newIterator(columnFamilyHandle)) {
             iterator.seekToFirst();
@@ -318,15 +354,16 @@ public final class PixelsTagIndex implements Closeable
                 List<byte[]> primaryKeys = PixelsTagIndexCodec.decode(iterator.value());
                 records.put(ByteBuffer.wrap(iterator.key()),
                         new VersionedRecord(iterator.key(), key, primaryKeys));
+                String columnName = TagIndexKeyCodec.columnName(key.tag());
                 for (byte[] primaryKey : primaryKeys) {
-                    versions.computeIfAbsent(ByteBuffer.wrap(primaryKey), ignored -> new ArrayList<>())
+                    versions.computeIfAbsent(new PrimaryColumnKey(primaryKey, columnName), ignored -> new ArrayList<>())
                             .add(key);
                 }
                 iterator.next();
             }
         }
-        Map<VersionedKey, Set<ByteBuffer>> retained = new LinkedHashMap<>();
-        for (Map.Entry<ByteBuffer, List<VersionedKey>> entry : versions.entrySet()) {
+        Map<VersionedKey, Set<PrimaryColumnKey>> retained = new LinkedHashMap<>();
+        for (Map.Entry<PrimaryColumnKey, List<VersionedKey>> entry : versions.entrySet()) {
             VersionedKey latest = null;
             for (VersionedKey version : entry.getValue()) {
                 if (version.timestamp() <= safeTimestamp &&
@@ -346,9 +383,11 @@ public final class PixelsTagIndex implements Closeable
         long removed = 0;
         try (WriteBatch batch = new WriteBatch()) {
             for (VersionedRecord record : records.values()) {
-                Set<ByteBuffer> keep = retained.get(record.logicalKey);
+                Set<PrimaryColumnKey> keep = retained.get(record.logicalKey);
+                String columnName = TagIndexKeyCodec.columnName(record.logicalKey.tag());
                 List<byte[]> remaining = record.primaryKeys.stream()
-                        .filter(primaryKey -> keep != null && keep.contains(ByteBuffer.wrap(primaryKey)))
+                        .filter(primaryKey -> keep != null &&
+                                keep.contains(new PrimaryColumnKey(primaryKey, columnName)))
                         .collect(Collectors.toList());
                 removed += record.primaryKeys.size() - remaining.size();
                 if (remaining.isEmpty()) {
@@ -455,6 +494,12 @@ public final class PixelsTagIndex implements Closeable
         return value == null ? List.of() : PixelsTagIndexCodec.decode(value);
     }
 
+    public synchronized List<byte[]> get(String columnName, byte[] tag) throws RocksDBException
+    {
+        requireNonNull(columnName, "columnName is null");
+        return get(TagIndexKeyCodec.encode(columnName, tag));
+    }
+
     /** Read the latest tag value for each primary key under one logical prefix. */
     public synchronized List<byte[]> getByTagPrefix(byte[] tag) throws RocksDBException
     {
@@ -468,6 +513,12 @@ public final class PixelsTagIndex implements Closeable
         return result;
     }
 
+    public synchronized List<byte[]> getByTagPrefix(String columnName, byte[] tag) throws RocksDBException
+    {
+        requireNonNull(columnName, "columnName is null");
+        return getByTagPrefix(TagIndexKeyCodec.prefix(columnName, tag));
+    }
+
     /**
      * Returns a stable snapshot of every tag entry in this column family.
      * The returned byte arrays are defensive copies and can be used after the
@@ -475,7 +526,7 @@ public final class PixelsTagIndex implements Closeable
      */
     public synchronized List<Entry> entries()
     {
-        LinkedHashMap<ByteBuffer, LatestValue> latestByPrimaryKey = new LinkedHashMap<>();
+        LinkedHashMap<PrimaryColumnKey, LatestValue> latestByPrimaryKey = new LinkedHashMap<>();
         try (RocksIterator iterator = columnFamilyHandle == null
                 ? rocksDB.newIterator()
                 : rocksDB.newIterator(columnFamilyHandle))
@@ -485,7 +536,8 @@ public final class PixelsTagIndex implements Closeable
             {
                 VersionedKey versionedKey = decodeVersionedKey(iterator.key());
                 for (byte[] primaryKey : PixelsTagIndexCodec.decode(iterator.value())) {
-                    ByteBuffer key = ByteBuffer.wrap(primaryKey);
+                    PrimaryColumnKey key = new PrimaryColumnKey(primaryKey,
+                            TagIndexKeyCodec.columnName(versionedKey.tag()));
                     LatestValue previous = latestByPrimaryKey.get(key);
                     if (previous == null || versionedKey.timestamp() >= previous.timestamp()) {
                         latestByPrimaryKey.put(key,
@@ -496,11 +548,11 @@ public final class PixelsTagIndex implements Closeable
             }
         }
         LinkedHashMap<ByteBuffer, TagEntryBuilder> grouped = new LinkedHashMap<>();
-        for (Map.Entry<ByteBuffer, LatestValue> entry : latestByPrimaryKey.entrySet()) {
+        for (Map.Entry<PrimaryColumnKey, LatestValue> entry : latestByPrimaryKey.entrySet()) {
             LatestValue value = entry.getValue();
             grouped.computeIfAbsent(ByteBuffer.wrap(value.tag()),
                             ignored -> new TagEntryBuilder(value.tag()))
-                    .add(entry.getKey().array());
+                    .add(entry.getKey().primaryKey());
         }
         return grouped.values().stream().map(TagEntryBuilder::build).collect(Collectors.toList());
     }

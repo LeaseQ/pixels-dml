@@ -217,6 +217,22 @@ public class RPCIndexService implements IndexService
     }
 
     @Override
+    public List<ByteString> getTagIndexEntries(long tableId, long indexId, ByteString tag,
+            boolean prefix, String columnName) throws IndexException
+    {
+        IndexProto.GetTagIndexEntriesResponse response = stub.getTagIndexEntries(
+                IndexProto.GetTagIndexEntriesRequest.newBuilder()
+                        .setTableId(tableId)
+                        .setIndexId(indexId)
+                        .setTag(tag)
+                        .setPrefix(prefix)
+                        .setColumnName(columnName == null ? "" : columnName)
+                        .build());
+        checkTagIndexResponse(response.getErrorCode(), "get tag index entries");
+        return response.getPrimaryKeysList();
+    }
+
+    @Override
     public List<IndexProto.TagIndexEntry> listTagIndexEntries(long tableId, long indexId)
             throws IndexException
     {
