@@ -265,3 +265,8 @@ throughput target because the 128 primary-index RPCs dominate. The remaining
 work is to implement and benchmark a server-side optimization while retaining
 the tagging-first correctness order, then repeat the full INSERT -> UPDATE ->
 COMPACT -> restart acceptance flow on a clean isolated runtime.
+
+The primary business-shaped workload is now the 68-column tagging benchmark in
+`RFC_68COL_TAG_BENCHMARK.md`. It defines the 1M -> 10M -> 100M -> 1B scale
+ladder, separates cold load from warm INSERT, and requires tag visibility and
+restart checks after UPDATE. TPC-H is not part of this validation track.
