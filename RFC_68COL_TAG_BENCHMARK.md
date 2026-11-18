@@ -198,7 +198,8 @@ promoted back to `REGULAR`, its stale cleanup deadline was cleared, and its
 visibility was registered. This is a state repair on the validation machine,
 not a source-code change.
 
-After the repair and Trino restart/cache refresh:
+After the metadata repair (with Trino already restarted during the preceding
+visibility diagnosis):
 
 ```text
 SELECT count(*), min(id), max(id),
