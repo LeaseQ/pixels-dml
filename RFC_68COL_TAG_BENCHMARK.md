@@ -91,6 +91,28 @@ visibility stage mandatory. The first 2M-row tag-aware compaction attempt was
 started separately and stopped before completion; it must be rerun with timing
 and the compaction metrics captured.
 
+## Multi-column tag correctness finding
+
+The current deployed contract has one configured tag-index column
+(`dml.tag.column=tag_1_type`). A single-column UPDATE and compaction were
+validated on a 10K-row 68-column table:
+
+- `UPDATE ... SET tag_1_type='AAA' ...`: 10,000 rows in 4.466 s;
+- tag-aware COMPACT: 5.708 s;
+- `WHERE tag_1_type='AAA'`: 10,000 rows, with the physical value `AAA`.
+
+The same test shape with both `tag_1_type='AAA'` and `tag_1_para=3.14` exposed
+a correctness gap: both assignments are currently appended to the same
+single-column Tag Index. Compaction then has no column identity for the two
+values and the materialized tag value is corrupted. The multi-column case is
+therefore not an acceptance result. The implementation must either add column
+identity to Tag Index entries and lookup/compaction routing, or explicitly
+reject multi-column tag UPDATEs until that support exists.
+
+This finding is kept separate from throughput numbers. The current 68-column
+benchmark acceptance gate is single configured tag-column correctness first;
+the 30-pair tag model remains the target capability to implement and validate.
+
 ## Acceptance rules
 
 The benchmark is considered valid only if all of the following are true:
@@ -109,9 +131,12 @@ The benchmark is considered valid only if all of the following are true:
 
 1. Correct the generator null representation and regenerate only the 1M/10M
    fixtures needed for controlled tests.
-2. Rerun tag-aware COMPACT on a 10K/100K/1M ladder, recording resolve and
+2. Add column identity to the Tag Index protocol, connector lookup, and
+   tag-aware compaction, or add a fail-fast guard for unsupported multi-column
+   updates.
+3. Rerun tag-aware COMPACT on a 10K/100K/1M ladder, recording resolve and
    primary-index publication metrics.
-3. Run exact UPDATE at 100K and 1M on the 68-column table, followed by the
+4. Run exact UPDATE at 100K and 1M on the 68-column table, followed by the
    visibility and restart checks.
-4. Repeat warm INSERT with 1M and 10M rows, then test the 100M fixture.
-5. Only after the ladder is stable, begin the 1B-row load and long-run test.
+5. Repeat warm INSERT with 1M and 10M rows, then test the 100M fixture.
+6. Only after the ladder is stable, begin the 1B-row load and long-run test.
