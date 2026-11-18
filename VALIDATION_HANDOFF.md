@@ -1,6 +1,6 @@
 # Pixels Million-Row UPDATE Validation Handoff
 
-Last updated: 2026-11-17
+Last updated: 2026-11-18
 
 This document is the single source of truth for validating million-row UPDATE
 performance on a fresh machine. It covers both repositories involved:
@@ -28,7 +28,7 @@ Both repositories use the same branch name:
 | Repository | Branch | Tip commit |
 | --- | --- | --- |
 | LeaseQ/pixels-dml | `codex/million-update-validation` | `f00915e5` |
-| LeaseQ/pixels-trino-dml | `codex/million-update-validation` | `819ec41` |
+| LeaseQ/pixels-trino-dml | `codex/million-update-validation` | `614a915` |
 
 Baseline before this work:
 
@@ -122,6 +122,26 @@ These are component-level probes, not real E2E results.
 
 Conclusion: a single million-row Tag Index write is not the bottleneck. The
 100k ceiling is most likely caused by routing or measurement methodology.
+
+### 5.1 Synthetic INSERT E2E evidence on cds20
+
+The isolated runtime on `cds20` was then used to instrument the synthetic
+UNNEST INSERT path. A successful 1M-row, single-task run showed:
+
+- 100 page-sink writer flushes;
+- about 0.3-0.6 s in `PixelsWriter.addRowBatch`;
+- about 1.3-1.5 s building the primary-index batches;
+- exactly 128 primary-index RPCs, one per vnode;
+- about 109 s serial primary-index RPC wall time; and
+- about 0.4 s in the final main-index flush.
+
+This identifies the primary-index service/RocksDB path as the dominant
+connector-side cost for this INSERT shape. A four-thread client fan-out was
+also tested and regressed to about 160.5 s end-to-end; a sixteen-thread
+fan-out regressed to about 145.8 s. Both are rejected and were not retained.
+The current branch keeps serial publication and adds low-overhead counters in
+the Trino sink. The next experiment should be a server-side grouped primary
+index write or a RocksDB write-path optimization, not more client fan-out.
 
 Known unrelated test issues:
 
@@ -230,8 +250,10 @@ Interpretation:
 
 ## 8. What Is Still Missing
 
-Real E2E data from steps 7.5-7.8. The earlier remote host `10.77.110.36`
-was unreachable on all tested ports (connection timeout before
-authentication), so no remote measurements exist yet. No architecture
-decision should be made until the route logs and three metric groups are
-captured on a reachable machine.
+The exact UPDATE/COMPACT/restart evidence is recorded in
+`RFC_MILLION_UPDATE_INSERT_DURABILITY.md`. The synthetic INSERT route now has
+real E2E stage measurements on `10.77.110.36`, but it is still below the
+throughput target because the 128 primary-index RPCs dominate. The remaining
+work is to implement and benchmark a server-side optimization while retaining
+the tagging-first correctness order, then repeat the full INSERT -> UPDATE ->
+COMPACT -> restart acceptance flow on a clean isolated runtime.

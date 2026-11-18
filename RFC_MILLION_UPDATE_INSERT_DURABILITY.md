@@ -67,6 +67,39 @@ The successful exact-key UPDATE route is confirmed in route logs as
 The connector-side UPDATE request was roughly 10 MB and spent about 1.3-1.6 s
 in the RPC path; this is an internal metric, not the end-to-end claim.
 
+### Synthetic INSERT bottleneck isolation
+
+The initial synthetic INSERT result was instrumented on a clean, single-task
+run rather than inferred from the SQL wall time. For a 1M-row INSERT the page
+sink reported 100 writer flushes, about 0.3-0.6 s in `PixelsWriter.addRowBatch`,
+and about 1.3-1.5 s building the primary-index batches. The index writer then
+made exactly 128 primary-index RPCs, one per vnode. The serial primary-index
+publication measured about 109 s of wall time; the main-index flush was only
+about 0.4 s. This makes the primary-index service, not Pixels file encoding,
+the dominant connector-side cost for this route.
+
+Two exploratory client-side concurrency changes were deliberately rejected:
+publishing the 128 vnode RPCs with a four-thread pool took about 154.2 s in the
+primary RPC wall interval and 160.5 s end-to-end; a sixteen-thread pool took
+about 139.7 s in the primary RPC wall interval and 145.8 s end-to-end. The
+sum of per-RPC times also grew substantially under concurrency. The result is
+consistent with contention/queueing in the single IndexServer/RocksDB writer;
+client fan-out is not a valid optimization for this deployment and is not
+part of the pushed implementation.
+
+JFR samples still show visible Trino cost in UNNEST projection/page merge and
+HTTP page transport, but the connector counters establish that the 128 primary
+index writes dominate the successful 1M-row run. The next optimization should
+therefore be server-side: reduce vnode write/flush overhead or introduce a
+carefully designed grouped primary-index write, while preserving the tagging
+and crash-safe publication order. A clean-runtime repeat is required before
+claiming any new throughput number.
+
+The isolated validation harness also hit Java heap exhaustion after repeatedly
+creating test tables and writer buffers. Raising the isolated Retina heap to
+32 GiB restored service and recovery. This is recorded as harness hygiene and
+not as a correctness or throughput result.
+
 ## Changes in this RFC
 
 ### INSERT durability and row-id hull
