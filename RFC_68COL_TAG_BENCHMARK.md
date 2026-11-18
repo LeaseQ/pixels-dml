@@ -95,7 +95,7 @@ and the compaction metrics captured.
 
 ## Multi-column tag correctness finding
 
-The current deployed contract has one configured tag-index column
+The original deployed contract had one configured tag-index column
 (`dml.tag.column=tag_1_type`). A single-column UPDATE and compaction were
 validated on a 10K-row 68-column table:
 
@@ -104,12 +104,72 @@ validated on a 10K-row 68-column table:
 - `WHERE tag_1_type='AAA'`: 10,000 rows, with the physical value `AAA`.
 
 The same test shape with both `tag_1_type='AAA'` and `tag_1_para=3.14` exposed
-a correctness gap: both assignments are currently appended to the same
-single-column Tag Index. Compaction then has no column identity for the two
-values and the materialized tag value is corrupted. The multi-column case is
-therefore not an acceptance result. The implementation must either add column
-identity to Tag Index entries and lookup/compaction routing, or explicitly
-reject multi-column tag UPDATEs until that support exists.
+a correctness gap: both assignments were appended to the same single-column
+Tag Index. Compaction then had no column identity for the two values and the
+materialized tag value was corrupted.
+
+This is fixed on the validation branches. Tag Index entries and lookup
+requests now carry `columnName`; compaction accepts
+`dml.tag.columns=tag_1_type,tag_1_para` and applies independent updates to the
+same physical row. Decimal writeback supports both short and long decimal
+vectors. The Trino UPDATE handle also converts native unscaled Decimal
+constants back to a plain SQL decimal string before canonical encoding; this
+prevents `3.1400` from becoming `31400.0000`.
+
+Relevant commits:
+
+- `pixels-dml`: `bc094956`, `93fc3c70`, `892b9b1f`;
+- `pixels-trino-dml`: `0d27988`, `1973c10`.
+
+## Clean 10K end-to-end result on 2026-11-19
+
+The final clean run used the real dataset shape, limited to the first 10,000
+rows of `part-00000.csv` as a controlled fixture. The source table was
+`bench68_v2.tag_source`; the indexed target was
+`bench68_v2.tag_events_fixed`. The target was newly created so no abandoned
+physical files or old compaction outputs were present.
+
+Exact sequence:
+
+```sql
+INSERT INTO pixels.bench68_v2.tag_events_fixed
+SELECT * FROM pixels.bench68_v2.tag_source;
+
+UPDATE pixels.bench68_v2.tag_events_fixed
+SET tag_1_type = 'CCC', tag_1_para = 3.1400
+WHERE id BETWEEN 1 AND 10000;
+```
+
+Then:
+
+```text
+COMPACT -s bench68_v2 -t tag_events_fixed -n no -c 4
+```
+
+Observed results:
+
+| Stage | Rows | Wall time | Approx. rate | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| CSV -> source table | 10,000 | 3.3 s | 3.0k rows/s | `LOAD` completed successfully |
+| table-to-table INSERT | 10,000 | 254 s | 39 rows/s | cold primary-index vnode creation; `primary_put_ms=250147` |
+| exact UPDATE | 10,000 | 4 s shell wall | about 2.5k rows/s | MPP route, one RPC; connector total 2.245 s |
+| tag-aware COMPACT | 10,000 | 6 s shell wall | about 1.7k rows/s | physical rewrite 1.06 s; resolve 0.17 s; relocation 128 rows/groups |
+
+The Trino route log recorded `executor=MPP exact_eligible=true`, and the
+UPDATE metric recorded `rows=10000`, `rpc_count=1`, `request_bytes=200061`.
+The final query returned:
+
+```text
+rows=10000, tag_1_type='CCC'=10000, tag_1_para=3.1400=10000,
+both predicates=10000, min(tag_1_para)=3.1400, max(tag_1_para)=3.1400
+```
+
+This proves the complete correctness path for two tag columns, including a
+decimal tag value. It is not yet an acceptance throughput result: the 10K
+INSERT includes a one-time cold initialization of 128 primary-index vnodes.
+The prior warm 1M baselines remain the better steady-state indicators
+(approximately 52.4k INSERT rows/s and 61.5k UPDATE rows/s), both below the
+hundreds-of-thousands target.
 
 This finding is kept separate from throughput numbers. The current 68-column
 benchmark acceptance gate is single configured tag-column correctness first;
@@ -133,12 +193,12 @@ The benchmark is considered valid only if all of the following are true:
 
 1. Correct the generator null representation and regenerate only the 1M/10M
    fixtures needed for controlled tests.
-2. Add column identity to the Tag Index protocol, connector lookup, and
-   tag-aware compaction, or add a fail-fast guard for unsupported multi-column
-   updates.
-3. Rerun tag-aware COMPACT on a 10K/100K/1M ladder, recording resolve and
-   primary-index publication metrics.
+2. Warm the primary index once, then rerun table-to-table INSERT at 1M and
+   10M so cold vnode creation is excluded from steady-state throughput.
+3. Rerun the two-column tag E2E on the 10K/100K/1M ladder, recording resolve,
+   rewrite, relocation, and publish metrics.
 4. Run exact UPDATE at 100K and 1M on the 68-column table, followed by the
    visibility and restart checks.
-5. Repeat warm INSERT with 1M and 10M rows, then test the 100M fixture.
+5. Investigate the primary-index cold-start cost and the remaining warm-path
+   gap to the hundreds-of-thousands rows/s target.
 6. Only after the ladder is stable, begin the 1B-row load and long-run test.
