@@ -146,7 +146,10 @@ the main-index flush was 0.386 s. The daemon log attributes the cold penalty to
 serial creation of vnode 0..127 column families under the global
 `SinglePointIndexFactory` lock. The next experiment should therefore prewarm
 those vnodes and then evaluate a server-side grouped primary-index write or a
-RocksDB write-path optimization, not more client fan-out.
+RocksDB write-path optimization, not more client fan-out. A temporary
+four-thread warm-table run reduced primary RPC wall time to 2.050 s but only
+improved SQL wall time to 8.855 s; it was removed and the deployed connector
+was restored to serial publication.
 
 Known unrelated test issues:
 

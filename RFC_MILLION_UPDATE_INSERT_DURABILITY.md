@@ -102,6 +102,13 @@ consistent with contention/queueing in the single IndexServer/RocksDB writer;
 client fan-out is not a valid optimization for this deployment and is not
 part of the pushed implementation.
 
+For completeness, a temporary four-thread experiment on the already-warm
+table reduced the primary RPC wall interval from 5.018 s to 2.050 s, but the
+SQL wall time moved only from 9.027 s to 8.855 s. Because the cold-table
+experiments regressed badly and the warm end-to-end gain was marginal, the
+parallel implementation was removed after measurement. The pushed connector
+remains serial and deterministic.
+
 JFR samples still show visible Trino cost in UNNEST projection/page merge and
 HTTP page transport. The connector counters establish that cold vnode
 initialization dominates the first INSERT, while the warm run still spends
