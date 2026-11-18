@@ -123,8 +123,16 @@ public class CompactExecutor implements CommandExecutor
 
         // Tag updates are opt-in because the existing compaction command must remain
         // compatible with tables that do not use the DML tag index.
-        String tagColumnName = configFactory.getProperty("dml.tag.column");
-        final boolean useTagCompactor = tagColumnName != null && !tagColumnName.trim().isEmpty();
+        String configuredTagColumns = configFactory.getProperty("dml.tag.columns");
+        if (configuredTagColumns == null || configuredTagColumns.trim().isEmpty())
+        {
+            configuredTagColumns = configFactory.getProperty("dml.tag.column");
+        }
+        final List<String> tagColumnNames = configuredTagColumns == null ?
+                List.of() : java.util.Arrays.stream(configuredTagColumns.split(","))
+                        .map(String::trim).filter(name -> !name.isEmpty()).toList();
+        final boolean useTagCompactor = !tagColumnNames.isEmpty();
+        final String tagColumnName = useTagCompactor ? tagColumnNames.get(0) : null;
         final long primaryTableId;
         final long primaryIndexId;
         final IndexService indexService;
@@ -150,7 +158,8 @@ public class CompactExecutor implements CommandExecutor
                     indexService.listTagIndexEntries(table.getId(), primaryIndexId);
             tagEntries = allTagEntries.stream()
                     .filter(entry -> entry.getColumnName().isEmpty() ||
-                            entry.getColumnName().equalsIgnoreCase(tagColumnName))
+                            tagColumnNames.stream().anyMatch(name ->
+                                    entry.getColumnName().equalsIgnoreCase(name)))
                     .collect(java.util.stream.Collectors.toList());
             tagIndexSnapshot = PixelsTagCompactor.prepareTagIndexSnapshot(
                     tagEntries, primaryTableId, primaryIndexId, indexService);
@@ -167,7 +176,7 @@ public class CompactExecutor implements CommandExecutor
                 primaryKeyColumnNames.add(primaryKeyColumn.getName());
                 primaryKeyTypes.add(TypeDescription.fromString(primaryKeyColumn.getType()));
             }
-            System.out.println("tag-aware compaction enabled for column '" + tagColumnName + "' with " +
+            System.out.println("tag-aware compaction enabled for columns '" + String.join(",", tagColumnNames) + "' with " +
                     tagEntries.size() + " tag entries.");
             System.out.println("[PIXELS_TAG_INDEX_METRIC] tag_entries=" + tagEntries.size() +
                     " tagged_rows=" + tagIndexSnapshot.getTaggedRowCount() +

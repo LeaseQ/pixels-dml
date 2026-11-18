@@ -19,13 +19,13 @@ final class PixelsTagCompactionUpdateMap
 {
     private PixelsTagCompactionUpdateMap() {}
 
-    static Map<Location, byte[]> build(
+    static Map<Location, Map<String, byte[]>> build(
             List<Entry> entries,
             Map<Long, Location> rowLocations)
     {
         requireNonNull(entries, "entries is null");
         requireNonNull(rowLocations, "rowLocations is null");
-        Map<Location, byte[]> updates = new LinkedHashMap<>();
+        Map<Location, Map<String, byte[]>> updates = new LinkedHashMap<>();
         for (Entry entry : entries)
         {
             byte[] tag = entry.tag.clone();
@@ -42,11 +42,15 @@ final class PixelsTagCompactionUpdateMap
                 {
                     throw new IllegalArgumentException("tag index row id has no main-index location: " + rowId);
                 }
-                byte[] previousTag = updates.putIfAbsent(location, tag.clone());
+                Map<String, byte[]> columnUpdates = updates.computeIfAbsent(
+                        location, ignored -> new LinkedHashMap<>());
+                byte[] previousTag = columnUpdates.putIfAbsent(
+                        entry.columnName, tag.clone());
                 if (previousTag != null && !Arrays.equals(previousTag, tag))
                 {
                     throw new IllegalArgumentException(
-                            "multiple tag values resolve to the same physical row: " + location);
+                        "multiple tag values resolve to the same physical row and column '" +
+                                entry.columnName + "': " + location);
                 }
             }
         }
@@ -55,11 +59,18 @@ final class PixelsTagCompactionUpdateMap
 
     static final class Entry
     {
+        private final String columnName;
         private final byte[] tag;
         private final List<byte[]> rowIds;
 
         Entry(byte[] tag, List<byte[]> rowIds)
         {
+            this("", tag, rowIds);
+        }
+
+        Entry(String columnName, byte[] tag, List<byte[]> rowIds)
+        {
+            this.columnName = requireNonNull(columnName, "columnName is null");
             this.tag = requireNonNull(tag, "tag is null").clone();
             this.rowIds = List.copyOf(requireNonNull(rowIds, "rowIds is null"));
         }

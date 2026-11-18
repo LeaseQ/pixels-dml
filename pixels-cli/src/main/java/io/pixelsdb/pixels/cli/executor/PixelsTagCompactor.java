@@ -48,6 +48,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -73,7 +74,7 @@ final class PixelsTagCompactor
     private final Storage outputStorage;
     private final String targetPath;
     private final String tagColumnName;
-    private final Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates;
+    private final Map<PixelsTagCompactionUpdateMap.Location, Map<String, byte[]>> updates;
     private final Map<Long, IndexProto.IndexKey> primaryKeysByRowId;
     private final Map<Long, IndexProto.RowLocation> relocatedLocations = new HashMap<>();
     private final IndexService indexService;
@@ -96,14 +97,14 @@ final class PixelsTagCompactor
      */
     static final class TagIndexSnapshot
     {
-        private final Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates;
+        private final Map<PixelsTagCompactionUpdateMap.Location, Map<String, byte[]>> updates;
         private final int taggedRowCount;
         private final int primaryResolveRowCount;
         private final int primaryResolveRpcCount;
         private final long primaryResolveNanos;
 
         private TagIndexSnapshot(
-                Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates,
+                Map<PixelsTagCompactionUpdateMap.Location, Map<String, byte[]>> updates,
                 int taggedRowCount,
                 int primaryResolveRowCount,
                 int primaryResolveRpcCount,
@@ -116,7 +117,7 @@ final class PixelsTagCompactor
             this.primaryResolveNanos = primaryResolveNanos;
         }
 
-        Map<PixelsTagCompactionUpdateMap.Location, byte[]> getUpdates()
+        Map<PixelsTagCompactionUpdateMap.Location, Map<String, byte[]>> getUpdates()
         {
             return updates;
         }
@@ -148,7 +149,7 @@ final class PixelsTagCompactor
             Storage outputStorage,
             String targetPath,
             String tagColumnName,
-            Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates,
+            Map<PixelsTagCompactionUpdateMap.Location, Map<String, byte[]>> updates,
             Map<Long, IndexProto.IndexKey> primaryKeysByRowId,
             IndexService indexService,
             long primaryTableId,
@@ -312,9 +313,10 @@ final class PixelsTagCompactor
                 }
                 encodedRowIds.add(ByteBuffer.allocate(Long.BYTES).putLong(rowId).array());
             }
-            entries.add(new PixelsTagCompactionUpdateMap.Entry(entry.getTag().toByteArray(), encodedRowIds));
+            entries.add(new PixelsTagCompactionUpdateMap.Entry(
+                    entry.getColumnName(), entry.getTag().toByteArray(), encodedRowIds));
         }
-        Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates =
+        Map<PixelsTagCompactionUpdateMap.Location, Map<String, byte[]>> updates =
                 PixelsTagCompactionUpdateMap.build(entries, rowLocations);
         return new TagIndexSnapshot(updates, primaryKeyRowIds.size(),
                 resolvedRowCount, resolveRpcCount, resolveNanos);
@@ -436,10 +438,29 @@ final class PixelsTagCompactor
             firstReader.close();
         }
 
-        int tagColumn = schema.getFieldNames().indexOf(tagColumnName);
-        if (tagColumn < 0)
+        Map<String, Integer> tagColumns = new LinkedHashMap<>();
+        for (String configuredColumn : updates.values().stream()
+                .flatMap(columnUpdates -> columnUpdates.keySet().stream())
+                .distinct().toList())
         {
-            throw new IllegalArgumentException("tag column is not present in Pixels schema: " + tagColumnName);
+            String columnName = configuredColumn.isEmpty() ? tagColumnName : configuredColumn;
+            int column = schema.getFieldNames().indexOf(columnName);
+            if (column < 0)
+            {
+                for (int candidate = 0; candidate < schema.getFieldNames().size(); candidate++)
+                {
+                    if (schema.getFieldNames().get(candidate).equalsIgnoreCase(columnName))
+                    {
+                        column = candidate;
+                        break;
+                    }
+                }
+            }
+            if (column < 0)
+            {
+                throw new IllegalArgumentException("tag column is not present in Pixels schema: " + columnName);
+            }
+            tagColumns.put(configuredColumn, column);
         }
         int[] primaryKeyOrdinals = resolvePrimaryKeyOrdinals(schema);
 
@@ -464,7 +485,7 @@ final class PixelsTagCompactor
             OutputRowPosition outputPosition = new OutputRowPosition();
             for (String sourcePath : sourcePaths)
             {
-                compactSource(schema, tagColumn, primaryKeyOrdinals, writer, sourcePath, footerCache, outputPosition);
+                compactSource(schema, tagColumns, primaryKeyOrdinals, writer, sourcePath, footerCache, outputPosition);
             }
             writer.close();
             // PixelsWriterImpl finalizes the last row group while closing the
@@ -481,7 +502,7 @@ final class PixelsTagCompactor
 
     private void compactSource(
             TypeDescription schema,
-            int tagColumn,
+            Map<String, Integer> tagColumns,
             int[] primaryKeyOrdinals,
             PixelsWriter writer,
             String sourcePath,
@@ -526,8 +547,8 @@ final class PixelsTagCompactor
                                     .build());
                             pendingOutputLocations.add(outputPosition.location(0, position));
                         }
-                        applyUpdates(rowBatch, sourceFileId, rowGroupId, rowOffset, tagColumn,
-                                schema.getChildren().get(tagColumn));
+                        applyUpdates(rowBatch, sourceFileId, rowGroupId, rowOffset, tagColumns,
+                                schema);
                         attachHiddenColumn(rowBatch);
                         boolean rowGroupRemainsOpen = writer.addRowBatch(rowBatch);
                         outputPosition.advance(rowBatch.size, !rowGroupRemainsOpen);
@@ -674,17 +695,22 @@ final class PixelsTagCompactor
             long fileId,
             int rowGroupId,
             int rowOffset,
-            int tagColumn,
-            TypeDescription tagType)
+            Map<String, Integer> tagColumns,
+            TypeDescription schema)
     {
         for (int position = 0; position < rowBatch.size; position++)
         {
             PixelsTagCompactionUpdateMap.Location location =
                     new PixelsTagCompactionUpdateMap.Location(fileId, rowGroupId, rowOffset + position);
-            byte[] tag = updates.get(location);
-            if (tag != null)
+            Map<String, byte[]> columnUpdates = updates.get(location);
+            if (columnUpdates != null)
             {
-                setValue(rowBatch.cols[tagColumn], tagType, position, tag);
+                for (Map.Entry<String, byte[]> update : columnUpdates.entrySet())
+                {
+                    int tagColumn = tagColumns.get(update.getKey());
+                    setValue(rowBatch.cols[tagColumn], schema.getChildren().get(tagColumn),
+                            position, update.getValue());
+                }
             }
         }
     }

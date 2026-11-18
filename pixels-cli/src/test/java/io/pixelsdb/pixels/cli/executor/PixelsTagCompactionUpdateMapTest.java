@@ -26,7 +26,7 @@ class PixelsTagCompactionUpdateMapTest
         PixelsTagCompactionUpdateMap.Location second =
                 new PixelsTagCompactionUpdateMap.Location(10L, 2, 5);
 
-        Map<PixelsTagCompactionUpdateMap.Location, byte[]> updates =
+        Map<PixelsTagCompactionUpdateMap.Location, Map<String, byte[]>> updates =
                 PixelsTagCompactionUpdateMap.build(
                         List.of(new PixelsTagCompactionUpdateMap.Entry(
                                 "vip".getBytes(StandardCharsets.UTF_8),
@@ -34,8 +34,32 @@ class PixelsTagCompactionUpdateMapTest
                         Map.of(1L, first, 2L, second));
 
         assertEquals(2, updates.size());
-        assertArrayEquals("vip".getBytes(StandardCharsets.UTF_8), updates.get(first));
-        assertArrayEquals("vip".getBytes(StandardCharsets.UTF_8), updates.get(second));
+        assertArrayEquals("vip".getBytes(StandardCharsets.UTF_8), updates.get(first).get(""));
+        assertArrayEquals("vip".getBytes(StandardCharsets.UTF_8), updates.get(second).get(""));
+    }
+
+    @Test
+    void keepsDifferentTagColumnsForTheSamePhysicalRow()
+    {
+        PixelsTagCompactionUpdateMap.Location location =
+                new PixelsTagCompactionUpdateMap.Location(10L, 2, 4);
+
+        Map<PixelsTagCompactionUpdateMap.Location, Map<String, byte[]>> updates =
+                PixelsTagCompactionUpdateMap.build(
+                        List.of(
+                                new PixelsTagCompactionUpdateMap.Entry(
+                                        "tag_1_type", "vip".getBytes(StandardCharsets.UTF_8),
+                                        List.of(rowId(1))),
+                                new PixelsTagCompactionUpdateMap.Entry(
+                                        "tag_1_para", ByteBuffer.allocate(Double.BYTES)
+                                                .putDouble(3.14).array(), List.of(rowId(1)))),
+                        Map.of(1L, location));
+
+        assertEquals(2, updates.get(location).size());
+        assertArrayEquals("vip".getBytes(StandardCharsets.UTF_8),
+                updates.get(location).get("tag_1_type"));
+        assertArrayEquals(ByteBuffer.allocate(Double.BYTES).putDouble(3.14).array(),
+                updates.get(location).get("tag_1_para"));
     }
 
     @Test
