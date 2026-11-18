@@ -543,6 +543,20 @@ public class TestRecoveryCheckpoint
     }
 
     @Test
+    public void testGenerate_sameBodyPathDoesNotDeleteFreshlyRewrittenBody() throws Exception
+    {
+        String samePath = generatedBodyPath(4006L);
+        stubPointer(samePath);
+        stubCreateCapturingBody();
+        when(etcd.compareAndPut(eq(POINTER_KEY), eq(samePath), eq(samePath))).thenReturn(true);
+
+        checkpoint.generate(4006L, new ArrayList<>(), new ArrayList<>());
+
+        verify(etcd).compareAndPut(POINTER_KEY, samePath, samePath);
+        verify(storage, never()).delete(anyString(), eq(false));
+    }
+
+    @Test
     public void testGenerate_deleteDisplacedBodyFailure_doesNotFailPublish() throws Exception
     {
         stubPointer(BODY_PATH);

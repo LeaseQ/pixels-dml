@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -85,7 +86,7 @@ class PixelsTagCompactorSnapshotTest
                                     .setRgRowOffset(0)
                                     .build())
                             .build())
-                    .toList();
+                    .collect(Collectors.toList());
         }).when(indexService).resolvePrimaryEntries(anyLong(), anyLong(), any());
         PixelsTagCompactor.TagIndexSnapshot snapshot = PixelsTagCompactor.prepareTagIndexSnapshot(
                 List.of(IndexProto.TagIndexEntry.newBuilder()

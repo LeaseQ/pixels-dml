@@ -469,7 +469,14 @@ public final class RecoveryCheckpoint
         // Body is durable; publish the pointer atomically. If publish fails the
         // body becomes a one-round orphan and is overwritten/cleaned next round.
         String displacedPath = publishPointer(bodyPath);
-        if (displacedPath != null && !displacedPath.isEmpty())
+        // A restart can publish the same applied timestamp again: the new
+        // process starts with lastCheckpointAppliedTs == -1 while the etcd
+        // pointer still refers to the existing body for that timestamp. In
+        // that case Storage.create(..., overwrite=true) has already replaced
+        // the body in place. Deleting the displaced path here would delete
+        // the newly published body and leave a dangling pointer, making the
+        // next restart fail closed. Only remove a genuinely different body.
+        if (displacedPath != null && !displacedPath.isEmpty() && !bodyPath.equals(displacedPath))
         {
             try
             {

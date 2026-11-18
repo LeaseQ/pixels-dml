@@ -308,10 +308,25 @@ public class CompactExecutor implements CommandExecutor
                 final String finalTargetFilePath = targetFilePath;
                 final Path finalTargetPath = targetPath;
                 final List<Long> finalOldFileIds = List.copyOf(oldFileIds);
+                long sourceMinRowId = Long.MAX_VALUE;
+                long sourceMaxRowId = -1L;
+                for (long oldFileId : finalOldFileIds)
+                {
+                    File oldFile = metadataService.getFileById(oldFileId);
+                    if (oldFile != null && oldFile.getMinRowId() >= 0 &&
+                            oldFile.getMaxRowId() >= oldFile.getMinRowId())
+                    {
+                        sourceMinRowId = Math.min(sourceMinRowId, oldFile.getMinRowId());
+                        sourceMaxRowId = Math.max(sourceMaxRowId, oldFile.getMaxRowId());
+                    }
+                }
+                final long finalSourceMinRowId = sourceMinRowId;
+                final long finalSourceMaxRowId = sourceMaxRowId;
                 long threadStart = System.currentTimeMillis();
 
                 compactionTasks.add(compactExecutor.submit((Callable<Void>) () -> {
                     // Issue #192: run compaction in threads.
+                    long rewriteStartNanos = System.nanoTime();
                     int numRowGroup;
                     Map<Long, IndexProto.RowLocation> relocatedLocations = java.util.Collections.emptyMap();
                     Map<Long, IndexProto.IndexKey> primaryKeysByRowId = java.util.Collections.emptyMap();
@@ -346,10 +361,29 @@ public class CompactExecutor implements CommandExecutor
                     compactFile.setType(File.Type.TEMPORARY_GC);
                     compactFile.setNumRowGroup(numRowGroup);
                     compactFile.setPathId(finalTargetPath.getId());
+                    long minRowId = finalSourceMinRowId;
+                    long maxRowId = finalSourceMaxRowId;
+                    if (!relocatedLocations.isEmpty())
+                    {
+                        minRowId = relocatedLocations.keySet().stream()
+                                .mapToLong(Long::longValue)
+                                .min()
+                                .orElse(minRowId);
+                        maxRowId = relocatedLocations.keySet().stream()
+                                .mapToLong(Long::longValue)
+                                .max()
+                                .orElse(maxRowId);
+                    }
+                    if (minRowId >= 0 && maxRowId >= minRowId)
+                    {
+                        compactFile.setMinRowId(minRowId);
+                        compactFile.setMaxRowId(maxRowId);
+                    }
                     compactionResults.offer(new CompactionResult(
                             compactFile, finalTargetPath, finalOldFileIds,
                             relocatedLocations, primaryKeysByRowId,
-                            primaryResolveRowCount, primaryResolveRpcCount, primaryResolveNanos));
+                            primaryResolveRowCount, primaryResolveRpcCount, primaryResolveNanos,
+                            System.nanoTime() - rewriteStartNanos));
                     System.out.println("Compact file '" + finalTargetFilePath + "' is built in " +
                             ((System.currentTimeMillis() - threadStart) / 1000.0) + "s");
                     return null;
@@ -364,6 +398,13 @@ public class CompactExecutor implements CommandExecutor
         while (!compactExecutor.awaitTermination(100, TimeUnit.SECONDS));
         throwIfAnyCompactionFailed(compactionTasks);
         List<CompactionResult> results = new ArrayList<>(compactionResults);
+        long workerNanos = results.stream().mapToLong(CompactionResult::rewriteNanos).sum();
+        long workerWallNanos = results.stream().mapToLong(CompactionResult::rewriteNanos).max().orElse(0L);
+        long resolveNanos = results.stream().mapToLong(CompactionResult::primaryResolveNanos).sum();
+        System.out.println("[PIXELS_COMPACTION_STAGE_METRIC] stage=physical_rewrite outputs=" + results.size() +
+                " worker_ms=" + workerNanos / 1_000_000.0 +
+                " non_resolve_worker_ms=" + Math.max(0L, workerNanos - resolveNanos) / 1_000_000.0 +
+                " worker_wall_ms=" + workerWallNanos / 1_000_000.0);
         long cleanupAt = getRetireDeadline(configFactory);
         MetadataPublication metadataPublication = new MetadataPublication()
         {
@@ -398,6 +439,7 @@ public class CompactExecutor implements CommandExecutor
                 metadataService.atomicSwapFiles(newFileId, oldFileIds, deadline);
             }
         };
+        long publishStartNanos = System.nanoTime();
         if (useTagCompactor)
         {
             publishCompactionResults(results, indexService, primaryTableId, primaryIndexId,
@@ -407,6 +449,8 @@ public class CompactExecutor implements CommandExecutor
         {
             publishCompactionResults(results, metadataPublication, cleanupAt);
         }
+        System.out.println("[PIXELS_COMPACTION_STAGE_METRIC] stage=publish outputs=" + results.size() +
+                " publish_ms=" + (System.nanoTime() - publishStartNanos) / 1_000_000.0);
 
         if (retinaService.isEnabled())
         {
@@ -734,6 +778,7 @@ public class CompactExecutor implements CommandExecutor
         private final long primaryResolveRowCount;
         private final int primaryResolveRpcCount;
         private final long primaryResolveNanos;
+        private final long rewriteNanos;
 
         CompactionResult(File file, Path path,
                 Map<Long, IndexProto.RowLocation> relocatedLocations)
@@ -755,7 +800,7 @@ public class CompactExecutor implements CommandExecutor
                 Map<Long, IndexProto.IndexKey> primaryKeysByRowId)
         {
             this(file, path, oldFileIds, relocatedLocations, primaryKeysByRowId,
-                    0L, 0, 0L);
+                    0L, 0, 0L, 0L);
         }
 
         CompactionResult(File file, Path path,
@@ -764,7 +809,8 @@ public class CompactExecutor implements CommandExecutor
                 Map<Long, IndexProto.IndexKey> primaryKeysByRowId,
                 long primaryResolveRowCount,
                 int primaryResolveRpcCount,
-                long primaryResolveNanos)
+                long primaryResolveNanos,
+                long rewriteNanos)
         {
             this.file = file;
             this.path = path;
@@ -774,6 +820,7 @@ public class CompactExecutor implements CommandExecutor
             this.primaryResolveRowCount = primaryResolveRowCount;
             this.primaryResolveRpcCount = primaryResolveRpcCount;
             this.primaryResolveNanos = primaryResolveNanos;
+            this.rewriteNanos = rewriteNanos;
         }
 
         private File file()
@@ -814,6 +861,11 @@ public class CompactExecutor implements CommandExecutor
         private long primaryResolveNanos()
         {
             return primaryResolveNanos;
+        }
+
+        private long rewriteNanos()
+        {
+            return rewriteNanos;
         }
     }
 

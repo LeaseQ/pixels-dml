@@ -466,9 +466,11 @@ final class PixelsTagCompactor
             {
                 compactSource(schema, tagColumn, primaryKeyOrdinals, writer, sourcePath, footerCache, outputPosition);
             }
-            int rowGroupCount = writer.getNumRowGroup();
             writer.close();
-            return rowGroupCount;
+            // PixelsWriterImpl finalizes the last row group while closing the
+            // writer. Read the count only after close so the metadata catalog
+            // does not publish a compact file with numRowGroup=0.
+            return writer.getNumRowGroup();
         }
         catch (IOException | RuntimeException e)
         {

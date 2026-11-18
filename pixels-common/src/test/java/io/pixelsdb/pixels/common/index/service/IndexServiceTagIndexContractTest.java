@@ -9,6 +9,7 @@ import io.pixelsdb.pixels.index.IndexProto;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -28,7 +29,7 @@ class IndexServiceTagIndexContractTest
 
         assertEquals("new", update.getTag().toStringUtf8());
         assertEquals(List.of("1"), update.getPrimaryKeysList().stream()
-                .map(com.google.protobuf.ByteString::toStringUtf8).toList());
+                .map(com.google.protobuf.ByteString::toStringUtf8).collect(Collectors.toList()));
         assertEquals(7L, resolved.getRowId());
         assertEquals(11L, resolved.getRowLocation().getFileId());
     }
