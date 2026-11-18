@@ -175,6 +175,51 @@ This finding is kept separate from throughput numbers. The current 68-column
 benchmark acceptance gate is single configured tag-column correctness first;
 the 30-pair tag model remains the target capability to implement and validate.
 
+## Restart and recovery follow-up on 2026-11-19
+
+The first restart attempt exposed an environment-state problem rather than a
+data-file corruption problem. The current checkpoint body was missing, so the
+retina process could not start from the checkpoint pointer. A retained
+pre-clean checkpoint backup was used to bring the isolated validation runtime
+up; recovery completed with `baselineFiles=0` and 225 cleanser warnings, so
+that checkpoint was not sufficient to restore the table's file visibility by
+itself.
+
+The two physical files were still present and readable:
+
+- ordered source file, metadata file id `5358`, 594,365 bytes;
+- compact result, metadata file id `5359`, 673,141 bytes.
+
+Metadata inspection showed both file ids as `RETIRED`, leaving no `REGULAR`
+file for the table after restart. This explains the initial post-restart
+`count(*) = 0`; calling `addVisibility` alone was not enough because it does
+not change the metadata file lifecycle state. The compact result (`5359`) was
+promoted back to `REGULAR`, its stale cleanup deadline was cleared, and its
+visibility was registered. This is a state repair on the validation machine,
+not a source-code change.
+
+After the repair and Trino restart/cache refresh:
+
+```text
+SELECT count(*), min(id), max(id),
+       count_if(tag_1_type='CCC'),
+       count_if(tag_1_para=3.1400),
+       count_if(tag_1_type='CCC' AND tag_1_para=3.1400)
+FROM pixels.bench68_v2.tag_events_fixed;
+-- 10000 | 1 | 10000 | 10000 | 10000 | 10000
+
+UPDATE pixels.bench68_v2.tag_events_fixed
+SET tag_1_type='CCC', tag_1_para=3.1400
+WHERE id=1;
+-- UPDATE: 1 row
+```
+
+The subsequent row query returned `1 | CCC | 3.1400`, and the aggregate
+validation remained `10000 | 10000 | 10000 | 10000`. Thus the post-restart
+read and UPDATE paths are now verified, but automatic checkpoint restoration
+without manual metadata repair remains an environment/recovery item for the
+next clean-runtime test.
+
 ## Acceptance rules
 
 The benchmark is considered valid only if all of the following are true:
