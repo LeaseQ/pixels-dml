@@ -140,8 +140,13 @@ connector-side cost for this INSERT shape. A four-thread client fan-out was
 also tested and regressed to about 160.5 s end-to-end; a sixteen-thread
 fan-out regressed to about 145.8 s. Both are rejected and were not retained.
 The current branch keeps serial publication and adds low-overhead counters in
-the Trino sink. The next experiment should be a server-side grouped primary
-index write or a RocksDB write-path optimization, not more client fan-out.
+the Trino sink. A warm repeat on the same table took 9.027 s for 1M rows:
+the primary RPC wall interval was 5.018 s, while file writes were 0.146 s and
+the main-index flush was 0.386 s. The daemon log attributes the cold penalty to
+serial creation of vnode 0..127 column families under the global
+`SinglePointIndexFactory` lock. The next experiment should therefore prewarm
+those vnodes and then evaluate a server-side grouped primary-index write or a
+RocksDB write-path optimization, not more client fan-out.
 
 Known unrelated test issues:
 

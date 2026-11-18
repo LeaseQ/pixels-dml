@@ -76,7 +76,22 @@ and about 1.3-1.5 s building the primary-index batches. The index writer then
 made exactly 128 primary-index RPCs, one per vnode. The serial primary-index
 publication measured about 109 s of wall time; the main-index flush was only
 about 0.4 s. This makes the primary-index service, not Pixels file encoding,
-the dominant connector-side cost for this route.
+the dominant connector-side cost for this cold-table route.
+
+The cold cost was then separated from the warm write path. Reusing a table
+whose 128 vnode indexes had already been opened, a second 1M-row INSERT took
+9.027 s end to end (about 111k rows/s); the sink measured 5.018 s for primary
+RPC wall time, 1.015 s for key/batch construction, 0.146 s for file writes,
+and 0.386 s for the main-index flush. The daemon log shows the first-use
+serialization explicitly: `SinglePointIndexFactory` creates vnode 0 through
+127 under its global lock, and each RocksDB column-family creation takes about
+1.2 s. The earlier 109 s is therefore primarily cold vnode/column-family
+initialization, not the steady-state cost of writing 1M primary entries.
+
+This distinction changes the optimization order: pre-create or asynchronously
+warm the vnode indexes before the first INSERT, then optimize the remaining
+warm primary-index write path. Reducing vnode count or changing the storage
+layout is not being applied as an unreviewed production change.
 
 Two exploratory client-side concurrency changes were deliberately rejected:
 publishing the 128 vnode RPCs with a four-thread pool took about 154.2 s in the
@@ -88,12 +103,13 @@ client fan-out is not a valid optimization for this deployment and is not
 part of the pushed implementation.
 
 JFR samples still show visible Trino cost in UNNEST projection/page merge and
-HTTP page transport, but the connector counters establish that the 128 primary
-index writes dominate the successful 1M-row run. The next optimization should
-therefore be server-side: reduce vnode write/flush overhead or introduce a
-carefully designed grouped primary-index write, while preserving the tagging
-and crash-safe publication order. A clean-runtime repeat is required before
-claiming any new throughput number.
+HTTP page transport. The connector counters establish that cold vnode
+initialization dominates the first INSERT, while the warm run still spends
+about half its time in primary-index RPCs. The next optimization should
+therefore be server-side: prewarm vnode indexes and then reduce vnode
+write/flush overhead or introduce a carefully designed grouped primary-index
+write, while preserving the tagging and crash-safe publication order. A
+clean-runtime repeat is required before claiming any new throughput number.
 
 The isolated validation harness also hit Java heap exhaustion after repeatedly
 creating test tables and writer buffers. Raising the isolated Retina heap to
