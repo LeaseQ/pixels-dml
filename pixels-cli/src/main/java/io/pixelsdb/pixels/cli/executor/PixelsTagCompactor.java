@@ -32,9 +32,11 @@ import io.pixelsdb.pixels.core.vector.BinaryColumnVector;
 import io.pixelsdb.pixels.core.vector.BooleanColumnVector;
 import io.pixelsdb.pixels.core.vector.ByteColumnVector;
 import io.pixelsdb.pixels.core.vector.ColumnVector;
+import io.pixelsdb.pixels.core.vector.DecimalColumnVector;
 import io.pixelsdb.pixels.core.vector.DoubleColumnVector;
 import io.pixelsdb.pixels.core.vector.FloatColumnVector;
 import io.pixelsdb.pixels.core.vector.IntColumnVector;
+import io.pixelsdb.pixels.core.vector.LongDecimalColumnVector;
 import io.pixelsdb.pixels.core.vector.LongColumnVector;
 import io.pixelsdb.pixels.core.vector.ShortColumnVector;
 import io.pixelsdb.pixels.core.vector.VectorizedRowBatch;
@@ -759,6 +761,29 @@ final class PixelsTagCompactor
                 return;
             case DOUBLE:
                 ((DoubleColumnVector) target).vector[position] = ByteBuffer.wrap(value).getLong();
+                return;
+            case DECIMAL:
+                if (type.getPrecision() <= TypeDescription.MAX_SHORT_DECIMAL_PRECISION)
+                {
+                    if (value.length != Long.BYTES)
+                    {
+                        throw new IllegalArgumentException("short decimal tag requires " +
+                                Long.BYTES + " bytes, got " + value.length);
+                    }
+                    ((DecimalColumnVector) target).vector[position] = ByteBuffer.wrap(value).getLong();
+                }
+                else
+                {
+                    if (value.length != 2 * Long.BYTES)
+                    {
+                        throw new IllegalArgumentException("long decimal tag requires " +
+                                (2 * Long.BYTES) + " bytes, got " + value.length);
+                    }
+                    ByteBuffer buffer = ByteBuffer.wrap(value);
+                    LongDecimalColumnVector decimal = (LongDecimalColumnVector) target;
+                    decimal.vector[position * 2] = buffer.getLong();
+                    decimal.vector[position * 2 + 1] = buffer.getLong();
+                }
                 return;
             default:
                 throw new IllegalArgumentException("unsupported tag column type: " + type.getCategory());
