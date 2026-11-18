@@ -77,6 +77,8 @@ baseline, not as an acceptance result:
 | CSV base load | 1M | 181.868 s | 5.5k rows/s | 16 loader threads; cold 68-column/index setup |
 | table-to-table INSERT | 1M | 19.092 s | 52.4k rows/s | warm table, IDs offset by 1M |
 | exact tag UPDATE | 1M | 16.260 s | 61.5k rows/s | two tag assignments; UPDATE reports 1M rows |
+| tag-aware COMPACT | 10K | 5.708 s | 1.75k rows/s | single `tag_1_type` assignment; visibility passed |
+| tag-aware COMPACT | 90K | 15.347 s | 5.86k rows/s | incremental rewrite only; multi-column case, not accepted |
 
 The daemon metric for the UPDATE recorded two tag-index updates with one
 million primary keys each. The tag-index service time was about 5.50 s, of
