@@ -190,6 +190,31 @@ varchar tag types, and decimal tag parameters. The historical table is
 therefore a narrow single-tag baseline, not an apples-to-apples measurement of
 the attached dataset.
 
+### Controlled 10K width/cold-start probe on 2026-11-19
+
+A same-runtime probe used the same 10,000 source ids and two comparison
+tables. The narrow table had `(id bigint, value bigint, tag_1_type bigint)`;
+the wide table used the 68-column schema. The first narrow INSERT took about
+271.0 s, while its warm repeat took 2.956 s. The 68-column warm repeat took
+3.446 s by client wall clock; client startup overhead makes these small
+wall-clock values approximate, so connector metrics are the better comparison:
+
+| Warm 10K stage | Narrow | Wide |
+|---|---:|---:|
+| PixelsWriter `write_ms` | 44.980 ms | 128.805 ms |
+| index-writer `index_ms` | 65.626 ms | 94.915 ms |
+| primary-index `primary_put_ms` | 334.445 ms | 287.277 ms |
+
+The cold narrow run recorded `primary_put_ms=268192.863` ms, essentially the
+same cold-order magnitude as the earlier wide 10K run's `250147.142` ms. This
+separates two effects: wider rows materially increase file-vector encoding
+work in this probe (about 2.9x in `write_ms`), while the dominant cold cost is
+128 primary-index vnode initialization and is not caused by the extra columns.
+The warm primary-index numbers are in the same range, so the large historical
+1M gap cannot yet be attributed to column width alone; the next probe must
+measure 100K/1M warm runs with identical producer, file count, row-group, and
+index-warm-up conditions.
+
 This finding is kept separate from throughput numbers. The current 68-column
 benchmark acceptance gate is single configured tag-column correctness first;
 the 30-pair tag model remains the target capability to implement and validate.
