@@ -571,6 +571,15 @@ final class PixelsTagCompactor
                         writerNanos += System.nanoTime() - writerStartNanos;
                         outputPosition.advance(rowBatch.size, !rowGroupRemainsOpen);
                         rowOffset += rowBatch.size;
+                        if (sourceBatchCount % 100 == 0)
+                        {
+                            System.out.println("[PIXELS_COMPACTION_ROW_PROGRESS] source=" + sourcePath +
+                                    " rows=" + sourceRows +
+                                    " read_ms=" + readNanos / 1_000_000.0 +
+                                    " primary_key_ms=" + primaryKeyNanos / 1_000_000.0 +
+                                    " update_ms=" + updateNanos / 1_000_000.0 +
+                                    " writer_ms=" + writerNanos / 1_000_000.0);
+                        }
                         if (pendingPrimaryKeys.size() >= MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC)
                         {
                             resolveAndRecordPrimaryRows(pendingPrimaryKeys, pendingOutputLocations);
