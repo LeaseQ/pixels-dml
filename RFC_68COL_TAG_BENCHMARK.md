@@ -171,6 +171,17 @@ The prior warm 1M baselines remain the better steady-state indicators
 (approximately 52.4k INSERT rows/s and 61.5k UPDATE rows/s), both below the
 hundreds-of-thousands target.
 
+These numbers must not be conflated with the historical results in
+`RFC_MILLION_UPDATE_INSERT_DURABILITY.md`. That RFC recorded, on the earlier
+`validation8` 1M-row table, approximately 410k rows/s for table-to-table
+INSERT and 271k--362k rows/s for exact-key UPDATE. Those are valid historical
+observations, but the old record does not preserve enough schema, exact SQL,
+file layout, and warm-up details to make them a reproducible result for this
+68-column dataset. The current primary benchmark deliberately uses the
+attached 68-column fixture and the tagging E2E contract, so its lower rates
+are the numbers to use for this workload until the old high-throughput route
+is reproduced under the same dataset and configuration.
+
 This finding is kept separate from throughput numbers. The current 68-column
 benchmark acceptance gate is single configured tag-column correctness first;
 the 30-pair tag model remains the target capability to implement and validate.
