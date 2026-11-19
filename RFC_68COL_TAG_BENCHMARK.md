@@ -182,6 +182,14 @@ attached 68-column fixture and the tagging E2E contract, so its lower rates
 are the numbers to use for this workload until the old high-throughput route
 is reproduced under the same dataset and configuration.
 
+The schema difference is now confirmed directly on cds20: the historical
+`pixels.validation8.e2e_durable` table is only
+`(id bigint, value bigint, tag_1_type bigint)`, while
+`pixels.bench68_v2.tag_events_fixed` has 68 columns, including 30 tag pairs,
+varchar tag types, and decimal tag parameters. The historical table is
+therefore a narrow single-tag baseline, not an apples-to-apples measurement of
+the attached dataset.
+
 This finding is kept separate from throughput numbers. The current 68-column
 benchmark acceptance gate is single configured tag-column correctness first;
 the 30-pair tag model remains the target capability to implement and validate.
