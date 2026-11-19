@@ -264,6 +264,21 @@ The connector branch now contains a width probe (`pixels-trino-dml` commit
 contract; its output is intentionally not treated as a result until it runs in
 the same Java/Protobuf environment as the E2E connector.
 
+That same Java 11/Protobuf runtime micro-probe has now quantified the wire
+growth for one million 8-byte primary keys:
+
+```text
+assignments=1  request_bytes=10000018
+assignments=2  request_bytes=20000032
+assignments=4  request_bytes=40000060
+assignments=8  request_bytes=80000116
+```
+
+The growth is effectively one full primary-key vector per assignment.  Eight
+columns already exceed the default 64 MiB gRPC limit, so the shared-key design
+is not merely a micro-optimization; it is also required for wider exact UPDATE
+statements to remain representable without raising the global message limit.
+
 ## Acceptance criteria and remaining work
 
 - [x] INSERT files publish as `REGULAR` with a valid row-id hull.
