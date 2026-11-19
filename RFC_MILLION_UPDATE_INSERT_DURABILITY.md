@@ -51,7 +51,7 @@ garbage collection and compaction can be asynchronous.
 | Route | 1M-row result | Rate | Status |
 |---|---:|---:|---|
 | Exact-key UPDATE | 2.7-3.7 s SQL wall | 271k-362k rows/s | Meets minimum target |
-| Table-to-table INSERT | about 2.44 s | about 410k rows/s | Meets minimum target |
+| Table-to-table INSERT | about 2.44 s | about 410k rows/s | Historical claim; not reproduced |
 | Synthetic `UNNEST` INSERT, concurrency 1 | 33.5 s on clean run | about 29.8k rows/s | Below target |
 | Synthetic `UNNEST` INSERT, concurrency 4 | 77.830 s on validation8 | 12,848 rows/s | Correct but below target |
 | COMPACT | about 48-50.5 s | not the write target | Correctness gate |
@@ -61,6 +61,15 @@ the lower target; synthetic UNNEST is dominated by Trino row generation,
 fragmentation, and concurrent index-flush behaviour. The default synthetic
 concurrency also reproduced `INDEX_FLUSH_MAIN_INDEX_FAIL` (error 10614), while
 the explicit concurrency-4 run completed successfully.
+
+The retained instrumented logs do not contain a matching 2.44 s INSERT
+measurement. They do contain a serial warm 1M INSERT with
+`primary_put_wall_ms=5017.614` ms and a four-thread experiment with
+`primary_put_wall_ms=2050.439` ms; the latter still had a summed
+`primary_put_ms=7794.409` ms and did not produce a 2.44 s end-to-end result.
+Until the exact SQL, schema, index mode, and complete wall-clock log for the
+2.44 s claim are recovered, that number is historical evidence rather than a
+reproducible acceptance baseline.
 
 The successful exact-key UPDATE route is confirmed in route logs as
 `executor=MPP exact_eligible=true`, with one primary-key domain and one RPC.
