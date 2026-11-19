@@ -256,31 +256,54 @@ public final class PixelsTagIndex implements Closeable
             return;
         }
         long batchStartNanos = System.nanoTime();
-        Map<PrimaryColumnKey, VersionedKey> latestByPrimaryKey = new LinkedHashMap<>();
+        Set<String> columns = new HashSet<>();
+        boolean distinctColumns = true;
         for (VersionedUpdate update : updates) {
             requireNonNull(update, "update is null");
             if (update.transactionTimestamp() <= 0) {
                 throw new IllegalArgumentException("batched tag updates require a positive transaction timestamp");
             }
-            // One immutable version key is enough for all primary keys in this
-            // update.  Cloning the tag and allocating a LatestValue per row
-            // becomes material for million-row UPDATE batches.
-            VersionedKey versionedKey = new VersionedKey(update.tag(), update.transactionTimestamp());
-            String columnName = TagIndexKeyCodec.columnName(update.tag());
-            for (byte[] primaryKey : update.primaryKeys()) {
-                PrimaryColumnKey key = new PrimaryColumnKey(primaryKey, columnName);
-                VersionedKey previous = latestByPrimaryKey.get(key);
-                if (previous == null || versionedKey.timestamp() >= previous.timestamp()) {
-                    latestByPrimaryKey.put(key, versionedKey);
-                }
-            }
+            distinctColumns &= columns.add(TagIndexKeyCodec.columnName(update.tag()));
         }
         long dedupNanos = System.nanoTime() - batchStartNanos;
         long groupStartNanos = System.nanoTime();
         Map<VersionedKey, List<byte[]>> grouped = new LinkedHashMap<>();
-        for (Map.Entry<PrimaryColumnKey, VersionedKey> entry : latestByPrimaryKey.entrySet()) {
-            grouped.computeIfAbsent(entry.getValue(), ignored -> new ArrayList<>())
-                    .add(entry.getKey().primaryKey());
+        int primaryKeyCount;
+        if (distinctColumns)
+        {
+            // UPDATE normally sends one VersionedUpdate per changed column.
+            // When columns are distinct, updates cannot compete for the same
+            // (primary key, column) slot, so avoid allocating one
+            // PrimaryColumnKey for every row and preserve the request lists
+            // directly for the later codec merge.
+            primaryKeyCount = 0;
+            for (VersionedUpdate update : updates)
+            {
+                VersionedKey versionedKey = new VersionedKey(update.tag(), update.transactionTimestamp());
+                List<byte[]> primaryKeys = grouped.computeIfAbsent(versionedKey, ignored -> new ArrayList<>());
+                primaryKeys.addAll(update.primaryKeys());
+                primaryKeyCount += update.primaryKeys().size();
+            }
+        }
+        else
+        {
+            Map<PrimaryColumnKey, VersionedKey> latestByPrimaryKey = new LinkedHashMap<>();
+            for (VersionedUpdate update : updates) {
+                VersionedKey versionedKey = new VersionedKey(update.tag(), update.transactionTimestamp());
+                String columnName = TagIndexKeyCodec.columnName(update.tag());
+                for (byte[] primaryKey : update.primaryKeys()) {
+                    PrimaryColumnKey key = new PrimaryColumnKey(primaryKey, columnName);
+                    VersionedKey previous = latestByPrimaryKey.get(key);
+                    if (previous == null || versionedKey.timestamp() >= previous.timestamp()) {
+                        latestByPrimaryKey.put(key, versionedKey);
+                    }
+                }
+            }
+            primaryKeyCount = latestByPrimaryKey.size();
+            for (Map.Entry<PrimaryColumnKey, VersionedKey> entry : latestByPrimaryKey.entrySet()) {
+                grouped.computeIfAbsent(entry.getValue(), ignored -> new ArrayList<>())
+                        .add(entry.getKey().primaryKey());
+            }
         }
         long groupNanos = System.nanoTime() - groupStartNanos;
         try (WriteBatch batch = new WriteBatch()) {
@@ -322,7 +345,7 @@ public final class PixelsTagIndex implements Closeable
             }
             long cacheNanos = System.nanoTime() - cacheStartNanos;
             System.out.println("[PIXELS_TAG_INDEX_STORAGE_METRIC] updates=" + updates.size() +
-                    " primaryKeys=" + latestByPrimaryKey.size() +
+                    " primaryKeys=" + primaryKeyCount +
                     " groups=" + grouped.size() +
                     " dedup_ms=" + dedupNanos / 1_000_000.0 +
                     " group_ms=" + groupNanos / 1_000_000.0 +
