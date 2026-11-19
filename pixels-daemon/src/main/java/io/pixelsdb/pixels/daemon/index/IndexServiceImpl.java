@@ -296,7 +296,9 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             long tableId = request.getTableId();
             long indexId = request.getIndexId();
             IndexOption indexOption = new IndexOption(request.getIndexOption());
+            long singlePointInitStartNanos = System.nanoTime();
             SinglePointIndex singlePointIndex = SinglePointIndexFactory.Instance().getSinglePointIndex(tableId, indexId, indexOption);
+            long singlePointInitNanos = System.nanoTime() - singlePointInitStartNanos;
             long singlePointStartNanos = System.nanoTime();
             boolean success = singlePointIndex.putPrimaryEntries(entries);
             long singlePointNanos = System.nanoTime() - singlePointStartNanos;
@@ -309,7 +311,9 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                 builder.setErrorCode(ErrorCode.INDEX_PUT_SINGLE_POINT_INDEX_FAIL);
             }
 
+            long mainIndexInitStartNanos = System.nanoTime();
             MainIndex mainIndex = MainIndexFactory.Instance().getMainIndex(tableId);
+            long mainIndexInitNanos = System.nanoTime() - mainIndexInitStartNanos;
             long mainIndexStartNanos = System.nanoTime();
             for (Boolean mainSuccess : mainIndex.putEntries(entries))
             {
@@ -318,13 +322,15 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                     throw new MainIndexException("Failed to put entry into main index");
                 }
             }
-            logger.info("[PIXELS_PRIMARY_INDEX_METRIC] table_id={} index_id={} vnode={} file_id={} entries={} single_point_ms={} main_index_ms={} total_ms={}",
+            logger.info("[PIXELS_PRIMARY_INDEX_METRIC] table_id={} index_id={} vnode={} file_id={} entries={} single_point_init_ms={} single_point_ms={} main_index_init_ms={} main_index_ms={} total_ms={}",
                     tableId,
                     indexId,
                     indexOption.getVNodeId(),
                     entries.isEmpty() ? -1L : entries.get(0).getRowLocation().getFileId(),
                     entries.size(),
+                    singlePointInitNanos / 1_000_000.0,
                     singlePointNanos / 1_000_000.0,
+                    mainIndexInitNanos / 1_000_000.0,
                     (System.nanoTime() - mainIndexStartNanos) / 1_000_000.0,
                     (System.nanoTime() - totalStartNanos) / 1_000_000.0);
         }

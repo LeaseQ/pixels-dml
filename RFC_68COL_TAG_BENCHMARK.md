@@ -230,6 +230,45 @@ same range. This confirms a measurable width penalty but not a 4--8x penalty;
 the remaining 1M discrepancy needs producer, file-count, row-group, and
 runtime warm-up controls.
 
+## Index-service stage instrumentation on 2026-11-19
+
+To separate index initialization from steady-state writes, the isolated Retina
+instance was rebuilt from commit `a13191f4` plus stage timing in
+`IndexServiceImpl.putPrimaryIndexEntries`. The new log fields are
+`single_point_init_ms`, `single_point_ms`, `main_index_init_ms`,
+`main_index_ms`, and `total_ms`.
+
+After restoring the retained checkpoint body and completing the normal
+`MarkReady` handshake, a 10,000-row narrow table-to-table INSERT was run with
+new primary keys. The connector reported `primary_put_wall_ms=15446.208` ms.
+The first vnode reported:
+
+```text
+vnode=0 entries=68 single_point_init_ms=15121.650875
+single_point_ms=3.887536 main_index_init_ms=0.005376
+main_index_ms=0.552513 total_ms=15126.14014
+```
+
+The remaining 127 vnodes had single-point initialization around 0.09--0.17 ms,
+single-point writes below about 1.1 ms, main-index initialization around
+0.002 ms, and main-index writes below about 0.4 ms. This attributes the cold
+probe's large cost to opening/initializing the first single-point index, not to
+per-row RocksDB writes or the main-index batch write.
+
+A same-process warm repeat over another 10,000 new keys completed in 2.733 s.
+Its connector metrics were `primary_put_wall_ms=289.409` ms,
+`primary_put_ms=285.705` ms, `append_ms=24.286`, and `main_flush_ms=22.839`;
+the sampled vnodes reported `single_point_init_ms` around 0.01--0.02 ms.
+This confirms a large cold-start penalty and a much smaller warm steady-state
+index cost. It also explains why cold-table numbers must not be compared
+directly with warm 1M throughput numbers.
+
+This probe does not claim that the first-vnode 15.1 s is the full 128-vnode
+initialization cost: the other vnodes were initialized concurrently or had
+already been prepared by the runtime. The next optimization target is the
+single-point index creation/open path and its initialization scheduling; the
+steady-state write path is not currently the leading bottleneck.
+
 A controlled 1M-row expansion then used the same 10K physical source fixture,
 the same `sequence(0, 99)` producer, and already-warm target indexes. The
 narrow table completed in 11.439 s (about 87.4k rows/s); the 68-column table
@@ -325,6 +364,8 @@ The benchmark is considered valid only if all of the following are true:
    rewrite, relocation, and publish metrics.
 4. Run exact UPDATE at 100K and 1M on the 68-column table, followed by the
    visibility and restart checks.
-5. Investigate the primary-index cold-start cost and the remaining warm-path
-   gap to the hundreds-of-thousands rows/s target.
-6. Only after the ladder is stable, begin the 1B-row load and long-run test.
+5. Investigate single-point index creation/open scheduling and remove the
+   first-vnode cold-start stall before comparing steady-state throughput.
+6. Re-run the controlled 1M warm INSERT after that change, then measure the
+   exact UPDATE ladder with the same index-state controls.
+7. Only after the ladder is stable, begin the 1B-row load and long-run test.
