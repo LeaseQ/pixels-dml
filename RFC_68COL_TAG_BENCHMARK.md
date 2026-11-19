@@ -241,6 +241,16 @@ but it does not explain the historical 410k rows/s versus current 55.6k
 rows/s gap by itself: primary-index publication remains about 7.5--7.9 s in
 both runs.
 
+As a producer control, a physical table-to-table probe was also run without
+`UNNEST`. The narrow target inserted 1.11M rows in 13.073 s (about 85k/s);
+the wide target inserted 2.10M rows in 35.578 s (about 59k/s). After
+normalizing by row count, the primary-index wall time was about 8.43 s/M rows
+for the narrow run and 8.09 s/M rows for the wide run, while the writer time
+was about 0.19 s/M vs 0.92 s/M. Thus a pre-materialized table-to-table source
+does not reproduce the historical 410k rows/s on the current runtime; the
+remaining gap must include index-service/runtime configuration or historical
+test-state differences in addition to column width.
+
 This finding is kept separate from throughput numbers. The current 68-column
 benchmark acceptance gate is single configured tag-column correctness first;
 the 30-pair tag model remains the target capability to implement and validate.
