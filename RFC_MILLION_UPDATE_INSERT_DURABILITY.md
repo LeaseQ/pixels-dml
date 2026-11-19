@@ -259,6 +259,10 @@ The same measurements show a second protocol opportunity: the two-column
 million-row UPDATE request was `20,000,065` bytes because the primary-key list
 is repeated for each changed column.  A shared-primary-key batch is a promising
 follow-up for reducing both RPC bytes and server-side decoding/allocation.
+The connector branch now contains a width probe (`pixels-trino-dml` commit
+`8c170da`) that measures 1/2/4/8 assignment requests before changing the wire
+contract; its output is intentionally not treated as a result until it runs in
+the same Java/Protobuf environment as the E2E connector.
 
 ## Acceptance criteria and remaining work
 
