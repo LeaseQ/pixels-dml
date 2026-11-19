@@ -112,7 +112,10 @@ final class PixelsTagCompactor
                 int primaryResolveRpcCount,
                 long primaryResolveNanos)
         {
-            this.updates = Map.copyOf(requireNonNull(updates, "updates is null"));
+            // PixelsTagCompactionUpdateMap.build already returns an unmodifiable
+            // map.  Copying it here rehashes every tagged row and becomes a
+            // dominant cost for million-row snapshots.
+            this.updates = requireNonNull(updates, "updates is null");
             this.taggedRowCount = taggedRowCount;
             this.primaryResolveRowCount = primaryResolveRowCount;
             this.primaryResolveRpcCount = primaryResolveRpcCount;
@@ -167,7 +170,9 @@ final class PixelsTagCompactor
         this.outputStorage = requireNonNull(outputStorage, "outputStorage is null");
         this.targetPath = requireNonNull(targetPath, "targetPath is null");
         this.tagColumnName = requireNonNull(tagColumnName, "tagColumnName is null");
-        this.updates = Map.copyOf(requireNonNull(updates, "updates is null"));
+        // The snapshot owns an immutable update map.  Reusing it avoids a
+        // second million-entry Map.copyOf before compaction starts.
+        this.updates = requireNonNull(updates, "updates is null");
         // Tag rows are resolved before the rewrite; source rows are resolved in
         // bounded batches while they are read, so this map must remain mutable
         // until compact() has finished.
