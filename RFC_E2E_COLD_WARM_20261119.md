@@ -300,6 +300,15 @@ rows/s is therefore met for warm exact UPDATE; the million-row/s upper target
 is not met yet.  The remaining warm cost is mainly merge/encoding, RPC/service
 overhead, and the one-time handle initialization on a cold process.
 
+The request-size metric also identifies a protocol-level opportunity.  The
+two-column million-row UPDATE serialized to `20,000,065` bytes because the same
+million primary keys are carried once per changed column.  This is harmless at
+two columns but scales linearly with the number of assignments and is the
+mirror image of the large compaction response.  A future shared-primary-key
+batch can carry the key vector once and attach multiple column/tag updates to
+it; it should be evaluated after the streaming compatibility fix, with the
+existing per-column RPC retained as the fallback for non-uniform key sets.
+
 For the optimized compaction, the remaining cost is now measurable rather than
 opaque: 12.96 s resolves tagged rows, 7.17 s is non-resolve physical rewrite,
 and 9.49 s is publication/index relocation.  The full UPDATE-plus-compaction
@@ -329,11 +338,14 @@ required for that exact fast-path case.
    server streaming, then rerun the million-row multi-column compaction E2E.
 4. Prototype a grouped server-side Tag Index update path and benchmark it
    against the current per-primary-key `PrimaryColumnKey` dedup loop.
-5. Reduce the compaction case to one or a few files/columns and compare row
+5. Prototype a shared-primary-key UPDATE request for multi-column exact
+   updates; compare request bytes and RPC time against the current
+   `TagIndexUpdate` representation.
+6. Reduce the compaction case to one or a few files/columns and compare row
    width, file size, and direct-I/O throughput against the now-known snapshot
    baseline.
-6. Add RocksDB internal timing for batch construction versus `write()` on the
+7. Add RocksDB internal timing for batch construction versus `write()` on the
    warm exact UPDATE path.
-7. Prototype vnode prewarm as a separately measurable change; do not change
+8. Prototype vnode prewarm as a separately measurable change; do not change
    the tagging contract or merge fallback semantics.
 
