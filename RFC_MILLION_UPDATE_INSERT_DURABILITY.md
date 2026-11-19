@@ -235,6 +235,31 @@ used to claim that recovery can skip replay in production.
   `1db22f61f8f6128b0f96c7460619d33d7cdd7c378dcad18032dac2c0def35338`.
 - Detailed commit bodies and this RFC are required for future pushes.
 
+## Follow-up exploration on 2026-11-20
+
+The warm exact UPDATE path was further optimized with a guarded
+distinct-column batch path.  A million-row update of one tag pair reached
+`1.607 s` connector metric time, approximately `622,400 rows/s`, with one
+IndexServer RPC.  The same path retains the old latest-timestamp fallback when
+the request repeats a column name.  The lower several-hundred-thousand target
+is met for warm exact UPDATE; the stretch target near one million rows/s is not
+met yet.  Cold TagIndex handle initialization remains a separate one-time cost.
+
+The next compaction probe found a protocol ceiling: listing all TagIndex
+entries in one unary response produced about 100 MB and failed at the default
+64 MiB gRPC limit.  The isolated runtime could read it after raising the
+inbound limit to 256 MiB, but the durable fix is server streaming or paging.
+Commit `3c3f8f99` adds a compatibility-preserving streaming RPC with bounded
+primary-key chunks; commit `55aa2028` adds automatic fallback to the old unary
+RPC during rolling upgrades.  These source changes are pushed but are not yet
+deployed into the isolated runtime, so they are not counted as accepted E2E
+performance evidence.
+
+The same measurements show a second protocol opportunity: the two-column
+million-row UPDATE request was `20,000,065` bytes because the primary-key list
+is repeated for each changed column.  A shared-primary-key batch is a promising
+follow-up for reducing both RPC bytes and server-side decoding/allocation.
+
 ## Acceptance criteria and remaining work
 
 - [x] INSERT files publish as `REGULAR` with a valid row-id hull.
