@@ -10,8 +10,9 @@ This run validates the current tagging-first DML architecture on the isolated
 3. table-to-table `INSERT`, and
 4. exact primary-key `UPDATE` without including `COMPACT` in its timing.
 
-The test used the branch tip `8d17848e` and the staged index instrumentation
-already recorded in `defbebe7`.  Runtime configuration was restored to the
+The test started from the compaction snapshot fix at `8d17848e`, then added
+the storage timing instrumentation in `7b67cb88` and the distinct-column fast
+path in `998b4b2d`.  Runtime configuration was restored to the
 baseline multi-column-family mode:
 
 ```text
@@ -219,6 +220,53 @@ still rejected a missing checkpoint body whenever REGULAR files existed.  The
 runtime fix now honors the opt-in setting, allowing the isolated service to
 bootstrap existing regular files.  The main 8090 runtime was not restarted.
 
+### 6. Distinct-column Tag Index fast path
+
+The warm UPDATE storage breakdown showed that the normal exact UPDATE shape
+creates one `VersionedUpdate` per changed column.  Commit `998b4b2d` adds a
+guarded fast path for this shape: when all update column names are distinct, the
+server skips the per-row `PrimaryColumnKey` allocation and latest-by-primary-key
+map.  If a request repeats a column name, the existing fallback path is kept so
+the latest-timestamp semantics are unchanged.
+
+The A/B results were:
+
+```text
+baseline tag_3 warm UPDATE:
+  total_ms=3510.926  approx=284,800 rows/s
+  dedup_ms=1832.143  group_ms=452.110  merge_ms=366.673
+  storage_ms=2731.063
+
+fast path tag_5 warm UPDATE:
+  total_ms=1606.733  approx=622,400 rows/s
+  decodeMs=275.558  storageMs=672.765  serviceMs=967.440
+  dedup_ms=0.038  group_ms=177.093  merge_ms=428.073
+  rocks_write_ms=49.837  cache_ms=15.903
+  rpc_count=1  request_bytes=20000065
+```
+
+The first fast-path UPDATE on `tag_4` included cold Tag Index handle
+initialization and took `18.830 s` in the Trino metric; its storage stage was
+only `937.392 ms`.  This separates the one-time handle cost from the batch
+preparation cost and confirms that the fast path is effective once the handle
+is warm.
+
+The follow-up compaction probe exposed a separate protocol limit.  With the
+default 64 MiB Index RPC inbound limit, listing all tag entries failed with:
+
+```text
+RESOURCE_EXHAUSTED: gRPC message exceeds maximum size 67108864: 100000255
+```
+
+On the isolated runtime only, raising
+`index.server.max.inbound.message.size` to `268435456` allowed the same list
+request to complete.  The retry took `75.554 s`, reported
+`tag_entries=2`, `tagged_rows=1000000`, and `resolve_ms=20396.511`.  That retry
+had no regular ordered files left to rewrite (`outputs=0`), so it validates the
+message-size diagnosis but is not accepted as a fresh physical-rewrite E2E.
+The durable solution is a paged or server-streaming `listTagIndexEntries`
+protocol; increasing the message limit is only a diagnostic/runtime workaround.
+
 ## Interpretation
 
 The strongest current bottleneck is cold initialization of 128 primary-index
@@ -237,6 +285,12 @@ server-side grouped writes or lower-allocation key preparation more promising
 than write-option tuning.  The approximately 31-second cold Tag Index handle
 initialization remains a separate prewarm/lifecycle problem.
 
+After the distinct-column fast path, the same UPDATE shape reached about
+`622,400 rows/s` warm.  The lower-bound target of several hundred thousand
+rows/s is therefore met for warm exact UPDATE; the million-row/s upper target
+is not met yet.  The remaining warm cost is mainly merge/encoding, RPC/service
+overhead, and the one-time handle initialization on a cold process.
+
 For the optimized compaction, the remaining cost is now measurable rather than
 opaque: 12.96 s resolves tagged rows, 7.17 s is non-resolve physical rewrite,
 and 9.49 s is publication/index relocation.  The full UPDATE-plus-compaction
@@ -249,7 +303,12 @@ Immediately after UPDATE, a normal table scan still sees the physical `BASE`
 value, as expected before `COMPACT`.  After the optimized compaction completed,
 the tag predicate returned exactly 1,000,000 rows and sample rows contained
 `UPD1M` and `9.0000`.  The fresh 68-column million-row UPDATE → COMPACT → tag
-predicate E2E correctness check is therefore **accepted**.
+predicate E2E correctness check is therefore **accepted** for the earlier
+`tag_1` run.  The later `tag_5` fast-path run is not being marked as
+compaction-after-correctness-accepted because the subsequent compaction probe
+hit the large TagIndex RPC limit and the isolated runtime was restarted from a
+bootstrap state.  A fresh post-fix UPDATE -> COMPACT -> tag-query run remains
+required for that exact fast-path case.
 
 ## Next actions
 
@@ -257,13 +316,15 @@ predicate E2E correctness check is therefore **accepted**.
    tag snapshot so the redundant `Map.copyOf` path cannot return.
 2. Add explicit `tag_index_init_ms` to the service metric and prototype Tag
    Index handle prewarm/lifecycle reuse for cold UPDATE.
-3. Prototype a grouped server-side Tag Index update path and benchmark it
+3. Replace `listTagIndexEntries`'s all-in-one unary response with pagination or
+   server streaming, then rerun the million-row multi-column compaction E2E.
+4. Prototype a grouped server-side Tag Index update path and benchmark it
    against the current per-primary-key `PrimaryColumnKey` dedup loop.
-4. Reduce the compaction case to one or a few files/columns and compare row
+5. Reduce the compaction case to one or a few files/columns and compare row
    width, file size, and direct-I/O throughput against the now-known snapshot
    baseline.
-5. Add RocksDB internal timing for batch construction versus `write()` on the
+6. Add RocksDB internal timing for batch construction versus `write()` on the
    warm exact UPDATE path.
-6. Prototype vnode prewarm as a separately measurable change; do not change
+7. Prototype vnode prewarm as a separately measurable change; do not change
    the tagging contract or merge fallback semantics.
 
