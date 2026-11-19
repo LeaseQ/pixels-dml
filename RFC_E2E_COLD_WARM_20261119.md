@@ -173,6 +173,52 @@ with `id` range `1000000000..1001059999`.  The previous timeout was therefore
 caused primarily by redundant million-entry snapshot copying, not by Direct
 I/O physical rewrite.
 
+### 5. Post-restart UPDATE cold/warm split
+
+After restarting the isolated Retina/IndexServer, a second exact 1M-row UPDATE
+on `tag_2_type/tag_2_para` measured `35.789 s` wall time.  The IndexServer
+metric was:
+
+```text
+decodeMs=494.431 storageMs=3458.437 serviceMs=34855.361
+```
+
+The difference shows an approximately 31-second one-time Tag Index handle
+initialization cost in `getTagIndex`; it is outside the existing decode/storage
+timers.  The storage-stage breakdown was:
+
+```text
+dedup_ms=2115.063 group_ms=517.285 key_read_ms=11.142
+merge_ms=661.546 rocks_write_ms=47.915 cache_ms=68.397
+```
+
+With the Tag Index handle warm, an independent exact 1M-row UPDATE on
+`tag_3_type/tag_3_para` completed in `3.784 s` wall time (`3.511 s` Trino
+update metric), approximately `284,800 rows/s`.  It retained the exact route
+and one RPC:
+
+```text
+[PIXELS_UPDATE_ROUTE] exact_eligible=true domain_count=1
+[PIXELS_UPDATE_METRIC] rows=1000000 encoding_ms=40.109
+request_build_ms=138.598 rpc_count=1 request_bytes=20000065
+rpc_ms=3332.056 total_ms=3510.926
+[PIXELS_TAG_INDEX_METRIC] decodeMs=209.972 storageMs=2731.063
+serviceMs=2962.765
+[PIXELS_TAG_INDEX_STORAGE_METRIC] dedup_ms=1832.143 group_ms=452.110
+key_read_ms=0.355 merge_ms=366.673 rocks_write_ms=65.619 cache_ms=13.636
+```
+
+This is the most representative current steady-state UPDATE result.  It is
+near the lower-bound several-hundred-thousand-row target; the remaining gap is
+primarily Java-side per-primary-key dedup/group/merge work, not RocksDB's final
+write call.
+
+The isolated Retina restart also exposed and fixed a configuration mismatch:
+`retina.recovery.bootstrap.regular=true` was present, but the implementation
+still rejected a missing checkpoint body whenever REGULAR files existed.  The
+runtime fix now honors the opt-in setting, allowing the isolated service to
+bootstrap existing regular files.  The main 8090 runtime was not restarted.
+
 ## Interpretation
 
 The strongest current bottleneck is cold initialization of 128 primary-index
@@ -184,9 +230,12 @@ reduce serialized initialization/write overhead rather than add uncontrolled
 client concurrency.
 
 The exact UPDATE route is now confirmed and is not the old merge-path mistake.
-Its current steady-state bottleneck is Tag Index storage (`storageMs` about
-3.69 s, with roughly 7.29 s client RPC time), so the next warm UPDATE probe
-should split RocksDB batch construction from `rocksDB.write`.
+Its current steady-state bottleneck is Tag Index batch preparation: the warm
+1M-row probe spent about 1.83 s deduplicating, 0.45 s grouping, and 0.37 s
+merging/encoding, while `rocksDB.write()` took only 0.066 s.  This makes
+server-side grouped writes or lower-allocation key preparation more promising
+than write-option tuning.  The approximately 31-second cold Tag Index handle
+initialization remains a separate prewarm/lifecycle problem.
 
 For the optimized compaction, the remaining cost is now measurable rather than
 opaque: 12.96 s resolves tagged rows, 7.17 s is non-resolve physical rewrite,
@@ -206,11 +255,15 @@ predicate E2E correctness check is therefore **accepted**.
 
 1. Keep the snapshot-copy fix and add a regression benchmark for a million-row
    tag snapshot so the redundant `Map.copyOf` path cannot return.
-2. Reduce the compaction case to one or a few files/columns and compare row
+2. Add explicit `tag_index_init_ms` to the service metric and prototype Tag
+   Index handle prewarm/lifecycle reuse for cold UPDATE.
+3. Prototype a grouped server-side Tag Index update path and benchmark it
+   against the current per-primary-key `PrimaryColumnKey` dedup loop.
+4. Reduce the compaction case to one or a few files/columns and compare row
    width, file size, and direct-I/O throughput against the now-known snapshot
    baseline.
-3. Add RocksDB internal timing for batch construction versus `write()` on the
+5. Add RocksDB internal timing for batch construction versus `write()` on the
    warm exact UPDATE path.
-4. Prototype vnode prewarm as a separately measurable change; do not change
+6. Prototype vnode prewarm as a separately measurable change; do not change
    the tagging contract or merge fallback semantics.
 
