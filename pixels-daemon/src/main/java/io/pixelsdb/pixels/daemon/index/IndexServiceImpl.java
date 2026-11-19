@@ -292,11 +292,14 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
         IndexProto.PutPrimaryIndexEntriesResponse.Builder builder = IndexProto.PutPrimaryIndexEntriesResponse.newBuilder();
         try
         {
+            long totalStartNanos = System.nanoTime();
             long tableId = request.getTableId();
             long indexId = request.getIndexId();
             IndexOption indexOption = new IndexOption(request.getIndexOption());
             SinglePointIndex singlePointIndex = SinglePointIndexFactory.Instance().getSinglePointIndex(tableId, indexId, indexOption);
+            long singlePointStartNanos = System.nanoTime();
             boolean success = singlePointIndex.putPrimaryEntries(entries);
+            long singlePointNanos = System.nanoTime() - singlePointStartNanos;
             if (success)
             {
                 builder.setErrorCode(ErrorCode.SUCCESS);
@@ -307,6 +310,7 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             }
 
             MainIndex mainIndex = MainIndexFactory.Instance().getMainIndex(tableId);
+            long mainIndexStartNanos = System.nanoTime();
             for (Boolean mainSuccess : mainIndex.putEntries(entries))
             {
                 if(!mainSuccess)
@@ -314,6 +318,15 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                     throw new MainIndexException("Failed to put entry into main index");
                 }
             }
+            logger.info("[PIXELS_PRIMARY_INDEX_METRIC] table_id={} index_id={} vnode={} file_id={} entries={} single_point_ms={} main_index_ms={} total_ms={}",
+                    tableId,
+                    indexId,
+                    indexOption.getVNodeId(),
+                    entries.isEmpty() ? -1L : entries.get(0).getRowLocation().getFileId(),
+                    entries.size(),
+                    singlePointNanos / 1_000_000.0,
+                    (System.nanoTime() - mainIndexStartNanos) / 1_000_000.0,
+                    (System.nanoTime() - totalStartNanos) / 1_000_000.0);
         }
         catch (MainIndexException e)
         {
