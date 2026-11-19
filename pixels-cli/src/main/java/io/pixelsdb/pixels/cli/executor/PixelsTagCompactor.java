@@ -513,6 +513,12 @@ final class PixelsTagCompactor
             throws IOException, MetadataException
     {
         long sourceFileId = metadataService.getFileId(sourcePath);
+        long sourceRows = 0L;
+        int sourceBatchCount = 0;
+        long readNanos = 0L;
+        long primaryKeyNanos = 0L;
+        long updateNanos = 0L;
+        long writerNanos = 0L;
         PixelsReader reader = PixelsReaderImpl.newBuilder()
                 .setStorage(inputStorage)
                 .setPath(sourcePath)
@@ -534,9 +540,14 @@ final class PixelsTagCompactor
                 int rowOffset = 0;
                 while (true)
                 {
+                    long readStartNanos = System.nanoTime();
                     VectorizedRowBatch rowBatch = recordReader.readBatch(READ_BATCH_SIZE);
+                    readNanos += System.nanoTime() - readStartNanos;
                     if (rowBatch.size > 0)
                     {
+                        sourceRows += rowBatch.size;
+                        sourceBatchCount++;
+                        long primaryKeyStartNanos = System.nanoTime();
                         for (int position = 0; position < rowBatch.size; position++)
                         {
                             ByteString primaryKey = ByteString.copyFrom(PrimaryKeyBytes.fromColumnVectors(
@@ -549,10 +560,15 @@ final class PixelsTagCompactor
                                     .build());
                             pendingOutputLocations.add(outputPosition.location(0, position));
                         }
+                        primaryKeyNanos += System.nanoTime() - primaryKeyStartNanos;
+                        long updateStartNanos = System.nanoTime();
                         applyUpdates(rowBatch, sourceFileId, rowGroupId, rowOffset, tagColumns,
                                 schema);
+                        updateNanos += System.nanoTime() - updateStartNanos;
                         attachHiddenColumn(rowBatch);
+                        long writerStartNanos = System.nanoTime();
                         boolean rowGroupRemainsOpen = writer.addRowBatch(rowBatch);
+                        writerNanos += System.nanoTime() - writerStartNanos;
                         outputPosition.advance(rowBatch.size, !rowGroupRemainsOpen);
                         rowOffset += rowBatch.size;
                         if (pendingPrimaryKeys.size() >= MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC)
@@ -567,6 +583,13 @@ final class PixelsTagCompactor
                 }
             }
             resolveAndRecordPrimaryRows(pendingPrimaryKeys, pendingOutputLocations);
+            System.out.println("[PIXELS_COMPACTION_ROW_METRIC] source=" + sourcePath +
+                    " rows=" + sourceRows +
+                    " batches=" + sourceBatchCount +
+                    " read_ms=" + readNanos / 1_000_000.0 +
+                    " primary_key_ms=" + primaryKeyNanos / 1_000_000.0 +
+                    " update_ms=" + updateNanos / 1_000_000.0 +
+                    " writer_ms=" + writerNanos / 1_000_000.0);
         }
         finally
         {
