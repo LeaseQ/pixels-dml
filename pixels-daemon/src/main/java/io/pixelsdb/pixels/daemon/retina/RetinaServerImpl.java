@@ -185,7 +185,15 @@ public class RetinaServerImpl extends RetinaWorkerServiceGrpc.RetinaWorkerServic
             {
                 if (!metadataService.getFilesByType(EnumSet.of(File.Type.REGULAR)).isEmpty())
                 {
-                    throw new RetinaException("Recovery aborted: no checkpoint body found but catalog has REGULAR files");
+                    boolean bootstrapRegular = Boolean.parseBoolean(
+                            ConfigFactory.Instance().getProperty("retina.recovery.bootstrap.regular"));
+                    if (!bootstrapRegular)
+                    {
+                        throw new RetinaException(
+                                "Recovery aborted: no checkpoint body found but catalog has REGULAR files");
+                    }
+                    logger.warn("Recovery bootstrap: no checkpoint body found; accepting existing REGULAR files " +
+                            "because retina.recovery.bootstrap.regular=true");
                 }
             }
             catch (MetadataException e)
