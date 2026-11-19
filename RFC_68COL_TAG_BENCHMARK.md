@@ -219,6 +219,17 @@ The narrow warm repeat intentionally reused the same 10K key values to keep
 the source fixture constant. It is therefore a writer/index micro-probe only,
 not a primary-key correctness or acceptance-throughput run.
 
+The next same-runtime probe generated 90,000 new keys from the same 10K
+fixture, using the same producer shape for both tables. Client wall time was
+3.853 s for the narrow table and 4.582 s for the wide table. Connector
+metrics recorded `write_ms=137.122` and `primary_put_wall_ms=859.944` ms for
+the narrow run, versus `write_ms=297.121` and
+`primary_put_wall_ms=769.130` ms for the wide run. The wide table was about
+19% slower by client wall time, while the primary-index costs remained in the
+same range. This confirms a measurable width penalty but not a 4--8x penalty;
+the remaining 1M discrepancy needs producer, file-count, row-group, and
+runtime warm-up controls.
+
 This finding is kept separate from throughput numbers. The current 68-column
 benchmark acceptance gate is single configured tag-column correctness first;
 the 30-pair tag model remains the target capability to implement and validate.
