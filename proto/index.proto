@@ -64,6 +64,9 @@ service IndexService {
   rpc CompactTagIndex (CompactTagIndexRequest) returns (CompactTagIndexResponse);
   rpc GetTagIndexEntries (GetTagIndexEntriesRequest) returns (GetTagIndexEntriesResponse);
   rpc ListTagIndexEntries (ListTagIndexEntriesRequest) returns (ListTagIndexEntriesResponse);
+  // Stream tag entries in bounded chunks so a large central index does not
+  // require one oversized unary response.
+  rpc StreamTagIndexEntries (ListTagIndexEntriesRequest) returns (stream TagIndexEntryChunk);
   // Resolve primary keys together with their row ids and current locations.
   rpc ResolvePrimaryEntries (ResolvePrimaryEntriesRequest) returns (ResolvePrimaryEntriesResponse);
 }
@@ -372,6 +375,14 @@ message ListTagIndexEntriesRequest {
 message ListTagIndexEntriesResponse {
   int32 errorCode = 1;
   repeated TagIndexEntry entries = 2;
+}
+
+message TagIndexEntryChunk {
+  int32 errorCode = 1;
+  bytes tag = 2;
+  repeated bytes primaryKeys = 3;
+  string columnName = 4;
+  bool endOfEntry = 5;
 }
 
 message ResolvePrimaryEntriesRequest {

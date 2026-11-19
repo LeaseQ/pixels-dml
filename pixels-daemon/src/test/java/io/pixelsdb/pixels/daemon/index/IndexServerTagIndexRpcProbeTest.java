@@ -19,6 +19,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -100,6 +101,24 @@ class IndexServerTagIndexRpcProbeTest
             assertEquals(ErrorCode.SUCCESS, response.getErrorCode());
             System.out.printf("[PIXELS_TAG_INDEX_RPC_PROBE] rows=%d request_bytes=%d build_ms=%d rpc_ms=%d%n",
                     rows, request.getSerializedSize(), buildMs, rpcMs);
+
+            long streamedKeys = 0;
+            int chunks = 0;
+            Iterator<IndexProto.TagIndexEntryChunk> streamed =
+                    IndexServiceGrpc.newBlockingStub(channel).streamTagIndexEntries(
+                            IndexProto.ListTagIndexEntriesRequest.newBuilder()
+                                    .setTableId(tableId)
+                                    .setIndexId(indexId)
+                                    .build());
+            while (streamed.hasNext())
+            {
+                IndexProto.TagIndexEntryChunk chunk = streamed.next();
+                assertEquals(ErrorCode.SUCCESS, chunk.getErrorCode());
+                streamedKeys += chunk.getPrimaryKeysCount();
+                chunks++;
+            }
+            assertEquals(rows, streamedKeys);
+            System.out.printf("[PIXELS_TAG_INDEX_STREAM_PROBE] rows=%d chunks=%d%n", streamedKeys, chunks);
         }
         finally
         {

@@ -35,6 +35,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.HashMap;
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -236,13 +238,46 @@ public class RPCIndexService implements IndexService
     public List<IndexProto.TagIndexEntry> listTagIndexEntries(long tableId, long indexId)
             throws IndexException
     {
-        IndexProto.ListTagIndexEntriesResponse response = stub.listTagIndexEntries(
+        Iterator<IndexProto.TagIndexEntryChunk> chunks = stub.streamTagIndexEntries(
                 IndexProto.ListTagIndexEntriesRequest.newBuilder()
                         .setTableId(tableId)
                         .setIndexId(indexId)
                         .build());
-        checkTagIndexResponse(response.getErrorCode(), "list tag index entries");
-        return response.getEntriesList();
+        List<IndexProto.TagIndexEntry> entries = new ArrayList<>();
+        IndexProto.TagIndexEntry.Builder current = null;
+        ByteString currentTag = null;
+        String currentColumnName = null;
+        while (chunks.hasNext())
+        {
+            IndexProto.TagIndexEntryChunk chunk = chunks.next();
+            checkTagIndexResponse(chunk.getErrorCode(), "stream tag index entries");
+            if (current == null || !currentTag.equals(chunk.getTag()) ||
+                    !currentColumnName.equals(chunk.getColumnName()))
+            {
+                if (current != null)
+                {
+                    throw new IndexException("tag index entry stream changed entry before end-of-entry");
+                }
+                currentTag = chunk.getTag();
+                currentColumnName = chunk.getColumnName();
+                current = IndexProto.TagIndexEntry.newBuilder()
+                        .setTag(currentTag)
+                        .setColumnName(currentColumnName);
+            }
+            current.addAllPrimaryKeys(chunk.getPrimaryKeysList());
+            if (chunk.getEndOfEntry())
+            {
+                entries.add(current.build());
+                current = null;
+                currentTag = null;
+                currentColumnName = null;
+            }
+        }
+        if (current != null)
+        {
+            throw new IndexException("tag index entry stream ended before end-of-entry");
+        }
+        return entries;
     }
 
     @Override

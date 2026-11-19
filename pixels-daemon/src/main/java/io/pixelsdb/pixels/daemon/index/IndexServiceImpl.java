@@ -47,6 +47,7 @@ import java.util.stream.Collectors;
  */
 public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
 {
+    private static final int TAG_INDEX_STREAM_PRIMARY_KEYS_PER_CHUNK = 8192;
     private static final Logger logger = LogManager.getLogger(IndexServiceImpl.class);
     private final Map<TagIndexKey, PixelsTagIndex> tagIndexes = new HashMap<>();
 
@@ -1014,6 +1015,56 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             builder.setErrorCode(ErrorCode.INDEX_GET_ROW_ID_FAIL);
         }
         responseObserver.onNext(builder.build());
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void streamTagIndexEntries(IndexProto.ListTagIndexEntriesRequest request,
+                                      StreamObserver<IndexProto.TagIndexEntryChunk> responseObserver)
+    {
+        try
+        {
+            PixelsTagIndex tagIndex = getTagIndex(request.getTableId(), request.getIndexId());
+            for (PixelsTagIndex.Entry entry : tagIndex.entries())
+            {
+                com.google.protobuf.ByteString tag = com.google.protobuf.ByteString.copyFrom(
+                        TagIndexKeyCodec.tag(entry.tag()));
+                String columnName = TagIndexKeyCodec.columnName(entry.tag());
+                List<byte[]> primaryKeys = entry.primaryKeys();
+                if (primaryKeys.isEmpty())
+                {
+                    responseObserver.onNext(IndexProto.TagIndexEntryChunk.newBuilder()
+                            .setErrorCode(ErrorCode.SUCCESS)
+                            .setTag(tag)
+                            .setColumnName(columnName)
+                            .setEndOfEntry(true)
+                            .build());
+                    continue;
+                }
+                for (int offset = 0; offset < primaryKeys.size(); offset += TAG_INDEX_STREAM_PRIMARY_KEYS_PER_CHUNK)
+                {
+                    int end = Math.min(primaryKeys.size(), offset + TAG_INDEX_STREAM_PRIMARY_KEYS_PER_CHUNK);
+                    IndexProto.TagIndexEntryChunk.Builder chunk = IndexProto.TagIndexEntryChunk.newBuilder()
+                            .setErrorCode(ErrorCode.SUCCESS)
+                            .setTag(tag)
+                            .setColumnName(columnName)
+                            .setEndOfEntry(end == primaryKeys.size());
+                    for (int i = offset; i < end; i++)
+                    {
+                        chunk.addPrimaryKeys(com.google.protobuf.ByteString.copyFrom(primaryKeys.get(i)));
+                    }
+                    responseObserver.onNext(chunk.build());
+                }
+            }
+        }
+        catch (RocksDBException | SinglePointIndexException e)
+        {
+            logger.error("Failed to stream tag index entries", e);
+            responseObserver.onNext(IndexProto.TagIndexEntryChunk.newBuilder()
+                    .setErrorCode(ErrorCode.INDEX_GET_ROW_ID_FAIL)
+                    .setEndOfEntry(true)
+                    .build());
+        }
         responseObserver.onCompleted();
     }
 
