@@ -255,6 +255,7 @@ public final class PixelsTagIndex implements Closeable
             appendSingleVersionedUpdate(updates.get(0));
             return;
         }
+        long batchStartNanos = System.nanoTime();
         Map<PrimaryColumnKey, VersionedKey> latestByPrimaryKey = new LinkedHashMap<>();
         for (VersionedUpdate update : updates) {
             requireNonNull(update, "update is null");
@@ -274,12 +275,16 @@ public final class PixelsTagIndex implements Closeable
                 }
             }
         }
+        long dedupNanos = System.nanoTime() - batchStartNanos;
+        long groupStartNanos = System.nanoTime();
         Map<VersionedKey, List<byte[]>> grouped = new LinkedHashMap<>();
         for (Map.Entry<PrimaryColumnKey, VersionedKey> entry : latestByPrimaryKey.entrySet()) {
             grouped.computeIfAbsent(entry.getValue(), ignored -> new ArrayList<>())
                     .add(entry.getKey().primaryKey());
         }
+        long groupNanos = System.nanoTime() - groupStartNanos;
         try (WriteBatch batch = new WriteBatch()) {
+            long keyReadStartNanos = System.nanoTime();
             List<VersionedKey> versionedKeys = new ArrayList<>(grouped.keySet());
             List<byte[]> indexKeys = new ArrayList<>(versionedKeys.size());
             for (VersionedKey versionedKey : versionedKeys)
@@ -287,6 +292,8 @@ public final class PixelsTagIndex implements Closeable
                 indexKeys.add(createVersionedKey(versionedKey.tag(), versionedKey.timestamp()));
             }
             List<List<byte[]>> existingValues = readPrimaryKeysCached(indexKeys);
+            long keyReadNanos = System.nanoTime() - keyReadStartNanos;
+            long mergeStartNanos = System.nanoTime();
             Map<ByteBuffer, List<byte[]>> updatedValues = new LinkedHashMap<>();
             boolean changed = false;
             for (int i = 0; i < versionedKeys.size(); i++) {
@@ -301,14 +308,28 @@ public final class PixelsTagIndex implements Closeable
                 }
                 updatedValues.put(ByteBuffer.wrap(indexKey.clone()), merged);
             }
+            long mergeNanos = System.nanoTime() - mergeStartNanos;
+            long writeStartNanos = System.nanoTime();
             if (changed)
             {
                 rocksDB.write(writeOptions, batch);
             }
+            long writeNanos = System.nanoTime() - writeStartNanos;
+            long cacheStartNanos = System.nanoTime();
             for (Map.Entry<ByteBuffer, List<byte[]>> entry : updatedValues.entrySet())
             {
                 cachePut(entry.getKey().array(), entry.getValue());
             }
+            long cacheNanos = System.nanoTime() - cacheStartNanos;
+            System.out.println("[PIXELS_TAG_INDEX_STORAGE_METRIC] updates=" + updates.size() +
+                    " primaryKeys=" + latestByPrimaryKey.size() +
+                    " groups=" + grouped.size() +
+                    " dedup_ms=" + dedupNanos / 1_000_000.0 +
+                    " group_ms=" + groupNanos / 1_000_000.0 +
+                    " key_read_ms=" + keyReadNanos / 1_000_000.0 +
+                    " merge_ms=" + mergeNanos / 1_000_000.0 +
+                    " rocks_write_ms=" + writeNanos / 1_000_000.0 +
+                    " cache_ms=" + cacheNanos / 1_000_000.0);
         }
     }
 
