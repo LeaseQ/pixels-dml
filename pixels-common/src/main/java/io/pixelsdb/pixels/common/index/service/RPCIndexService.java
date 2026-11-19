@@ -23,6 +23,8 @@ import com.google.protobuf.ByteString;
 import io.grpc.Internal;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.pixelsdb.pixels.common.error.ErrorCode;
 import io.pixelsdb.pixels.common.exception.IndexException;
 import io.pixelsdb.pixels.common.index.IndexOption;
@@ -238,11 +240,32 @@ public class RPCIndexService implements IndexService
     public List<IndexProto.TagIndexEntry> listTagIndexEntries(long tableId, long indexId)
             throws IndexException
     {
-        Iterator<IndexProto.TagIndexEntryChunk> chunks = stub.streamTagIndexEntries(
-                IndexProto.ListTagIndexEntriesRequest.newBuilder()
-                        .setTableId(tableId)
-                        .setIndexId(indexId)
-                        .build());
+        IndexProto.ListTagIndexEntriesRequest request = IndexProto.ListTagIndexEntriesRequest.newBuilder()
+                .setTableId(tableId)
+                .setIndexId(indexId)
+                .build();
+        try
+        {
+            return collectStreamedTagIndexEntries(stub.streamTagIndexEntries(request));
+        }
+        catch (StatusRuntimeException e)
+        {
+            if (e.getStatus().getCode() != Status.Code.UNIMPLEMENTED)
+            {
+                throw e;
+            }
+            // Allow a rolling upgrade: an older IndexServer still supports the
+            // unary RPC, so compaction remains available until all servers have
+            // the streaming method.
+            IndexProto.ListTagIndexEntriesResponse response = stub.listTagIndexEntries(request);
+            checkTagIndexResponse(response.getErrorCode(), "list tag index entries");
+            return response.getEntriesList();
+        }
+    }
+
+    private static List<IndexProto.TagIndexEntry> collectStreamedTagIndexEntries(
+            Iterator<IndexProto.TagIndexEntryChunk> chunks) throws IndexException
+    {
         List<IndexProto.TagIndexEntry> entries = new ArrayList<>();
         IndexProto.TagIndexEntry.Builder current = null;
         ByteString currentTag = null;

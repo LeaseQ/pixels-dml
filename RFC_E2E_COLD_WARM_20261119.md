@@ -271,10 +271,11 @@ The source-level follow-up in `3c3f8f99` adds a compatibility-preserving
 server-streaming RPC.  Each TagIndex entry is returned in chunks of at most
 8,192 primary keys, while `RPCIndexService.listTagIndexEntries` reassembles the
 same logical list consumed by the compactor.  The existing unary RPC remains
-available to older clients.  A gRPC probe assertion was added to verify that
-all streamed primary keys are received across chunk boundaries.  This change
-still needs compilation and deployment into the isolated runtime before its
-performance/correctness result can be accepted.
+available to older clients, and the new client path falls back to it when an
+older server returns `UNIMPLEMENTED`.  A gRPC probe assertion was added to
+verify that all streamed primary keys are received across chunk boundaries.
+This change still needs compilation and deployment into the isolated runtime
+before its performance/correctness result can be accepted.
 
 ## Interpretation
 
