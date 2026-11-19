@@ -279,6 +279,23 @@ columns already exceed the default 64 MiB gRPC limit, so the shared-key design
 is not merely a micro-optimization; it is also required for wider exact UPDATE
 statements to remain representable without raising the global message limit.
 
+### Shared-primary-key RPC follow-up
+
+The next implementation keeps `AppendTagIndexEntries` unchanged and adds
+`AppendSharedTagIndexEntries`.  One shared update carries the primary-key
+vector once plus multiple `(columnName, tag)` values.  The IndexServer expands
+that representation into the existing `PixelsTagIndex.VersionedUpdate` list,
+so tag ordering, timestamp semantics, compaction input, and old clients stay
+unchanged.  Only the exact UPDATE connector path uses the new RPC; MERGE and
+rolling-upgrade fallback paths retain the original RPC.
+
+The connector probe now reports both encodings.  With one million 8-byte keys,
+the expected shared representation is approximately constant in the number of
+assignments while the old representation grows linearly.  The implementation
+is source-complete in the validation branches, but it is not yet deployed to
+the isolated runtime and is not counted as accepted throughput evidence until
+the generated-proto build and a correctness E2E have passed.
+
 ## Acceptance criteria and remaining work
 
 - [x] INSERT files publish as `REGULAR` with a valid row-id hull.
@@ -292,3 +309,6 @@ statements to remain representable without raising the global message limit.
   harness.
 - [ ] Profile and reduce duplicate Tag Index/primary-index resolution during
   COMPACT; the stage evidence identifies this as the leading next optimization.
+- [ ] Build/deploy the shared-primary-key RPC to the isolated runtime, compare
+  old/new request bytes and warm UPDATE wall time, and verify multi-column tag
+  correctness before accepting the optimization.

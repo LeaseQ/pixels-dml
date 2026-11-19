@@ -60,6 +60,10 @@ service IndexService {
   // DML tag index operations. The tag index is owned by the IndexServer so all
   // Trino workers and compaction processes observe the same mapping.
   rpc AppendTagIndexEntries (AppendTagIndexEntriesRequest) returns (AppendTagIndexEntriesResponse);
+  // Append tag values that share one primary-key vector. This is used by the
+  // exact UPDATE path to avoid serializing the same million-row key list once
+  // per updated column.
+  rpc AppendSharedTagIndexEntries (AppendSharedTagIndexEntriesRequest) returns (AppendTagIndexEntriesResponse);
   // Remove tag-index versions older than a transaction low watermark.
   rpc CompactTagIndex (CompactTagIndexRequest) returns (CompactTagIndexResponse);
   rpc GetTagIndexEntries (GetTagIndexEntriesRequest) returns (GetTagIndexEntriesResponse);
@@ -337,6 +341,23 @@ message AppendTagIndexEntriesRequest {
   uint64 tableId = 1;
   uint64 indexId = 2;
   repeated TagIndexUpdate updates = 3;
+}
+
+message SharedTagIndexValue {
+  bytes tag = 1;
+  string columnName = 2;
+}
+
+message SharedTagIndexUpdate {
+  repeated bytes primaryKeys = 1;
+  int64 transactionTimestamp = 2;
+  repeated SharedTagIndexValue values = 3;
+}
+
+message AppendSharedTagIndexEntriesRequest {
+  uint64 tableId = 1;
+  uint64 indexId = 2;
+  repeated SharedTagIndexUpdate updates = 3;
 }
 
 message AppendTagIndexEntriesResponse {

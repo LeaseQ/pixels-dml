@@ -198,6 +198,45 @@ public class RPCIndexService implements IndexService
     }
 
     @Override
+    public void appendSharedTagIndexEntries(long tableId, long indexId,
+            List<IndexProto.SharedTagIndexUpdate> updates) throws IndexException
+    {
+        try
+        {
+            IndexProto.AppendTagIndexEntriesResponse response = stub.appendSharedTagIndexEntries(
+                    IndexProto.AppendSharedTagIndexEntriesRequest.newBuilder()
+                            .setTableId(tableId)
+                            .setIndexId(indexId)
+                            .addAllUpdates(updates)
+                            .build());
+            checkTagIndexResponse(response.getErrorCode(), "append shared tag index entries");
+        }
+        catch (StatusRuntimeException e)
+        {
+            if (e.getStatus().getCode() != Status.Code.UNIMPLEMENTED)
+            {
+                throw e;
+            }
+            logger.warn("IndexServer does not implement shared tag index RPC; " +
+                    "falling back to regular tag index entries");
+            List<IndexProto.TagIndexUpdate> regularUpdates = new ArrayList<>();
+            for (IndexProto.SharedTagIndexUpdate sharedUpdate : updates)
+            {
+                for (IndexProto.SharedTagIndexValue value : sharedUpdate.getValuesList())
+                {
+                    regularUpdates.add(IndexProto.TagIndexUpdate.newBuilder()
+                            .setColumnName(value.getColumnName())
+                            .setTag(value.getTag())
+                            .setTransactionTimestamp(sharedUpdate.getTransactionTimestamp())
+                            .addAllPrimaryKeys(sharedUpdate.getPrimaryKeysList())
+                            .build());
+                }
+            }
+            appendTagIndexEntries(tableId, indexId, regularUpdates);
+        }
+    }
+
+    @Override
     public List<ByteString> getTagIndexEntries(long tableId, long indexId, ByteString tag)
             throws IndexException
     {

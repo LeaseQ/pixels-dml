@@ -68,6 +68,19 @@ public interface IndexService
                 "appendTagIndexEntries is not supported by this IndexService scheme");
     }
 
+    /**
+     * Append tag values that share one primary-key vector. Implementations
+     * may fall back to the regular tag-index RPC while rolling out the
+     * protocol, but RPC implementations should preserve the shared-key wire
+     * representation.
+     */
+    default void appendSharedTagIndexEntries(long tableId, long indexId,
+            List<IndexProto.SharedTagIndexUpdate> updates) throws IndexException
+    {
+        throw new UnsupportedOperationException(
+                "appendSharedTagIndexEntries is not supported by this IndexService scheme");
+    }
+
     /** Return the primary keys currently associated with one tag. */
     default List<ByteString> getTagIndexEntries(long tableId, long indexId, ByteString tag)
             throws IndexException

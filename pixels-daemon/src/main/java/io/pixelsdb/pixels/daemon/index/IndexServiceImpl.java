@@ -961,6 +961,74 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
     }
 
     @Override
+    public void appendSharedTagIndexEntries(IndexProto.AppendSharedTagIndexEntriesRequest request,
+                                            StreamObserver<IndexProto.AppendTagIndexEntriesResponse> responseObserver)
+    {
+        IndexProto.AppendTagIndexEntriesResponse.Builder builder =
+                IndexProto.AppendTagIndexEntriesResponse.newBuilder();
+        long start = System.nanoTime();
+        long decodeStart = 0L;
+        long decodeNanos = 0L;
+        long storageStart = 0L;
+        long storageNanos = 0L;
+        long primaryKeyCount = request.getUpdatesList().stream()
+                .mapToLong(IndexProto.SharedTagIndexUpdate::getPrimaryKeysCount)
+                .sum();
+        long logicalUpdateCount = request.getUpdatesList().stream()
+                .mapToLong(IndexProto.SharedTagIndexUpdate::getValuesCount)
+                .sum();
+        try
+        {
+            PixelsTagIndex tagIndex = getTagIndex(request.getTableId(), request.getIndexId());
+            decodeStart = System.nanoTime();
+            List<PixelsTagIndex.VersionedUpdate> updates = new ArrayList<>();
+            for (IndexProto.SharedTagIndexUpdate sharedUpdate : request.getUpdatesList())
+            {
+                List<byte[]> primaryKeys = sharedUpdate.getPrimaryKeysList().stream()
+                        .map(com.google.protobuf.ByteString::toByteArray)
+                        .collect(Collectors.toList());
+                for (IndexProto.SharedTagIndexValue value : sharedUpdate.getValuesList())
+                {
+                    updates.add(new PixelsTagIndex.VersionedUpdate(
+                            TagIndexKeyCodec.encode(value.getColumnName(), value.getTag().toByteArray()),
+                            sharedUpdate.getTransactionTimestamp(), primaryKeys));
+                }
+            }
+            decodeNanos = System.nanoTime() - decodeStart;
+            logger.debug("append shared tag index entries: tableId={}, indexId={}, " +
+                            "sharedUpdates={}, logicalUpdates={}",
+                    request.getTableId(), request.getIndexId(), request.getUpdatesCount(),
+                    logicalUpdateCount);
+            storageStart = System.nanoTime();
+            tagIndex.appendBatch(updates);
+            storageNanos = System.nanoTime() - storageStart;
+            builder.setErrorCode(ErrorCode.SUCCESS);
+        }
+        catch (RocksDBException | SinglePointIndexException e)
+        {
+            logger.error("Failed to append shared tag index entries", e);
+            builder.setErrorCode(ErrorCode.INDEX_PUT_SINGLE_POINT_INDEX_FAIL);
+        }
+        catch (RuntimeException e)
+        {
+            logger.error("Invalid shared tag index update request", e);
+            builder.setErrorCode(ErrorCode.INDEX_PUT_SINGLE_POINT_INDEX_FAIL);
+        }
+        finally
+        {
+            logger.info("[PIXELS_TAG_INDEX_SHARED_METRIC] tableId={}, indexId={}, " +
+                            "sharedUpdates={}, logicalUpdates={}, primaryKeys={}, requestBytes={}, " +
+                            "decodeMs={}, storageMs={}, serviceMs={}",
+                    request.getTableId(), request.getIndexId(), request.getUpdatesCount(),
+                    logicalUpdateCount, primaryKeyCount, request.getSerializedSize(),
+                    decodeNanos / 1_000_000.0, storageNanos / 1_000_000.0,
+                    (System.nanoTime() - start) / 1_000_000.0);
+        }
+        responseObserver.onNext(builder.build());
+        responseObserver.onCompleted();
+    }
+
+    @Override
     public void getTagIndexEntries(IndexProto.GetTagIndexEntriesRequest request,
                                    StreamObserver<IndexProto.GetTagIndexEntriesResponse> responseObserver)
     {
