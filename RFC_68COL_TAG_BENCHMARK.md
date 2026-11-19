@@ -215,6 +215,10 @@ The warm primary-index numbers are in the same range, so the large historical
 measure 100K/1M warm runs with identical producer, file count, row-group, and
 index-warm-up conditions.
 
+The narrow warm repeat intentionally reused the same 10K key values to keep
+the source fixture constant. It is therefore a writer/index micro-probe only,
+not a primary-key correctness or acceptance-throughput run.
+
 This finding is kept separate from throughput numbers. The current 68-column
 benchmark acceptance gate is single configured tag-column correctness first;
 the 30-pair tag model remains the target capability to implement and validate.
