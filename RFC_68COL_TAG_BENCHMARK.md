@@ -263,6 +263,37 @@ This confirms a large cold-start penalty and a much smaller warm steady-state
 index cost. It also explains why cold-table numbers must not be compared
 directly with warm 1M throughput numbers.
 
+With all 128 vnode objects already open, a narrow 1M-row repeat completed in
+13.086 s (about 76.4k rows/s). The connector recorded
+`primary_put_ms=8858.690`, `primary_put_wall_ms=9114.897`,
+`write_ms=227.842`, and `main_flush_ms=536.974`. The new server-side metrics
+for the 128 vnode RPCs summed to `single_point_ms=6160.105`,
+`main_index_ms=552.378`, and `total_ms=6715.620`; the largest vnode total was
+179.713 ms. Thus the warm 1M bottleneck is localized to batched single-point
+RocksDB writes, with roughly 2.4 s between the summed server stages and the
+connector's primary-index wall time. This is the next steady-state
+optimization target; column encoding remains a separate wide-row penalty.
+
+## RocksDB single-CF A/B on 2026-11-19
+
+The history contains a separate-column-family change (`870757e9`), while the
+current isolated runtime uses `index.rocksdb.multicf=true`. To test whether
+that physical layout explained the warm-path gap, the same narrow table and
+producer were run against a fresh isolated RocksDB directory with
+`multicf=false`. The single-CF 1M warm run completed in 13.360 s (about
+74.9k rows/s), with `primary_put_wall_ms=9468.692`,
+`primary_put_ms=9224.679`, and `write_ms=202.523`. Its server-side sums were
+`single_point_ms=6296.115`, `main_index_ms=571.935`, and
+`total_ms=6871.311`.
+
+The preceding multi-CF run completed in 13.086 s (about 76.4k rows/s), with
+`primary_put_wall_ms=9114.897`, `primary_put_ms=8858.690`, and server-side
+`single_point_ms=6160.105`, `main_index_ms=552.378`, and `total_ms=6715.620`.
+Within this controlled probe, single-CF was about 3--4% slower, so changing
+the column-family layout is not adopted as the next optimization. The
+isolated runtime was restored to its original data path and `multicf=true`
+after the A/B.
+
 This probe does not claim that the first-vnode 15.1 s is the full 128-vnode
 initialization cost: the other vnodes were initialized concurrently or had
 already been prepared by the runtime. The next optimization target is the
