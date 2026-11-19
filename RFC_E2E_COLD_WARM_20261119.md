@@ -10,7 +10,7 @@ This run validates the current tagging-first DML architecture on the isolated
 3. table-to-table `INSERT`, and
 4. exact primary-key `UPDATE` without including `COMPACT` in its timing.
 
-The test used the branch tip `07d86208` and the staged index instrumentation
+The test used the branch tip `8d17848e` and the staged index instrumentation
 already recorded in `defbebe7`.  Runtime configuration was restored to the
 baseline multi-column-family mode:
 
@@ -136,21 +136,42 @@ current tag-point reader using prefix lookup for this index representation.
 
 The first compaction attempt failed before physical rewrite because the JDK
 needed `--add-opens=java.base/java.nio=ALL-UNNAMED`.  A second attempt included
-that option (and `sun.nio.ch`) and successfully passed tag resolution:
+that option (and `sun.nio.ch`) and successfully passed tag resolution, but a
+runtime thread dump then found the real pre-rewrite bottleneck: the main thread
+was spending minutes in `TagIndexSnapshot` construction at `Map.copyOf`.
+The snapshot map had already been made unmodifiable by
+`PixelsTagCompactionUpdateMap.build`; the snapshot constructor and the
+compactor constructor copied the million-entry map again.
 
 ```text
 tag_entries=2 tagged_rows=1000000 resolve_rows=1000000
 resolve_rpc_count=62 resolve_ms=12791.524452
 ```
 
-However, the physical rewrite of two ordered files did not finish within the
-900-second timeout and exited with `RC=124`.  A 268 MB compact file was left
-under `v-0-compact`, but metadata was not published: the table still reported
-1,000,000 total rows and `count_if(tag_1_type = 'UPD1M') = 0`.  Therefore the
-post-compaction tag-predicate result remains unaccepted.  This separates the
-current correctness question from the measured Tag Index update path: index
-entries and primary-key resolution exist, while the compaction/rewrite and
-publication path is not yet completing on this 68-column million-row case.
+The A/B fix removed both redundant copies and reused the existing immutable
+map.  On the same data and isolated runtime, the optimized run completed in
+`57.871 s` (`RC=0`) and published the compact file:
+
+```text
+[PIXELS_COMPACTION_STAGE_METRIC] stage=physical_rewrite
+worker_ms=20132.240 non_resolve_worker_ms=7167.414 worker_wall_ms=20132.240
+[PIXELS_COMPACTION_RESOLVE_METRIC] rows=1060000 resolve_rpc_count=65
+resolve_ms=12964.826
+[PIXELS_COMPACTION_INDEX_METRIC] relocated_rows=1060000 relocation_rpc_count=128
+[PIXELS_COMPACTION_STAGE_METRIC] stage=publish publish_ms=9489.124
+```
+
+The row-level breakdown for the 1,000,000-row file was:
+
+```text
+read_ms=879.168 primary_key_ms=239.425 update_ms=324.721 writer_ms=2882.152
+```
+
+After publication, `count_if(tag_1_type = 'UPD1M')` returned `1,000,000`,
+sample rows returned `UPD1M / 9.0000`, and the table reported `1,060,000` rows
+with `id` range `1000000000..1001059999`.  The previous timeout was therefore
+caused primarily by redundant million-entry snapshot copying, not by Direct
+I/O physical rewrite.
 
 ## Interpretation
 
@@ -165,27 +186,29 @@ client concurrency.
 The exact UPDATE route is now confirmed and is not the old merge-path mistake.
 Its current steady-state bottleneck is Tag Index storage (`storageMs` about
 3.69 s, with roughly 7.29 s client RPC time), so the next warm UPDATE probe
-should split RocksDB batch construction from `rocksDB.write`.  Separately,
-the 68-column compaction rewrite is now a second major bottleneck: its tag
-resolution took only 12.8 s, while the physical rewrite exceeded 900 s.
+should split RocksDB batch construction from `rocksDB.write`.
+
+For the optimized compaction, the remaining cost is now measurable rather than
+opaque: 12.96 s resolves tagged rows, 7.17 s is non-resolve physical rewrite,
+and 9.49 s is publication/index relocation.  The full UPDATE-plus-compaction
+wall is still below the target throughput when counted synchronously, but the
+tagging phase and the asynchronous convergence phase are now cleanly separated.
 
 ## Correctness caveat
 
 Immediately after UPDATE, a normal table scan still sees the physical `BASE`
-value, as expected before `COMPACT`.  The direct probe confirmed the tag-index
-entries and primary-key-to-regular-file resolution, but the follow-up
-compaction timed out before metadata publication; the tag predicate still
-returned no rows.  Tag-point lookup correctness for this particular new-table
-run is therefore **not accepted** yet.  No claim of full UPDATE E2E correctness
-is made from this run.
+value, as expected before `COMPACT`.  After the optimized compaction completed,
+the tag predicate returned exactly 1,000,000 rows and sample rows contained
+`UPD1M` and `9.0000`.  The fresh 68-column million-row UPDATE → COMPACT → tag
+predicate E2E correctness check is therefore **accepted**.
 
 ## Next actions
 
-1. Instrument compaction physical rewrite and metadata publication separately;
-   the current 900-second timeout occurs after tag resolution and during file
-   rewrite.
+1. Keep the snapshot-copy fix and add a regression benchmark for a million-row
+   tag snapshot so the redundant `Map.copyOf` path cannot return.
 2. Reduce the compaction case to one or a few files/columns and compare row
-   width, file size, and direct-I/O throughput before changing the tag contract.
+   width, file size, and direct-I/O throughput against the now-known snapshot
+   baseline.
 3. Add RocksDB internal timing for batch construction versus `write()` on the
    warm exact UPDATE path.
 4. Prototype vnode prewarm as a separately measurable change; do not change
