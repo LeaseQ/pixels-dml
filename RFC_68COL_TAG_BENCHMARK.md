@@ -230,6 +230,17 @@ same range. This confirms a measurable width penalty but not a 4--8x penalty;
 the remaining 1M discrepancy needs producer, file-count, row-group, and
 runtime warm-up controls.
 
+A controlled 1M-row expansion then used the same 10K physical source fixture,
+the same `sequence(0, 99)` producer, and already-warm target indexes. The
+narrow table completed in 11.439 s (about 87.4k rows/s); the 68-column table
+completed in 18.001 s (about 55.6k rows/s). Connector metrics showed
+`write_ms=201.147` vs `792.799` ms for the narrow and wide writers, while
+primary-index wall time was `7486.676` vs `7908.678` ms. At this scale, width
+therefore increases end-to-end time by about 57% and writer time by about 4x,
+but it does not explain the historical 410k rows/s versus current 55.6k
+rows/s gap by itself: primary-index publication remains about 7.5--7.9 s in
+both runs.
+
 This finding is kept separate from throughput numbers. The current 68-column
 benchmark acceptance gate is single configured tag-column correctness first;
 the 30-pair tag model remains the target capability to implement and validate.
