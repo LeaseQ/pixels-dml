@@ -120,6 +120,38 @@ This is a valid exact-path result: one UPDATE statement, one Tag Index RPC,
 and no merge fallback.  The measured rate is above one hundred thousand rows/s
 but below the several-hundred-thousand target.
 
+### 4. Direct tag-index probe and compaction follow-up
+
+The direct IndexServer probe found both tag entries:
+
+```text
+tag_1_type = UPD1M       primary keys = 1,000,000
+tag_1_para = 9.0000      primary keys = 1,000,000
+```
+
+Sample keys at positions `0`, `1`, and `999999` resolved through the primary
+index to regular file `8002`.  The prefix lookup path returned all 1,000,000
+keys; the exact lookup path returned zero, which is consistent with the
+current tag-point reader using prefix lookup for this index representation.
+
+The first compaction attempt failed before physical rewrite because the JDK
+needed `--add-opens=java.base/java.nio=ALL-UNNAMED`.  A second attempt included
+that option (and `sun.nio.ch`) and successfully passed tag resolution:
+
+```text
+tag_entries=2 tagged_rows=1000000 resolve_rows=1000000
+resolve_rpc_count=62 resolve_ms=12791.524452
+```
+
+However, the physical rewrite of two ordered files did not finish within the
+900-second timeout and exited with `RC=124`.  A 268 MB compact file was left
+under `v-0-compact`, but metadata was not published: the table still reported
+1,000,000 total rows and `count_if(tag_1_type = 'UPD1M') = 0`.  Therefore the
+post-compaction tag-predicate result remains unaccepted.  This separates the
+current correctness question from the measured Tag Index update path: index
+entries and primary-key resolution exist, while the compaction/rewrite and
+publication path is not yet completing on this 68-column million-row case.
+
 ## Interpretation
 
 The strongest current bottleneck is cold initialization of 128 primary-index
@@ -133,23 +165,27 @@ client concurrency.
 The exact UPDATE route is now confirmed and is not the old merge-path mistake.
 Its current steady-state bottleneck is Tag Index storage (`storageMs` about
 3.69 s, with roughly 7.29 s client RPC time), so the next warm UPDATE probe
-should split RocksDB batch construction from `rocksDB.write`.
+should split RocksDB batch construction from `rocksDB.write`.  Separately,
+the 68-column compaction rewrite is now a second major bottleneck: its tag
+resolution took only 12.8 s, while the physical rewrite exceeded 900 s.
 
 ## Correctness caveat
 
 Immediately after UPDATE, a normal table scan still sees the physical `BASE`
-value, as expected before `COMPACT`.  A tag predicate for `UPD1M` returned no
-rows in this fresh table, so tag-point lookup correctness for this particular
-new-table run is **not accepted** yet.  The next validation must inspect the
-tag-index entry directly, confirm its primary-key-to-row-location resolution,
-then run `COMPACT` separately and verify the post-compaction scan.  No claim of
-full UPDATE E2E correctness is made from this run.
+value, as expected before `COMPACT`.  The direct probe confirmed the tag-index
+entries and primary-key-to-regular-file resolution, but the follow-up
+compaction timed out before metadata publication; the tag predicate still
+returned no rows.  Tag-point lookup correctness for this particular new-table
+run is therefore **not accepted** yet.  No claim of full UPDATE E2E correctness
+is made from this run.
 
 ## Next actions
 
-1. Add/execute a direct tag-index listing probe for table/index `411/408` and
-   confirm whether `UPD1M` entries are present and resolve to regular files.
-2. Re-run the tag-point query and then `COMPACT` after the direct probe.
+1. Instrument compaction physical rewrite and metadata publication separately;
+   the current 900-second timeout occurs after tag resolution and during file
+   rewrite.
+2. Reduce the compaction case to one or a few files/columns and compare row
+   width, file size, and direct-I/O throughput before changing the tag contract.
 3. Add RocksDB internal timing for batch construction versus `write()` on the
    warm exact UPDATE path.
 4. Prototype vnode prewarm as a separately measurable change; do not change
