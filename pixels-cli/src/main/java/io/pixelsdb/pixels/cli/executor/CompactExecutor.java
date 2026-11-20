@@ -130,7 +130,8 @@ public class CompactExecutor implements CommandExecutor
         }
         final List<String> tagColumnNames = configuredTagColumns == null ?
                 List.of() : java.util.Arrays.stream(configuredTagColumns.split(","))
-                        .map(String::trim).filter(name -> !name.isEmpty()).toList();
+                        .map(String::trim).filter(name -> !name.isEmpty())
+                        .collect(java.util.stream.Collectors.toList());
         final boolean useTagCompactor = !tagColumnNames.isEmpty();
         final String tagColumnName = useTagCompactor ? tagColumnNames.get(0) : null;
         final long primaryTableId;

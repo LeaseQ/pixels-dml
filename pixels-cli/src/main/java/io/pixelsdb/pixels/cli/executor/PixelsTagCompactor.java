@@ -448,7 +448,7 @@ final class PixelsTagCompactor
         Map<String, Integer> tagColumns = new LinkedHashMap<>();
         for (String configuredColumn : updates.values().stream()
                 .flatMap(columnUpdates -> columnUpdates.keySet().stream())
-                .distinct().toList())
+                .distinct().collect(java.util.stream.Collectors.toList()))
         {
             String columnName = configuredColumn.isEmpty() ? tagColumnName : configuredColumn;
             int column = schema.getFieldNames().indexOf(columnName);

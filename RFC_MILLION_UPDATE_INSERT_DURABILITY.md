@@ -356,15 +356,75 @@ validation must repair that visibility or create a fresh SQL source/target and
 then run the exact UPDATE through Trino, followed by correctness and restart
 checks.
 
+### Real 68-column SQL E2E on cds20 (2026-11-20)
+
+The supplied data-set specification was converted into a clean 68-column table
+with one million rows: `id` is the unique sequential primary key, the first
+eight columns are populated, and the 60 tag columns start as NULL.  The source
+table is `pixels.e2e68_main_20261121_b`; the target is
+`pixels.e2e68_target_20261121`.  The target DDL stores all `tag_N_type`
+columns followed by all `tag_N_para` columns, so table-to-table INSERT tests
+must use that target order explicitly.
+
+The first cold LOAD/INSERT attempt initialized 128 primary-index vnodes
+serially and exceeded the transaction window (errors 10203/10213).  After the
+vnode warm-up, ten 100K LOAD chunks completed in 6.46--7.85 seconds each, with
+one retry of the first chunk completing in 10.42 seconds.  The source table
+then verified as one million rows with `id` 1--1,000,000.
+
+The real SQL UPDATE chain was successful:
+
+```text
+UPDATE ... SET tag_1_type='AAA', tag_1_para=3.1400 WHERE id BETWEEN 1 AND 1000000
+SQL wall: 6.387 s
+[PIXELS_UPDATE_METRIC] rows=1000000 mode=shared metadata_ms=0.000
+  encoding_ms=66.857 request_build_ms=247.193 rpc_count=1
+  rpc_ms=3900.024 total_ms=4216.905
+```
+
+The connector-side UPDATE route is therefore about 237K rows/s and the full
+SQL wall rate is about 157K rows/s.  COMPACT then resolved 1,000,000 tagged
+rows, published the rewritten file, and the tag predicate returned exactly
+1,000,000 rows with `tag_1_para=3.1400`; the same result remained after an
+isolated Trino restart.
+
+For table-to-table INSERT, the accepted warm one-million-row baseline was
+19.035 seconds, or about 52.5K rows/s SQL wall.  An opt-in bounded parallel
+flush of independent vnode batches (`-Dpixels.insert.index.flush.parallelism=4`)
+reduced the primary-index wall segment from 7.310 seconds to 2.985--3.658
+seconds and reduced SQL wall to 15.8--16.3 seconds, about 61--63K rows/s.
+Parallelism 8 was slightly worse (16.083 seconds), so 4 is the current
+experimental setting; it does not yet meet the INSERT target.
+
+A ten-million-row INSERT was initially reported as 143.602 seconds, but that
+measurement was rejected: the physical file and primary index contained all
+10,000,000 rows while the ordered scan hard-coded every file split to one row
+group and returned only 5,060,000 rows.  The root cause was fixed in
+`PixelsSplitManager`: ordered splits now read each file's actual metadata
+`numRowGroup`, cached per query.  A protected ten-million-row rerun completed
+in 158.198 seconds, and after the split fix the same range returned exactly
+10,000,000 distinct rows (`20,000,001`--`30,000,000`).  This is about 63K
+rows/s SQL wall, not hundreds of thousands.
+
+The INSERT experiment therefore changes the conclusion: UPDATE is already in
+the lower hundreds-of-thousands range on the exact shared-key SQL path, while
+INSERT remains in the tens-of-thousands range for one-million-row SQL wall
+tests and about 63K rows/s for the corrected ten-million-row run.  The next
+INSERT work should target writer/task parallelism and the SQLite main-index
+flush path; simply increasing vnode RPC concurrency is not sufficient.
+
 ## Acceptance criteria and remaining work
 
 - [x] INSERT files publish as `REGULAR` with a valid row-id hull.
 - [x] A committed 1M-row table survives COMPACT and two Retina restarts.
 - [x] Exact-key 1M-row UPDATE reaches the hundreds-of-thousands rows/s range.
-- [x] Table-to-table 1M-row INSERT reaches the lower hundreds-of-thousands
-  rows/s range.
-- [ ] Synthetic UNNEST INSERT reaches the target; current result is 12.8-29.8k
-  rows/s and needs a separate producer/concurrency investigation.
+- [ ] Table-to-table INSERT reaches the lower hundreds-of-thousands rows/s
+  range; the corrected 1M/10M SQL wall results are about 61--63K rows/s.
+- [x] A multi-row-group 10M INSERT remains fully query-visible after the
+  ordered-split row-group fix.
+- [ ] Scale INSERT across multiple Trino writers/tasks and profile the SQLite
+  main-index flush path; current vnode RPC parallelism is only an experimental
+  1M-row improvement.
 - [ ] Automate the recovered Retina replay/READY handshake for the validation
   harness.
 - [ ] Profile and reduce duplicate Tag Index/primary-index resolution during
