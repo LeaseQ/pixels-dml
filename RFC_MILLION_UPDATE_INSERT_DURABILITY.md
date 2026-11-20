@@ -296,6 +296,32 @@ is source-complete in the validation branches, but it is not yet deployed to
 the isolated runtime and is not counted as accepted throughput evidence until
 the generated-proto build and a correctness E2E have passed.
 
+### cds20 shared-RPC deployment evidence
+
+The shared-RPC source was then built and deployed into the isolated
+`validation-million-update` runtime on cds20.  The normal reactor build was
+blocked only by the host's missing `cmake` executable while entering the
+unrelated `pixels-retina` native module; compiling/installing `pixels-common`
+and compiling/packaging `pixels-daemon` independently succeeded.  The Trino
+connector built with the host's Java 23 toolchain, and the selected 12 tests
+(including the million-row request probe and executor tests) passed.
+
+A direct gRPC probe against the newly deployed IndexServer then appended one
+million 8-byte primary keys with two shared tag values:
+
+```text
+[SHARED_RPC_E2E] rows=1000000 request_bytes=10000064 rpc_ms=22412.056 response_code=0
+[SHARED_RPC_PREFIX_VERIFY] type_code=0 type_keys=1000000 para_code=0 para_keys=1000000
+```
+
+This is accepted as protocol/server E2E evidence: connector-side encoding,
+gRPC transport, IndexServer decode, RocksDB write, and tag-key readback all
+worked with the shared representation.  The SQL table-level UPDATE benchmark
+is still pending on this restarted runtime because the pre-existing validation
+tables currently have empty regular-file visibility after recovery; that state
+must be repaired or a fresh SQL table created before reporting end-to-end
+Trino UPDATE throughput for this commit.
+
 ## Acceptance criteria and remaining work
 
 - [x] INSERT files publish as `REGULAR` with a valid row-id hull.
