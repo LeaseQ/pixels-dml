@@ -292,9 +292,9 @@ rolling-upgrade fallback paths retain the original RPC.
 The connector probe now reports both encodings.  With one million 8-byte keys,
 the expected shared representation is approximately constant in the number of
 assignments while the old representation grows linearly.  The implementation
-is source-complete in the validation branches, but it is not yet deployed to
-the isolated runtime and is not counted as accepted throughput evidence until
-the generated-proto build and a correctness E2E have passed.
+is source-complete in the validation branches.  The deployment and direct
+IndexServer correctness evidence are recorded below; SQL table-level UPDATE
+throughput remains a separate acceptance item.
 
 ### cds20 shared-RPC deployment evidence
 
