@@ -322,6 +322,40 @@ tables currently have empty regular-file visibility after recovery; that state
 must be repaired or a fresh SQL table created before reporting end-to-end
 Trino UPDATE throughput for this commit.
 
+### Exact shared-key uniqueness proof optimization
+
+The next probe isolated a large part of the remaining warm multi-column cost.
+The old eight-column shared request, using one million 8-byte keys, took about
+`9.4 s` on the client and reported `storageMs=9412.7` on the server.  Reusing a
+single validated key vector reduced storage to about `1.19 s`, but still spent
+about `2.4 s` validating uniqueness.  The final implementation carries an
+optional `primaryKeysAreUnique` proof on the shared RPC.  The exact primary-key
+UPDATE connector path sets it; older callers leave it unset and keep the
+server-side validation path.
+
+The proof route was measured on the isolated cds20 runtime after a warm-up:
+
+```text
+[SHARED_RPC_8COL_PROOF] rows=1000000 request_bytes=10000220 rpc_ms=2247.961263 response_code=0
+decodeMs=320.773282 storageMs=1125.255674 serviceMs=1497.741148
+```
+
+That is approximately `445k rows/s` by client RPC wall time and `668k rows/s`
+by server service time.  Relative to the comparable eight-column warm baseline,
+the measured client path is about four times faster.  This meets the lower
+several-hundred-thousand target for the warm shared protocol path, but does not
+claim the stretch goal of one million rows/s.  Duplicate-key or legacy callers
+still use the compatibility validation path.
+
+The implementation is recorded by pixels-dml commits `9046a45`, `9440ec45`,
+`2339bd16`, and `2f97bb32`, with the connector proof field in pixels-trino-dml
+commit `85de23c`.  The connector plugin was loaded by the isolated Trino on
+port `8091`; a SQL table-level throughput result is still not accepted because
+the recovered pre-existing tables currently expose zero rows.  The next
+validation must repair that visibility or create a fresh SQL source/target and
+then run the exact UPDATE through Trino, followed by correctness and restart
+checks.
+
 ## Acceptance criteria and remaining work
 
 - [x] INSERT files publish as `REGULAR` with a valid row-id hull.
@@ -335,6 +369,9 @@ Trino UPDATE throughput for this commit.
   harness.
 - [ ] Profile and reduce duplicate Tag Index/primary-index resolution during
   COMPACT; the stage evidence identifies this as the leading next optimization.
-- [ ] Build/deploy the shared-primary-key RPC to the isolated runtime, compare
-  old/new request bytes and warm UPDATE wall time, and verify multi-column tag
-  correctness before accepting the optimization.
+- [x] Build/deploy the shared-primary-key RPC, compare old/new request bytes and
+  warm UPDATE wall time, and verify multi-column tag correctness at the direct
+  IndexServer boundary.
+- [ ] Run the same shared-key uniqueness-proof route through a populated Trino
+  SQL table and accept its table-level UPDATE throughput only after data
+  visibility, correctness, and restart checks pass.
