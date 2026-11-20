@@ -992,7 +992,8 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                 // the same per-column deduplication table repeatedly. Single-
                 // column requests retain the original path and cost.
                 boolean primaryKeysKnownUnique = sharedUpdate.getValuesCount() > 1 &&
-                        PixelsTagIndexCodec.areUnique(primaryKeys);
+                        (sharedUpdate.getPrimaryKeysAreUnique() ||
+                                PixelsTagIndexCodec.areUnique(primaryKeys));
                 for (IndexProto.SharedTagIndexValue value : sharedUpdate.getValuesList())
                 {
                     updates.add(new PixelsTagIndex.VersionedUpdate(

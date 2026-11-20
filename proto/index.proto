@@ -352,6 +352,9 @@ message SharedTagIndexUpdate {
   repeated bytes primaryKeys = 1;
   int64 transactionTimestamp = 2;
   repeated SharedTagIndexValue values = 3;
+  // Exact primary-key UPDATE routes may assert that this vector is unique.
+  // Older callers leave it false and the server retains its validation path.
+  bool primaryKeysAreUnique = 4;
 }
 
 message AppendSharedTagIndexEntriesRequest {
