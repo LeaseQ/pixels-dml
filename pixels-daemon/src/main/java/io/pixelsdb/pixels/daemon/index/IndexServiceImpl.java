@@ -37,7 +37,6 @@ import org.rocksdb.RocksDBException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -993,8 +992,7 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                 // the same per-column deduplication table repeatedly. Single-
                 // column requests retain the original path and cost.
                 boolean primaryKeysKnownUnique = sharedUpdate.getValuesCount() > 1 &&
-                        new HashSet<>(sharedUpdate.getPrimaryKeysList()).size() ==
-                                sharedUpdate.getPrimaryKeysCount();
+                        PixelsTagIndexCodec.areUnique(primaryKeys);
                 for (IndexProto.SharedTagIndexValue value : sharedUpdate.getValuesList())
                 {
                     updates.add(new PixelsTagIndex.VersionedUpdate(

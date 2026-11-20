@@ -62,6 +62,14 @@ class PixelsTagIndexCodecTest
         assertArrayEquals(longKey(3L), merged.get(2));
     }
 
+    @Test
+    void checksUniquenessWithTheEightBytePrimaryKeyFastPath()
+    {
+        assertEquals(true, PixelsTagIndexCodec.areUnique(List.of(longKey(1L), longKey(2L))));
+        assertEquals(false, PixelsTagIndexCodec.areUnique(
+                List.of(longKey(1L), longKey(2L), longKey(1L))));
+    }
+
     private static byte[] longKey(long value)
     {
         return java.nio.ByteBuffer.allocate(Long.BYTES).putLong(value).array();

@@ -131,6 +131,41 @@ public final class PixelsTagIndexCodec
         return merged;
     }
 
+    /**
+     * Checks whether a primary-key vector contains no duplicates.  Shared-key
+     * UPDATEs use this once for the whole vector before reusing the result for
+     * every changed column.
+     */
+    public static boolean areUnique(List<byte[]> primaryKeys)
+    {
+        requireNonNull(primaryKeys, "primaryKeys is null");
+        if (allEightByteKeys(List.of(), primaryKeys))
+        {
+            int capacity = tableSizeFor(Math.max(16L, (long) primaryKeys.size() * 2));
+            long[] keys = new long[capacity];
+            boolean[] occupied = new boolean[capacity];
+            for (byte[] primaryKey : primaryKeys)
+            {
+                requireNonNull(primaryKey, "primary key is null");
+                if (!add(keys, occupied, readLong(primaryKey)))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        Set<ByteBuffer> seen = new HashSet<>(Math.max(16, primaryKeys.size()));
+        for (byte[] primaryKey : primaryKeys)
+        {
+            requireNonNull(primaryKey, "primary key is null");
+            if (!seen.add(ByteBuffer.wrap(primaryKey)))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static boolean allEightByteKeys(List<byte[]> existing, List<byte[]> primaryKeys)
     {
         for (byte[] primaryKey : existing)
