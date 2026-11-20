@@ -29,6 +29,7 @@ import io.pixelsdb.pixels.common.utils.IndexUtils;
 import io.pixelsdb.pixels.index.IndexProto;
 import io.pixelsdb.pixels.index.IndexServiceGrpc;
 import io.pixelsdb.pixels.index.rocksdb.PixelsTagIndex;
+import io.pixelsdb.pixels.index.rocksdb.PixelsTagIndexCodec;
 import io.pixelsdb.pixels.index.rocksdb.TagIndexKeyCodec;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
