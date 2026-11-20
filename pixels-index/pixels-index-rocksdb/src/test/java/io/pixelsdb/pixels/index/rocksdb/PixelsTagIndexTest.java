@@ -177,6 +177,34 @@ class PixelsTagIndexTest
                 statistics.getTickerCount(TickerType.NUMBER_MULTIGET_CALLS));
     }
 
+    @Test
+    void acceptsAValidatedUniqueKeyVectorForDistinctColumns() throws Exception
+    {
+        List<byte[]> primaryKeys = List.of(longKey(1L), longKey(2L), longKey(3L));
+        index.appendBatch(List.of(
+                new PixelsTagIndex.VersionedUpdate(
+                        TagIndexKeyCodec.encode("c1", "a".getBytes()), 10L, primaryKeys, true),
+                new PixelsTagIndex.VersionedUpdate(
+                        TagIndexKeyCodec.encode("c2", "b".getBytes()), 10L, primaryKeys, true)));
+
+        assertEquals(3, index.getByTagPrefix("c1", "a".getBytes()).size());
+        assertEquals(3, index.getByTagPrefix("c2", "b".getBytes()).size());
+    }
+
+    @Test
+    void keepsDeduplicatingWhenTheSharedKeyVectorIsNotProvenUnique() throws Exception
+    {
+        List<byte[]> primaryKeys = List.of(longKey(1L), longKey(2L), longKey(2L));
+        index.appendBatch(List.of(
+                new PixelsTagIndex.VersionedUpdate(
+                        TagIndexKeyCodec.encode("c1", "a".getBytes()), 10L, primaryKeys),
+                new PixelsTagIndex.VersionedUpdate(
+                        TagIndexKeyCodec.encode("c2", "b".getBytes()), 10L, primaryKeys)));
+
+        assertEquals(2, index.getByTagPrefix("c1", "a".getBytes()).size());
+        assertEquals(2, index.getByTagPrefix("c2", "b".getBytes()).size());
+    }
+
     private static byte[] longKey(long value)
     {
         return java.nio.ByteBuffer.allocate(Long.BYTES).putLong(value).array();

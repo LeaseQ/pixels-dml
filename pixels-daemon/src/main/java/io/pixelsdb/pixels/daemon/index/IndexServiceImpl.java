@@ -37,6 +37,7 @@ import org.rocksdb.RocksDBException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -987,11 +988,19 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                 List<byte[]> primaryKeys = sharedUpdate.getPrimaryKeysList().stream()
                         .map(com.google.protobuf.ByteString::toByteArray)
                         .collect(Collectors.toList());
+                // Shared UPDATE requests carry one key vector for multiple column
+                // assignments. Validate it once so PixelsTagIndex does not build
+                // the same per-column deduplication table repeatedly. Single-
+                // column requests retain the original path and cost.
+                boolean primaryKeysKnownUnique = sharedUpdate.getValuesCount() > 1 &&
+                        new HashSet<>(sharedUpdate.getPrimaryKeysList()).size() ==
+                                sharedUpdate.getPrimaryKeysCount();
                 for (IndexProto.SharedTagIndexValue value : sharedUpdate.getValuesList())
                 {
                     updates.add(new PixelsTagIndex.VersionedUpdate(
                             TagIndexKeyCodec.encode(value.getColumnName(), value.getTag().toByteArray()),
-                            sharedUpdate.getTransactionTimestamp(), primaryKeys));
+                            sharedUpdate.getTransactionTimestamp(), primaryKeys,
+                            primaryKeysKnownUnique));
                 }
             }
             decodeNanos = System.nanoTime() - decodeStart;

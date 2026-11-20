@@ -55,17 +55,31 @@ public final class PixelsTagIndex implements Closeable
         private final byte[] tag;
         private final long transactionTimestamp;
         private final List<byte[]> primaryKeys;
+        private final boolean primaryKeysKnownUnique;
 
         public VersionedUpdate(byte[] tag, long transactionTimestamp, List<byte[]> primaryKeys)
+        {
+            this(tag, transactionTimestamp, primaryKeys, false);
+        }
+
+        /**
+         * Creates an update with an optional uniqueness proof for its primary-key list.
+         * The proof is only used to skip redundant per-column deduplication when a
+         * shared-key request has already validated the vector once.
+         */
+        public VersionedUpdate(byte[] tag, long transactionTimestamp, List<byte[]> primaryKeys,
+                boolean primaryKeysKnownUnique)
         {
             this.tag = requireNonNull(tag, "tag is null").clone();
             this.transactionTimestamp = transactionTimestamp;
             this.primaryKeys = List.copyOf(requireNonNull(primaryKeys, "primaryKeys is null"));
+            this.primaryKeysKnownUnique = primaryKeysKnownUnique;
         }
 
         public byte[] tag() { return tag.clone(); }
         public long transactionTimestamp() { return transactionTimestamp; }
         public List<byte[]> primaryKeys() { return primaryKeys; }
+        public boolean primaryKeysKnownUnique() { return primaryKeysKnownUnique; }
     }
 
     private static final class VersionedKey
@@ -268,6 +282,7 @@ public final class PixelsTagIndex implements Closeable
         long dedupNanos = System.nanoTime() - batchStartNanos;
         long groupStartNanos = System.nanoTime();
         Map<VersionedKey, List<byte[]>> grouped = new LinkedHashMap<>();
+        Map<VersionedKey, Boolean> knownUniqueGroups = new LinkedHashMap<>();
         int primaryKeyCount;
         if (distinctColumns)
         {
@@ -282,6 +297,7 @@ public final class PixelsTagIndex implements Closeable
                 VersionedKey versionedKey = new VersionedKey(update.tag(), update.transactionTimestamp());
                 List<byte[]> primaryKeys = grouped.computeIfAbsent(versionedKey, ignored -> new ArrayList<>());
                 primaryKeys.addAll(update.primaryKeys());
+                knownUniqueGroups.put(versionedKey, update.primaryKeysKnownUnique());
                 primaryKeyCount += update.primaryKeys().size();
             }
         }
@@ -323,7 +339,11 @@ public final class PixelsTagIndex implements Closeable
                 VersionedKey versionedKey = versionedKeys.get(i);
                 byte[] indexKey = indexKeys.get(i);
                 List<byte[]> existing = existingValues.get(i);
-                List<byte[]> merged = PixelsTagIndexCodec.append(existing, grouped.get(versionedKey));
+                List<byte[]> incoming = grouped.get(versionedKey);
+                List<byte[]> merged = existing.isEmpty() &&
+                        Boolean.TRUE.equals(knownUniqueGroups.get(versionedKey))
+                        ? new ArrayList<>(incoming)
+                        : PixelsTagIndexCodec.append(existing, incoming);
                 if (merged.size() != existing.size())
                 {
                     put(batch, indexKey, PixelsTagIndexCodec.encode(merged));
