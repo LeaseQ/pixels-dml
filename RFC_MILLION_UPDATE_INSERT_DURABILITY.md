@@ -1400,4 +1400,54 @@ isolated runtime currently uses a stale recovery checkpoint backup for safe
 experiments, so a restart would intentionally retire newly-created files. A
 valid persistence arm requires first producing a checkpoint that contains the
 new table files. The optimization remains opt-in until that checkpoint-backed
-restart test and a fair 1M-row A/B throughput comparison are completed.
+restart test and a broader apples-to-apples A/B comparison are completed.
+
+## Table-scoped fixed-source 1M arm (2026-11-23)
+
+After the 10K correctness probe, a fixed 68-column source was generated in
+100 chunks of 10,000 rows because Trino 466 limits one `sequence()` result to
+10,000 entries. The source passed `count/min/max/distinct =
+1000000/1/1000000/1000000`. A fresh table-scoped target then measured:
+
+```text
+cold table-to-table INSERT: 11.752 s ~=85.1K rows/s
+  grouped primary_ms=2893.347; main_index_ms=768.314
+warm append of another 1M rows: 9.657 s ~=103.6K rows/s
+  grouped primary_ms=2202.806; main_index_ms=514.130
+final target count/min/max/distinct = 2000000/1/2000000/2000000
+```
+
+The first attempt used a new RocksDB root without creating its parent
+directory and failed with index error 10602 before opening RocksDB. This was a
+deployment/setup defect: RocksDB creates its own database directory but not a
+missing parent. The code now creates the full path before listing or opening
+column families, and a direct fresh-path probe confirmed that a missing
+`table-3000` directory is created and opened successfully. The failed arm is
+not included in the throughput numbers.
+
+The same 2M-row table then ran the exact two-column tag UPDATE for the first
+1M keys:
+
+```text
+UPDATE wall time: 1.645 s ~=608K rows/s
+tag storage: 2 logical updates, 1,000,000 primary keys
+```
+
+Tag-aware compaction completed successfully. Because the target contained 2M
+rows, it rewrote both ordered files: physical rewrite 34.687 s, resolve
+26.185 s, publish 20.009 s. The final materialized checks passed:
+
+```text
+total rows=2000000
+updated tag_1_type='UPD1M'=1000000
+updated tag_1_para=9.0000=1000000
+both tag predicates=1000000
+min(id)=1, max(id)=2000000, distinct(id)=2000000
+```
+
+This is the first table-scoped million-row end-to-end arm that covers both
+INSERT and the supported tagging UPDATE path. INSERT remains in the 85--104K
+rows/s range on this wide fixture, while UPDATE reaches about 608K rows/s.
+The result is materially below the desired million-row INSERT target but
+above the minimum tens-of-thousands floor; it does not yet establish a
+million-row INSERT acceptance result.

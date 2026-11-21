@@ -95,6 +95,15 @@ public class RocksDBFactory
             throws RocksDBException,SinglePointIndexException
     {
         long openStartNanos = System.nanoTime();
+        // RocksDB creates the database directory but not a missing parent.
+        // Table-scoped paths are commonly new on first use, so create the
+        // complete path before listColumnFamilies/open instead of returning a
+        // misleading index error from the first INSERT.
+        File dbDirectory = new File(rocksDBPath);
+        if (!dbDirectory.isDirectory() && !dbDirectory.mkdirs() && !dbDirectory.isDirectory())
+        {
+            throw new RocksDBException("Unable to create RocksDB directory: " + rocksDBPath);
+        }
         // 1. Get existing column families (returns empty list for new database)
         List<byte[]> existingColumnFamilies;
         try (Options listOptions = new Options())
