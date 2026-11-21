@@ -980,3 +980,56 @@ approximately 9M to 16M rows between the baseline and the probe. The query's
 work changed with the table size. The candidate connector was restored and no
 code commit was made. A fair follow-up requires a fixed, materialized 1M-row
 source table and a fresh target for both A/B arms.
+
+### Fixed-source E2E A/B and grouped-primary saturation probe (2026-11-22)
+
+The fair follow-up was established in the isolated runtime. A materialized
+source table, `bench68_v2.e2e_fixed_source_20261122`, contains exactly
+1,000,000 rows with `id` 1--1,000,000 and 1,000,000 distinct IDs. Two fresh
+68-column indexed targets were then used so that the source file set did not
+grow between the A/B arms.
+
+The restored connector, 32 writers, and the validated 10,000-row batch size
+gave this query timeline on the fresh target:
+
+```text
+Query 20261121_181526_00032_n2gap
+elapsed=12.843 s, running=2.563 s, finishing=10.061 s
+rate=77.9K rows/s
+correctness=1,000,000/1/1,000,000/1,000,000
+```
+
+The candidate that unwraps `LazyBlock` and handles a one-entry
+`DictionaryBlock` was then built on cds20's JDK 23 and deployed only to the
+isolated Trino. It passed compilation, but two fixed-source runs were slower:
+
+```text
+after connector restart: 17.822 s = 56.1K rows/s
+same connector, no restart: 14.348 s = 69.7K rows/s
+```
+
+Both candidate targets passed the row-count, ID-range, ID-distinctness, and
+tag-value checks. The candidate was rolled back; no LazyBlock code is retained.
+The second run is sufficient to reject this fast path for the current wide
+table-to-table INSERT, without relying on the earlier invalid comparison
+against a source table that had grown from 9M to 16M rows.
+
+The fixed-source baseline also exposed a more important concurrency shape.
+The client sends one grouped primary-index RPC per Trino writer. Each grouped
+RPC is split again by the daemon into up to 32 RocksDB bucket tasks. With 32
+client writers, the daemon log showed 32 concurrent grouped requests whose
+server-side primary-index time accumulated to approximately 9--10 seconds,
+while the associated main-index work was usually tens of milliseconds after
+initialization. A same-target append with the restored connector remained
+13.375 seconds (`74.8K rows/s`) and showed the same grouped-primary pattern.
+This points to a client-writer versus daemon-grouped-thread oversubscription
+hypothesis, not a PageSink dictionary conversion bottleneck.
+
+An attempted 8/16-writer follow-up was not accepted as data: the isolated
+Retina metadata namespace had a stale writer-buffer condition while creating
+a new target, and the resulting validation queries were canceled after they
+failed to produce complete INSERT metrics. The runtime was left on the
+restored connector. The next valid experiment should reuse one clean target
+or reset only the isolated Retina metadata state, then sweep client writers
+against the daemon grouped thread count while recording both query timeline
+and `[PIXELS_PRIMARY_INDEX_GROUPED_METRIC]`.
