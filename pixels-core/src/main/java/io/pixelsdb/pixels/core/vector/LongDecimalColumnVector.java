@@ -164,13 +164,18 @@ public class LongDecimalColumnVector extends ColumnVector
     @Override
     public void add(Integer128 value)
     {
+        add(value.getHigh(), value.getLow());
+    }
+
+    public void add(long high, long low)
+    {
         if (writeIndex >= getLength())
         {
             ensureSize(writeIndex * 2, true);
         }
         int index = writeIndex++;
-        vector[index*2] = value.getHigh();
-        vector[index*2+1] = value.getLow();
+        vector[index*2] = high;
+        vector[index*2+1] = low;
         isNull[index] = false;
     }
 
