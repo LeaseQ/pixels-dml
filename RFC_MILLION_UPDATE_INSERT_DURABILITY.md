@@ -1177,3 +1177,31 @@ hypothesis rather than a simple L0-stall explanation. The runtime was restored
 to `index.bucket.num=128`, `write.buffer.size=67108864`, and background
 `2/4`, then restarted and marked READY. None of these probe settings is
 retained.
+
+## Database-level RocksDB write-buffer cap probe (2026-11-22)
+
+RocksDB exposes a database-level `db_write_buffer_size` specifically for
+sharing a memtable budget across many column families. The validation branch
+now exposes this as `index.rocksdb.db.write.buffer.size`, disabled by default
+(`0`) so existing deployments retain their behavior. The isolated daemon was
+run with the new option set to 16 GiB while the per-CF setting remained 64 MiB.
+The generated RocksDB `OPTIONS` file confirmed
+`db_write_buffer_size=17179869184`, so this was a real cap probe rather than a
+configuration-only test.
+
+On a fresh narrow 100K target, the cap arm produced:
+
+```text
+grouped-primary ~=71.3 s
+E2E wall ~=74.5 s
+RSS ~=79 GiB
+count/min/max/distinct(id)=100000/1/100000/100000
+```
+
+It was slower than the uncapped arms and did not prevent the observed RSS
+growth. This rejects the 16 GiB database-level cap as a throughput fix for the
+current multi-CF implementation. The code-level knob is retained as an
+optional memory-protection/diagnostic control, but it is not enabled in the
+runtime and is not an acceptance configuration. The isolated runtime was
+restored to the original daemon jar and the default 64 MiB/2/4 RocksDB
+settings, then restarted and marked READY.

@@ -128,6 +128,10 @@ public class RocksDBFactory
         int maxBackgroundCompactions = Integer.parseInt(ConfigFactory.Instance().getProperty("index.rocksdb.max.background.compactions"));
         int maxSubcompactions = Integer.parseInt(ConfigFactory.Instance().getProperty("index.rocksdb.max.subcompactions"));
         int maxOpenFiles = Integer.parseInt(ConfigFactory.Instance().getProperty("index.rocksdb.max.open.files"));
+        String dbWriteBufferSizeValue =
+                ConfigFactory.Instance().getProperty("index.rocksdb.db.write.buffer.size");
+        long dbWriteBufferSize = dbWriteBufferSizeValue == null
+                ? 0L : Long.parseLong(dbWriteBufferSizeValue);
         boolean enableRocksDBStats = Boolean.parseBoolean(ConfigFactory.Instance().getProperty("index.rocksdb.stats.enabled"));
 
         DBOptions dbOptions = new DBOptions()
@@ -137,6 +141,15 @@ public class RocksDBFactory
                 .setMaxBackgroundCompactions(maxBackgroundCompactions)
                 .setMaxSubcompactions(maxSubcompactions)
                 .setMaxOpenFiles(maxOpenFiles);
+
+        // A per-column-family write buffer is multiplied by the number of
+        // vnodes in the multi-CF layout. Keep the historical behavior when
+        // the cap is zero, but allow an isolated deployment to bound total
+        // memtable memory across all column families.
+        if (dbWriteBufferSize > 0)
+        {
+            dbOptions.setDbWriteBufferSize(dbWriteBufferSize);
+        }
 
         if(enableRocksDBStats)
         {
