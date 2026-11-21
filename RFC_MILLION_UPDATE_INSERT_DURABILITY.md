@@ -1244,3 +1244,34 @@ generation time and writer-tail failures must be reported separately.
 The clean namespace therefore becomes the preferred isolated baseline for the
 next experiment, while the shared-CF namespace and the malformed wide-source
 arms remain diagnostic/rejected results.
+
+## Single-table RocksDB namespace probe (2026-11-22)
+
+To isolate the remaining per-table cost, the validation runtime was moved to a
+brand-new RocksDB directory and a new source/target pair was created after the
+restart.  The source was checked before the target write:
+
+```text
+source count/min/max/distinct = 1000000/1/1000000/1000000
+```
+
+The target used `pk=id` and passed the exact-value check after each batch:
+
+```text
+cold 1M target: 9.916 s ~=100.8K rows/s
+  grouped primary_ms=2997.231; main_index_ms=539.218
+warm 1M target (ids 1000001..2000000): 7.813 s ~=128.0K rows/s
+  grouped primary_ms=2255.387; main_index_ms=520.714
+final count/min/max/distinct/value-check =
+  2000000/1/2000000/2000000/2000000
+Retina RSS after the two batches ~=33.2 GiB
+```
+
+The corresponding RocksDB column-family counts were 8,299 in the historical
+shared directory, 513 in the multi-table clean probe, and 257 in this
+single-table directory.  The single-table arm is therefore a stronger causal
+control than the earlier clean-directory result: removing historical CFs
+improves cold INSERT by roughly an order of magnitude, but does not by itself
+reach the million-row target.  The next optimization should reduce the
+per-CF/per-vnode memory and publication cost, or reduce the number of CFs held
+open, while preserving tag-aware UPDATE and recovery semantics.
