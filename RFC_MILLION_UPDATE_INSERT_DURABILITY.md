@@ -1124,3 +1124,16 @@ runtime was restored to the default 2/4 values and Retina was restarted and
 marked READY. This experiment supports a lower-resource initialization design
 (for example bounded vnode/CF creation and staged prewarming), not simply
 raising all RocksDB thread counts.
+
+A smaller follow-up with `max.background.flushes=8, max.background.compactions=8`
+was intentionally run on a new 100,000-row pk target. It was worse, not
+better:
+
+```text
+default 2/4, earlier 100K pk probe: primary_put_wall_ms ~= 9921
+experimental 8/8, new 100K pk probe: primary_put_wall_ms = 66921
+```
+
+The Retina RSS was again about 72 GB during the experiment. This rejects a
+simple monotonic thread-count tuning rule. The isolated runtime was restored
+to 2/4 and restarted/marked READY; neither experimental setting is retained.
