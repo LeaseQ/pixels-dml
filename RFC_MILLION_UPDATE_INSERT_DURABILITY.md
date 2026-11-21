@@ -1137,3 +1137,43 @@ experimental 8/8, new 100K pk probe: primary_put_wall_ms = 66921
 The Retina RSS was again about 72 GB during the experiment. This rejects a
 simple monotonic thread-count tuning rule. The isolated runtime was restored
 to 2/4 and restarted/marked READY; neither experimental setting is retained.
+
+## Bucket-count and write-buffer probes (2026-11-22)
+
+The next isolation step tested whether the cold primary-index cost was mainly
+the number of RocksDB column families. Two fresh narrow source/target pairs
+were used with 100,000 unique `id` values and 32 Trino writers. The source was
+written in the same ten 10K-row fragments for both arms; only the isolated
+Retina `index.bucket.num` setting changed:
+
+```text
+bucket.num=16:  grouped-primary ~=63.8 s; E2E ~=66.9 s
+bucket.num=128: grouped-primary ~=63.5 s; E2E ~=66.8 s
+```
+
+Both targets passed `count/min/max/distinct(id)=100000/1/100000/100000`.
+The difference is below measurement noise, so reducing the bucket count is
+rejected as a stand-alone optimization. The absolute cold time was also
+state-sensitive: a later new 128-bucket target on the same runtime completed
+in about 10.3 s while the process was in a lower-pressure state. This means a
+single cold run must not be used to claim a stable bucket improvement.
+
+The write-buffer size was then varied with the default background settings
+(`flushes=2`, `compactions=4`) and fresh narrow 100K targets. The results show
+the memory/performance trade-off, not an accepted deployment setting:
+
+```text
+64 MiB: primary ~=10.3 s in the low-pressure run; RSS later reached ~=77 GiB
+  during the cold-index probes (other 64 MiB runs reached 35--63 s)
+16 MiB: primary ~=40.5 s; E2E ~=43.9 s; RSS ~=38 GiB
+  8 MiB: primary ~=35.4 s; E2E ~=38.8 s; RSS ~=31 GiB
+```
+
+The smaller buffers reduce resident memory but do not improve the stable cold
+throughput; they remain far below the target rate. RocksDB logs showed no
+write-stall counter increase during the high-RSS run. Together with the RSS
+change, this supports a multi-column-family memtable/arena amplification
+hypothesis rather than a simple L0-stall explanation. The runtime was restored
+to `index.bucket.num=128`, `write.buffer.size=67108864`, and background
+`2/4`, then restarted and marked READY. None of these probe settings is
+retained.
