@@ -1304,3 +1304,28 @@ within roughly four minutes while replaying the stale checkpoint and spawned
 about 1,800 recovery-related threads.  That arm was aborted as environment
 interference, not interpreted as a RocksDB result.  The runtime was restored
 to the single-table path with the default count 3 and marked READY.
+
+## RocksDB open-cost instrumentation (2026-11-23)
+
+The diagnostic commit `7fe532cc` was compiled with the remote JDK 23 Maven
+environment and temporarily injected ahead of the original daemon jar on the
+isolated Retina classpath.  A one-row INSERT into a temporary pk table forced
+the lazy first index open.  The new metric reported:
+
+```text
+existing_cf=257
+list_cf_ms=196
+descriptor_ms=134
+db_open_ms=17713
+total_ms=18047
+```
+
+This is direct evidence that the first index operation pays about 17.7 seconds
+inside `RocksDB.open` even after the historical 8,299-CF directory has been
+replaced by a single-table 257-CF namespace.  Column-family enumeration and
+descriptor preparation are comparatively small.  The result strengthens the
+case for a table-scoped database or a lifecycle that does not open every
+historical vnode CF at once; thread-count and write-buffer tuning cannot remove
+this native open cost.  The override jar was removed after the probe and the
+runtime was restored to the original full jar, so the metric change is
+observability only and is not part of the running benchmark configuration.
