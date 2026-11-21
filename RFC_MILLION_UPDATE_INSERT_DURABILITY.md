@@ -455,6 +455,58 @@ IndexService, confirm `[PIXELS_PRIMARY_INDEX_GROUPED_METRIC]`, then rerun fresh
 are present, grouped primary writes remain experimental and are not a default
 or accepted INSERT optimization.
 
+### Clean 68-column INSERT -> UPDATE -> COMPACT E2E on cds20 (2026-11-21)
+
+The isolated runtime was rebuilt with the grouped-primary experiment enabled
+and a fresh table hierarchy.  A source table with the full 68-column schema was
+filled to exactly 1,000,000 rows (`id` 1--1,000,000, all IDs distinct).  After
+the one-time source vnode initialization, nine additional 100K source INSERTs
+completed in 3.26--3.49 seconds each.  The first cold 100K source INSERT took
+669.616 seconds and returned error 10203, but the rows and grouped index entries
+were visible; this is recorded as a transaction/publication defect, not a
+successful client transaction.
+
+The first valid indexed target used an incorrect path shape and is retained only
+as a negative control: its COMPACT failed after tag-index resolution because
+metadata could not find the ordered directory.  A second target was created
+with a single root `paths` URI, letting the connector register its compact and
+ordered directories.  It had `table_id=620`, `index_id=610`, and a real `pk=id`
+primary index.  The complete supported-tag chain was:
+
+```text
+table-to-table INSERT, 1,000,000 rows:
+  SQL wall = 389.143 s; rows = 1,000,000; ids = 400000001--401000000
+  [PIXELS_PRIMARY_INDEX_GROUPED_METRIC]
+  grouped_threads=32; cold primary stage ~=385 s
+
+UPDATE tag_1_type='AAA', tag_1_para=3.1400:
+  SQL wall = 6.036 s; rows = 1,000,000; one shared Tag Index RPC
+  before COMPACT, physical tag columns correctly remained NULL
+
+tag-aware COMPACT -c 8:
+  SQL/CLI wall = 53.529 s
+  tag resolve: 1,000,000 rows, 62 RPCs, 12.814 s
+  physical rewrite: 18.338 s; relocation: 1,000,000 rows, 128 RPCs
+  metadata publish: 9.083 s
+
+after COMPACT:
+  physical scan: 1,000,000 rows, 1,000,000 rows with tag_1_type='AAA',
+  tag_1_para min=max=3.1400
+  tag predicate: 1,000,000 rows, ids 400000001--401000000
+```
+
+The clean target therefore proves the intended semantic chain: UPDATE writes the
+Tag Index, COMPACT materializes both tag columns, and the tag predicate sees the
+same million rows.  The warm INSERT path was also measured on a separate clean
+indexed target: a second 1M batch completed in 6.654 seconds with exact 2M-row
+post-checks, about 150K rows/s SQL wall; grouped primary writes used one RPC per
+file and the daemon primary-put wall was about 2.95 seconds.  This is a useful
+warm-path result, but it is not yet a production acceptance result because the
+cold and warm table-to-table INSERT statements returned commit errors 10213
+after their data/index entries were visible.  The next implementation priority
+is to make publication/transaction status agree with the durable metadata and
+then repeat the same clean chain.
+
 ## Acceptance criteria and remaining work
 
 - [x] INSERT files publish as `REGULAR` with a valid row-id hull.
