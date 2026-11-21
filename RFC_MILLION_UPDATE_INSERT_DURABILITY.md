@@ -768,3 +768,43 @@ Pixels encoding path (`RunLenIntEncoder`, `StringColumnWriter`, dictionary
 construction) and the primary-index RPC/write stage. The validated
 `row.batch.size=10000`, grouped writer pool of 32, and WAL default remain
 unchanged.
+
+### RLE-aware PageSink batching (2026-11-21)
+
+The generated tagged dataset contains a timestamp constant and 30 constant tag
+type columns, which Trino represents as `RunLengthEncodedBlock`. After the
+zero-copy change, JFR still showed repeated `ShortTimestampType.getLong` work.
+The PageSink now detects RLE blocks per page chunk, decodes the single value
+once, and fills the Pixels vector with the cached primitive, decimal, or Slice
+value. Non-RLE blocks retain the normal row conversion path.
+
+The fresh table `profile_batch_rle_20261121_1512` passed the exact INSERT
+check:
+
+```text
+query elapsed = 22.42 s, query CPU = 6.53 s
+TableWriter add wall/cpu = 6.57 s / 4.41 s
+sink write_ms = 2583.234, index_ms = 1713.791
+primary_put_wall_ms = 12945.940
+count/min/max/distinct(id) = 1000000/1/1000000/1000000
+```
+
+Compared with the direct-decimal plus zero-copy run, TableWriter CPU fell from
+6.95 s to 4.41 s and query CPU fell from 9.07 s to 6.53 s. SQL wall time is
+now about 22.4 s, or roughly 44.6K rows/s for this 1M-row end-to-end INSERT.
+The remaining dominant segment is grouped primary-index write (about 12.95 s);
+the RLE optimization is accepted and does not change the validated batch size,
+32-thread grouped writer, WAL setting, or tag schema.
+
+As a route regression probe, the same table accepted a 100,000-row shared-key
+UPDATE with no lease/commit error:
+
+```text
+UPDATE route metric: encoding_ms=40.965 request_build_ms=78.655
+rpc_ms=7791.320 total_ms=7914.605
+```
+
+The pre-compaction read still showed the original visible tag values, which is
+expected for this versioned update path and is not counted as post-compaction
+tag correctness. Existing compacted UPDATE evidence remains the correctness
+baseline for the update route.
