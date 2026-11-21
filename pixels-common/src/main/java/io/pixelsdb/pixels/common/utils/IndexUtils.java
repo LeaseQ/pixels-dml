@@ -20,7 +20,6 @@
 
  package io.pixelsdb.pixels.common.utils;
 
- import com.google.common.hash.Hashing;
  import com.google.protobuf.ByteString;
  import io.pixelsdb.pixels.common.exception.MetadataException;
  import io.pixelsdb.pixels.common.exception.SinglePointIndexException;
@@ -35,6 +34,9 @@
  import java.util.Arrays;
  import java.util.stream.IntStream;
  import java.nio.charset.StandardCharsets;
+import java.security.DigestException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 
  public class IndexUtils
 {
@@ -43,6 +45,18 @@
     private final int bucketNum;
     private static final Integer VARIABLE_LEN_SENTINEL = -2;
     private static final String defaultColumnFamily = "default";
+    private static final ThreadLocal<MessageDigest> BUCKET_DIGEST = ThreadLocal.withInitial(() -> {
+        try
+        {
+            return MessageDigest.getInstance("SHA-256");
+        }
+        catch (NoSuchAlgorithmException e)
+        {
+            throw new IllegalStateException("SHA-256 is not available", e);
+        }
+    });
+    private static final ThreadLocal<byte[]> BUCKET_KEY_BUFFER = ThreadLocal.withInitial(() -> new byte[32]);
+    private static final ThreadLocal<byte[]> BUCKET_DIGEST_BUFFER = ThreadLocal.withInitial(() -> new byte[32]);
 
     private IndexUtils()
     {
@@ -100,9 +114,30 @@
     {
         IndexUtils indexUtils = IndexUtils.getInstance();
 
-        int hash = Hashing.sha256()
-                .hashBytes(byteString.toByteArray())
-                .asInt();
+        int length = byteString.size();
+        byte[] keyBuffer = BUCKET_KEY_BUFFER.get();
+        if (keyBuffer.length < length)
+        {
+            keyBuffer = new byte[Math.max(length, keyBuffer.length * 2)];
+            BUCKET_KEY_BUFFER.set(keyBuffer);
+        }
+        byteString.copyTo(keyBuffer, 0, 0, length);
+
+        MessageDigest digest = BUCKET_DIGEST.get();
+        digest.update(keyBuffer, 0, length);
+        byte[] digestBuffer = BUCKET_DIGEST_BUFFER.get();
+        try
+        {
+            digest.digest(digestBuffer, 0, digestBuffer.length);
+        }
+        catch (DigestException e)
+        {
+            throw new IllegalStateException("Failed to compute SHA-256 bucket hash", e);
+        }
+        int hash = ((digestBuffer[0] & 0xff) << 24) |
+                ((digestBuffer[1] & 0xff) << 16) |
+                ((digestBuffer[2] & 0xff) << 8) |
+                (digestBuffer[3] & 0xff);
 
         int absHash = Math.abs(hash);
 
