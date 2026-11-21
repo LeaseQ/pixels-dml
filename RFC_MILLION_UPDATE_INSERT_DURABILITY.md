@@ -719,3 +719,52 @@ the dominant cost and slightly worsened this run; the default batch size was
 restored. The next INSERT work should remain focused on the Trino TableWriter /
 Exchange backpressure and the grouped RocksDB write path, with per-stage
 profiling rather than a larger PageSink batch as the next experiment.
+
+### JFR-guided conversion allocation reductions (2026-11-21)
+
+Runtime-level profiling of a fresh 1M-row, 68-column generated INSERT showed
+that `PixelsPageSink.appendValue` and value conversion were material CPU and
+allocation hotspots. The initial JFR recording attributed 38.26% of sampled
+allocation pressure to `byte[]`; it also showed `ByteBuffer`/decimal conversion
+and `PixelsPageSink.appendValue` on the hot path. Two low-risk changes were
+therefore implemented and pushed:
+
+* short decimals are written as their already-unscaled `long` value, and long
+  decimals use the Trino `Int128` high/low words directly, avoiding temporary
+  8/16-byte arrays and `ByteBuffer` wrappers;
+* heap-backed Trino `Slice` values for VARCHAR/CHAR/BINARY/VARBINARY are retained
+  by reference in `BinaryColumnVector`; non-heap slices use the original copy
+  fallback.
+
+The direct-decimal run on table `profile_batch_decimal_direct_20261121_1459`
+completed correctly:
+
+```text
+query elapsed = 22.81 s, query CPU = 8.67 s
+TableWriter add wall/cpu = 9.22 s / 7.60 s
+sink write_ms = 1980.328, index_ms = 1124.141
+primary_put_wall_ms = 12338.489
+count/min/max/distinct(id) = 1000000/1/1000000/1000000
+```
+
+The zero-copy Slice run on table `profile_batch_slice_zero_copy_20261121_1505`
+also completed correctly:
+
+```text
+query elapsed = 24.02 s, query CPU = 9.07 s
+TableWriter add wall/cpu = 9.15 s / 6.95 s
+sink write_ms = 2532.891, index_ms = 1743.096
+primary_put_wall_ms = 12190.602
+count/min/max/distinct(id) = 1000000/1/1000000/1000000
+```
+
+The zero-copy JFR recording reduced sampled `byte[]` allocation pressure from
+38.26% to 17.75%, and reduced `PixelsPageSink.appendValue` from 11.44% of
+execution samples to 0.69%. The single-run SQL wall time did not yet improve
+because Exchange/backpressure and grouped primary-index time remain variable;
+these changes are retained as allocation-pressure improvements, not claimed as
+the final throughput breakthrough. The next bottleneck work should target the
+Pixels encoding path (`RunLenIntEncoder`, `StringColumnWriter`, dictionary
+construction) and the primary-index RPC/write stage. The validated
+`row.batch.size=10000`, grouped writer pool of 32, and WAL default remain
+unchanged.
