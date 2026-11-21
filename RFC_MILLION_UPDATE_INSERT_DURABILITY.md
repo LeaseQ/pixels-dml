@@ -964,3 +964,19 @@ reader-to-writer vector path that preserves tag semantics, reducing repeated
 variable-width materialization, and a controlled source-scan benchmark that
 separates read CPU from writer CPU. Any such change must retain the hidden
 timestamp/visibility filtering and the existing tag index publication rules.
+
+### LazyBlock unwrapping probe (2026-11-22)
+
+The Trino 466 SPI exposes `LazyBlock.getLoadedBlock()`. A candidate PageSink
+change resolved lazy blocks once before checking RLE/dictionary fast paths, and
+the connector plus a dedicated lazy-single-entry dictionary test compiled
+successfully on cds20's JDK 23. It was not accepted after the live probe:
+the comparable-looking runs were 11.952 s and 10.302 s, versus the earlier
+8.774 s writer=32 baseline.
+
+This is not a valid causal rejection because the source table had grown from
+approximately 9M to 16M rows between the baseline and the probe. The query's
+`WHERE id <= 1M` is not proven to prune all unrelated files, so source-scan
+work changed with the table size. The candidate connector was restored and no
+code commit was made. A fair follow-up requires a fixed, materialized 1M-row
+source table and a fresh target for both A/B arms.
