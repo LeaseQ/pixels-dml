@@ -1515,3 +1515,49 @@ single-writer controls into the 124--153K rows/s range. It is still below the
 desired lower-hundreds-of-thousands-to-million target, and it remains an
 opt-in session configuration pending a clean cold-start and persistence arm.
 The main Trino runtime was not changed.
+
+## 11M INSERT -> UPDATE -> tag-aware COMPACT E2E (2026-11-23)
+
+The fixed target was extended to exactly 11,000,000 rows before the final
+semantic run. The second exact-key two-column UPDATE used a valid `VARCHAR(10)`
+tag value (`UPD1M`) and completed in 3.091 s SQL wall time, approximately
+323.5K rows/s. The connector route reported `encoding_ms=70.932`,
+`request_build_ms=202.594`, one 10MB shared RPC, `rpc_ms=790.084`, and
+`total_ms=1063.757`. The daemon reported `decode_ms=222.382`,
+`storage_ms=362.570`, and `service_ms=626.748`.
+
+Tag-aware `COMPACT -c 8` then rewrote all 11M rows successfully:
+
+```text
+physical rewrite: 186.171 s
+tag-index resolve: 11,000,000 rows, 689 RPCs, 150.643 s
+primary relocation: 11,000,000 rows, 768 RPCs
+metadata publish: 98.769 s
+CLI wall: 316.312 s, rc=0
+```
+
+Post-COMPACT verification returned:
+
+```text
+total/min/max/distinct = 11000000/1/11000000/11000000
+tag_1_type='UPD1M' = 1000000
+tag_1_para=3.1400 = 1000000
+tag predicate count = 1000000
+sample ids 1,2,3 materialized as UPD1M / 3.1400
+```
+
+The isolated Trino coordinator was restarted with the same explicit
+`PIXELS_HOME` and `PIXELS_CONFIG`. The post-restart checks returned the same
+11M row count, ID range, distinct count, and 1M tag counts/predicate result.
+This proves file/metadata visibility across a query-service restart without
+touching the main runtime. Retina restart persistence remains covered by the
+earlier clean 1M E2E restart arm; this current 11M arm deliberately avoids the
+stale recovery-checkpoint path used by exploratory runs.
+
+The COMPACT metrics also sharpen the bottleneck hypothesis: UPDATE itself is
+already above 300K rows/s end-to-end on the warm exact-key path, whereas
+materializing tags over a wide 11M table is dominated by tag-index resolution,
+primary relocation, and metadata publication. INSERT remains the main gap to
+the million-row target; the next code work should focus on grouped primary
+index service cost and parallel source/task execution, while preserving the
+tag-index-before-COMPACT contract.
