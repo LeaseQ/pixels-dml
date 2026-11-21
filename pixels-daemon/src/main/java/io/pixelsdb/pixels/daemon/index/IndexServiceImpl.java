@@ -30,6 +30,7 @@ import io.pixelsdb.pixels.index.IndexProto;
 import io.pixelsdb.pixels.index.IndexServiceGrpc;
 import io.pixelsdb.pixels.index.rocksdb.PixelsTagIndex;
 import io.pixelsdb.pixels.index.rocksdb.PixelsTagIndexCodec;
+import io.pixelsdb.pixels.index.rocksdb.RocksDBFactory;
 import io.pixelsdb.pixels.index.rocksdb.TagIndexKeyCodec;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -400,6 +401,14 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
         {
             int bucketId = IndexUtils.getBucketIdFromByteBuffer(entry.getIndexKey().getKey());
             entriesByBucket.computeIfAbsent(bucketId, ignored -> new ArrayList<>()).add(entry);
+        }
+        try
+        {
+            RocksDBFactory.preCreateColumnFamilies(tableId, indexId, entriesByBucket.keySet());
+        }
+        catch (RocksDBException e)
+        {
+            throw new SinglePointIndexException("Failed to pre-create primary index column families", e);
         }
         List<Future<Boolean>> futures = new ArrayList<>(entriesByBucket.size());
         for (Map.Entry<Integer, List<IndexProto.PrimaryIndexEntry>> bucket : entriesByBucket.entrySet())

@@ -605,3 +605,54 @@ of end-to-end improvement.  The source and isolated runtime are restored to
 the pre-experiment lock scope; further optimization should be driven by a
 profile of the RocksDB/vnode initialization path rather than another
 lock-scope guess.
+
+### JFR-confirmed vnode CF bottleneck and accepted batch-CF optimization (2026-11-21)
+
+The next profiling pass isolated the cold-path cost rather than inferring it
+from SQL wall time. A 100,000-row generated 68-column INSERT on the baseline
+runtime took 628 seconds in the Trino recording. Trino spent most samples in
+blocking/waiting paths; JFR recorded no file-read events and only one 15.4 MB
+output file. The isolated Retina recording showed native samples in
+`org.rocksdb.RocksDB.createColumnFamily`, while the daemon log showed 128
+`SinglePointIndex` creations for table `1121`/index `1110`, approximately one
+every 4.6 seconds. The grouped primary metric was:
+
+```text
+entries=100000 grouped_threads=32 primary_ms=592370.680426
+main_index_init_ms=0.055546 main_index_ms=122.378388
+```
+
+This identifies serial per-vnode RocksDB column-family creation as the cold
+INSERT bottleneck. The accepted fix keeps the existing synchronized handle
+cache and write path, but calls RocksDB's native
+`createColumnFamilies(List<ColumnFamilyDescriptor>)` once for all vnode IDs
+present in the grouped request before submitting the write futures. The
+database is opened before constructing BloomFilter descriptors so the JNI
+library is initialized on the deployed runtime.
+
+The isolated A/B results are:
+
+| Run | Rows | SQL wall | grouped primary | Correctness |
+| --- | ---: | ---: | ---: | --- |
+| baseline generated cold INSERT | 1,000,000 | 555 s | about 548 s | exact 1M check |
+| batch-CF generated cold INSERT, table `1220`/index `1209` | 100,000 | 44 s | 39.026 s | 100,000; IDs 1--100,000; distinct 100,000 |
+| batch-CF table-to-table cold INSERT, table `1320`/index `1309` | 100,000 | 10 s | 6.016 s | 100,000; IDs 1--100,000; distinct 100,000 |
+| batch-CF generated cold INSERT, table `1321`/index `1310` | 1,000,000 | 23 s | 7.922 s | exact 1M; IDs 1--1,000,000; distinct 1M |
+
+The million-row result is approximately 43.5K rows/s at SQL wall and the
+grouped primary stage is approximately 126K rows/s. This is about a 24x
+end-to-end improvement over the earlier 555-second cold result, but the
+end-to-end target of several hundred thousand rows/s is not yet met. The
+remaining gap is no longer vnode/index initialization; follow-up profiling
+should focus on Pixels page-sink/file generation, publish batching, and the
+Trino-side write pipeline. The experiment was correctness-checked before
+acceptance and remains isolated until the connector/runtime deployment plan is
+reviewed.
+
+The optimized million-row table also accepted a 100,000-row exact-key
+`UPDATE` without a lease or commit error. Its tag readback remained unchanged
+before compaction, which is expected for the versioned update path. A follow-up
+CLI COMPACT probe was not accepted as a visibility result because the synthetic
+table's ordered-path metadata was absent after the isolated recovery reset;
+existing UPDATE/tag correctness claims therefore remain based on the previously
+validated tables and compact flow.

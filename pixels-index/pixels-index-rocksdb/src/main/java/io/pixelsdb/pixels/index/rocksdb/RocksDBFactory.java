@@ -259,6 +259,59 @@ public class RocksDBFactory
         return handle;
     }
 
+    /**
+     * Create the missing vnode column families in one RocksDB call.
+     *
+     * <p>RocksDB stores all multi-CF primary indexes in one database. Creating
+     * the families one by one makes the first grouped write pay the full CF
+     * creation cost serially for every vnode. The batch API keeps the existing
+     * handles and locking semantics while allowing RocksDB to perform the
+     * metadata operation as one native call.</p>
+     */
+    public static synchronized void preCreateColumnFamilies(long tableId, long indexId,
+                                                             Collection<Integer> vNodeIds)
+            throws RocksDBException, SinglePointIndexException
+    {
+        if (!multiCF || vNodeIds == null || vNodeIds.isEmpty())
+        {
+            return;
+        }
+
+        // Open the database before constructing RocksDB-native descriptors so
+        // the JNI library is loaded on runtimes where BloomFilter constructors
+        // resolve native symbols eagerly.
+        RocksDB db = getOpenRocksDB();
+        List<ColumnFamilyDescriptor> descriptors = new ArrayList<>();
+        for (Integer vNodeId : new TreeSet<>(vNodeIds))
+        {
+            String cfName = IndexUtils.getCFName(tableId, indexId, vNodeId, true);
+            if (cfHandles.containsKey(cfName))
+            {
+                continue;
+            }
+            Integer keyLen = null;
+            try
+            {
+                keyLen = getIndexKeyLen(tableId, indexId);
+            }
+            catch (MetadataException ignored)
+            {
+            }
+            descriptors.add(createCFDescriptor(cfName.getBytes(StandardCharsets.UTF_8), keyLen));
+        }
+        if (descriptors.isEmpty())
+        {
+            return;
+        }
+
+        List<ColumnFamilyHandle> handles = db.createColumnFamilies(descriptors);
+        for (int i = 0; i < descriptors.size(); i++)
+        {
+            String cfName = new String(descriptors.get(i).getName(), StandardCharsets.UTF_8);
+            cfHandles.putIfAbsent(cfName, handles.get(i));
+        }
+    }
+
     protected static synchronized Map<String, ColumnFamilyHandle> getAllCfHandles()
     {
         return cfHandles;
