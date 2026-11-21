@@ -1451,3 +1451,43 @@ rows/s range on this wide fixture, while UPDATE reaches about 608K rows/s.
 The result is materially below the desired million-row INSERT target but
 above the minimum tens-of-thousands floor; it does not yet establish a
 million-row INSERT acceptance result.
+
+## Connector dispatch and sink batch probes on the fixed 68-column target (2026-11-23)
+
+Two INSERT-side experiments were run against the same hot target,
+`bench68_v2.page_dispatch_target_1m_20261123`, using contiguous 1M-row
+appends and exact count/min/max/distinct checks after every arm. The target
+reached 7,000,000 rows with IDs 1--7,000,000 and no duplicates.
+
+An opt-in connector candidate hoisted the type switch in
+`PixelsPageSink.appendColumnValues` outside the row loop. It compiled and
+preserved the RLE path, but the alternating evidence did not show a stable
+benefit. The candidate arms were 7.271 s and 8.709 s; original-connector
+controls were 10.717 s, 8.852 s, and 13.074 s. The component metrics explain
+the noise: candidate and original `append_ms` were both about 1.37 s, while
+source scheduling/read and primary-index RPC wall time varied materially
+between process restarts. The candidate was reverted and is **rejected**;
+there is no connector commit for it.
+
+A configuration-only sink probe increased `row.batch.size` from 10,000 to
+100,000. It reduced `flush_count` from 100 to 10, but the 1M append took
+13.555 s (about 73.8K rows/s), with `write_ms=941.937` and
+`index_ms=1360.375`, versus the restored 10K configuration. It was reverted
+and is **rejected**. The default 10K batch remains active.
+
+The same target also ran a supported exact-key two-column tag UPDATE over the
+first 1M rows. SQL wall time was 5.989 s (about 167K rows/s); the connector
+route reported `rows=1000000`, `encoding_ms=68.867`,
+`request_build_ms=271.999`, one shared RPC, `rpc_ms=1563.307`, and
+`total_ms=1913.820` (about 522K rows/s inside the route). The daemon reported
+one 10MB shared request with `decode_ms=248.345`, `storage_ms=536.007`, and
+`service_ms=1237.085`. Physical tag columns remained unchanged before
+COMPACT, as required by the versioned tag-index design; prior tag-aware
+COMPACT arms verify materialization and predicate visibility.
+
+These probes narrow the next optimization target: connector cell dispatch and
+larger sink batches are not currently the limiting factor. The remaining
+INSERT gap is dominated by source/task execution plus the grouped primary
+index/write path, while UPDATE is already in the lower hundreds-of-thousands
+range on the exact shared-key route. Any subsequent change must retain the
+tag-index-before-COMPACT semantics.
