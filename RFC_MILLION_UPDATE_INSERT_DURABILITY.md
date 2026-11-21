@@ -1033,3 +1033,66 @@ restored connector. The next valid experiment should reuse one clean target
 or reset only the isolated Retina metadata state, then sweep client writers
 against the daemon grouped thread count while recording both query timeline
 and `[PIXELS_PRIMARY_INDEX_GROUPED_METRIC]`.
+
+## Clean fixed-source rerun and recovery failure (2026-11-22)
+
+The previous fixed tables were not reusable after a Retina restart. Recovery
+correctly removed their stale visibility entries because the catalog files
+were `TEMPORARY_INGEST`; the remaining physical files were zero bytes. A new
+source and target were therefore created in the isolated runtime. The source
+contains the same 68-column shape, one million rows, and `id=1..1,000,000`.
+
+The first clean target intentionally had no primary index. Its table-to-table
+INSERT took 7.390 s in the Trino timeline, about 135K rows/s for the SQL
+operation (the surrounding CLI wall included client startup). A second clean
+target was created with the real `pk=id`, `pk_scheme=rocksdb` required by the
+UPDATE route. Its results separate the cold and warm primary-index costs:
+
+```text
+pk target, first 1M INSERT:
+  SQL wall = 141.886 s; about 7.0K rows/s
+  file write = 1.677 s
+  insert-index metric: primary_put_wall_ms=134032
+  daemon grouped-primary metric: primary_ms=130938; main_index_ms=756
+
+same pk target, second 1M INSERT (ids 1,000,001..2,000,000):
+  SQL wall = 13.134 s; about 76.1K rows/s
+  file write = 2.281 s
+  insert-index metric: primary_put_wall_ms=4666
+  daemon grouped-primary metric: primary_ms=2371; main_index_ms=572
+
+same target, warm exact UPDATE of tag_2 on 1M rows:
+  SQL wall = 1.321 s; about 757K rows/s
+  one shared UPDATE RPC; connector metric total = 1.173 s
+```
+
+The cold INSERT is therefore dominated by first-time RocksDB primary-index
+column-family/bucket initialization, not by the 68-column PageSink encoding.
+After warm-up, INSERT is still below the several-hundred-thousand target,
+while warm exact UPDATE is above it. The accepted next optimization target is
+the cold-index initialization and the warm table-to-table read/encode path;
+the rejected `LazyBlock` fast path remains rejected.
+
+A 100,000-row single-root-path semantic probe completed the supported tag
+chain before restart:
+
+```text
+UPDATE 100,000 rows -> tag-aware COMPACT -c 8
+tag resolve = 100,000 rows, 7 RPCs
+physical rewrite = 100,000 rows
+primary relocation = 100,000 rows, 128 RPCs
+post-COMPACT count = 100,000
+post-COMPACT tag count = 100,000, tag_1_para = 3.1400
+```
+
+The subsequent isolated Retina restart exposed a separate durability blocker.
+The recovery pointer still referenced
+`recovery_cds20_0.bin`, but the body had been deleted, so fail-closed recovery
+aborted rather than treating the deployment as fresh. An existing isolated
+backup body was restored only to bring the validation daemon back; after that
+stale checkpoint was applied, the new compact file was classified as
+`RETIRED` and the probe read zero rows. Therefore the pre-restart compact
+result is valid semantic evidence, but no post-restart persistence claim is
+accepted for this rerun. The finding is recorded as: recovery checkpoint
+pointer/body retention must be fixed and a current checkpoint must be
+published before restart persistence can be re-accepted.
