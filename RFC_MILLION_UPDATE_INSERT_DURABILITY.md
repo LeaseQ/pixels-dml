@@ -1491,3 +1491,27 @@ INSERT gap is dominated by source/task execution plus the grouped primary
 index/write path, while UPDATE is already in the lower hundreds-of-thousands
 range on the exact shared-key route. Any subsequent change must retain the
 tag-index-before-COMPACT semantics.
+
+## Trino writer-count probe on the same hot target (2026-11-23)
+
+The fixed target was extended from 7M to 11M rows using the same 68-column
+source shape and exact primary-key checks after every append. Trino 466 does
+not expose `task_writer_count`; the supported session controls are
+`task_min_writer_count` and `task_scale_writers_enabled`. With
+`task_min_writer_count=4` and scaling disabled, each INSERT produced four
+Pixels files and one grouped primary-index RPC per file.
+
+Three consecutive 1M-row four-writer appends took 8.052 s, 7.104 s, and
+6.555 s, or approximately 124.2K, 140.8K, and 152.6K rows/s. The target
+checks after these arms were exact. An eight-writer arm between them took
+7.534 s, about 132.7K rows/s, so eight writers did not improve over four.
+The four-writer arms had per-file index append work of roughly 0.2--0.9 s;
+the grouped primary RPCs remained the larger per-file component and overlapped
+across writers.
+
+This is the first repeatable INSERT improvement on the current fixed wide
+fixture: it raises the observed warm rate from the roughly 90--113K rows/s
+single-writer controls into the 124--153K rows/s range. It is still below the
+desired lower-hundreds-of-thousands-to-million target, and it remains an
+opt-in session configuration pending a clean cold-start and persistence arm.
+The main Trino runtime was not changed.
