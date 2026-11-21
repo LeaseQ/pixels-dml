@@ -134,10 +134,13 @@ import java.security.NoSuchAlgorithmException;
         {
             throw new IllegalStateException("Failed to compute SHA-256 bucket hash", e);
         }
-        int hash = ((digestBuffer[0] & 0xff) << 24) |
-                ((digestBuffer[1] & 0xff) << 16) |
-                ((digestBuffer[2] & 0xff) << 8) |
-                (digestBuffer[3] & 0xff);
+        // Guava HashCode.asInt() uses the first four bytes in little-endian
+        // order; preserve that mapping so existing bucket assignments do not
+        // change while avoiding the temporary HashCode object.
+        int hash = ((digestBuffer[3] & 0xff) << 24) |
+                ((digestBuffer[2] & 0xff) << 16) |
+                ((digestBuffer[1] & 0xff) << 8) |
+                (digestBuffer[0] & 0xff);
 
         int absHash = Math.abs(hash);
 
