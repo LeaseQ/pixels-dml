@@ -696,3 +696,26 @@ This is not faster than the default-WAL 1M runs (`primary_put_wall_ms` about
 without an observed throughput benefit. The isolated runtime configuration was
 restored to `index.rocksdb.disable.wal=false`; the switch remains only as a
 documented benchmark knob for future controlled experiments.
+
+### Rejected larger Trino sink batch probe (2026-11-21)
+
+To test whether PageSink conversion and writer flush overhead explained the
+remaining INSERT wall time, the isolated Trino runtime was restarted with
+`row.batch.size=50000` instead of the validated 10,000-row default. A fresh
+1M-row generated 68-column INSERT remained correct and produced:
+
+```text
+query elapsed = 24.90 s
+flush_count = 20
+write_ms = 2253.335
+index_ms = 1324.295
+primary_put_wall_ms = 12380.156
+```
+
+The comparable 10,000-row run had 100 flushes, about 20.76 s query elapsed,
+`write_ms=1935.363`, `index_ms=1032.381`, and
+`primary_put_wall_ms=10338.425`. Reducing flush count therefore did not reduce
+the dominant cost and slightly worsened this run; the default batch size was
+restored. The next INSERT work should remain focused on the Trino TableWriter /
+Exchange backpressure and the grouped RocksDB write path, with per-stage
+profiling rather than a larger PageSink batch as the next experiment.
