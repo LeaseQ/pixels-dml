@@ -518,6 +518,27 @@ successfully committed.  The final check returned exactly 1,000,000 rows with
 IDs `500000001`--`501000000`, all distinct.  This closes the transaction-status
 gap for cold INSERT; it does not reduce the vnode initialization cost itself.
 
+### Rejected RocksDB batch-CF cold-path experiment (2026-11-21)
+
+To test whether the remaining cold cost was one RocksDB metadata RPC per hash
+bucket, the isolated daemon was temporarily changed to call
+`RocksDB.createColumnFamilies()` for all missing 128 bucket column families on
+the first vnode.  A fresh 68-column table (`table_id=720`, `index_id=709`) was
+loaded with 1,000,000 generated rows using eight Trino writers.  The run
+committed successfully (`commit_ms=5.143`) and the final check was exact:
+`1,000,000` rows, IDs `700000001`--`701000000`, all distinct, and all
+`tag_1_type='AAA'`.
+
+The performance result is rejected.  The first vnode incurred approximately
+52 seconds for the batch CF operation, and the remaining vnode instances still
+appeared serially at roughly 3.5--3.7 seconds each.  The end-to-end wall was
+514.601 seconds, so the change did not remove the dominant
+`SinglePointIndexFactory`/per-vnode initialization cost.  The temporary batch
+CF code and configuration were reverted after the run.  This experiment also
+separates two hypotheses: RocksDB CF creation may contribute to the first-vnode
+spike, but the sustained 128-vnode serial initialization is elsewhere and must
+be profiled before another implementation change.
+
 ## Acceptance criteria and remaining work
 
 - [x] INSERT files publish as `REGULAR` with a valid row-id hull.
@@ -540,6 +561,9 @@ gap for cold INSERT; it does not reduce the vnode initialization cost itself.
 - [x] Keep the Trino transaction lease alive through cold vnode initialization;
   a fresh 409-second indexed INSERT now commits successfully instead of
   returning `TRANS_LEASE_EXPIRED` 10213.
+- [x] Test and reject one-shot RocksDB CF creation as the primary cold-path fix;
+  it preserved exact correctness but measured 514.601 seconds and left the
+  per-vnode serial initialization pattern intact.
 - [ ] Run the same shared-key uniqueness-proof route through a populated Trino
   SQL table and accept its table-level UPDATE throughput only after data
   visibility, correctness, and restart checks pass.
