@@ -896,3 +896,33 @@ comparison of source-read time, PageSink write time, and task-finishing time.
 Only after that comparison should a packed primary-index RPC be considered;
 the current JFR evidence suggests protobuf allocation is a secondary warm-path
 cost, not the cause of the original plateau.
+
+### Trino writer-count sweep (2026-11-22)
+
+Using the same isolated table and the same 1M-row self-source shape, the
+writer count was changed only through per-query session properties
+(`task_min_writer_count`, `task_max_writer_count`, and
+`task_scale_writers_enabled=false`). Trino's query timeline, rather than the
+CLI startup-inclusive wall clock, is the comparable measurement:
+
+```text
+writers  elapsed   rate      fragments  publish
+4         13.208 s  75.7K/s  1           43.7 ms
+8          9.789 s 102.2K/s  8          119.7 ms
+16         9.290 s 107.6K/s 16          182.3 ms
+32         8.774 s 114.0K/s 32          300.9 ms
+64         8.842 s 113.1K/s 64          468.8 ms
+```
+
+The 32-writer run is the best point in this sweep: it clears the 100K-row/s
+end-to-end target on the isolated 68-column workload without the extra
+fragment/publish cost of 64 writers. The 64-writer result is a useful negative
+control: more writer concurrency does not improve the stable primary-index
+service, and its metadata cost continues to rise. After the sweep,
+`count/min/max/distinct(id)=10000000/1/10000000/10000000`.
+
+This is a per-query validation result, not yet a global default change. Before
+making writer=32 a deployment default, repeat it on the normal target/source
+pair and check read-side effects from the higher fragment count. The current
+accepted UPDATE baseline remains 157--166K rows/s; the INSERT route now has a
+repeatable isolated warm result of about 114K rows/s at the selected point.
