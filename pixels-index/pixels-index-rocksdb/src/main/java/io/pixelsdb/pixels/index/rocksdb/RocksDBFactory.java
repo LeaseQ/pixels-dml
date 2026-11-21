@@ -26,13 +26,13 @@ import org.rocksdb.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * @package: io.pixelsdb.pixels.index.rocksdb
@@ -45,17 +45,34 @@ public class RocksDBFactory
     private static final Logger logger = LoggerFactory.getLogger(RocksDBFactory.class);
     private static final String dbPath = ConfigFactory.Instance().getProperty("index.rocksdb.data.path");
     private static final boolean multiCF = Boolean.parseBoolean(ConfigFactory.Instance().getProperty("index.rocksdb.multicf"));
-    private static RocksDB instance;
+    private static final boolean tableScoped = Boolean.parseBoolean(
+            Optional.ofNullable(ConfigFactory.Instance().getProperty("index.rocksdb.table.scoped"))
+                    .orElse("false"));
+    private static final long SHARED_DB_ID = Long.MIN_VALUE;
+
+    private static final class DbState
+    {
+        private final long tableId;
+        private final String path;
+        private final Map<String, ColumnFamilyHandle> cfHandles = new ConcurrentHashMap<>();
+        private RocksDB instance;
+        private int reference;
+
+        private DbState(long tableId, String path)
+        {
+            this.tableId = tableId;
+            this.path = path;
+        }
+    }
+
+    private static final Map<Long, DbState> dbStates = new HashMap<>();
+    // Kept for package-private test helpers that call createRocksDB(path) directly.
+    private static final Map<String, ColumnFamilyHandle> legacyCfHandles = new ConcurrentHashMap<>();
 
     private static Cache blockCache;
     private static final long blockCacheCapacity = Long.parseLong(ConfigFactory.Instance().getProperty("index.rocksdb.block.cache.capacity"));
     private static final int blockCacheShardBits = Integer.parseInt(ConfigFactory.Instance().getProperty("index.rocksdb.block.cache.shard.bits"));
 
-    /**
-     * The reference counter.
-     */
-    private static final AtomicInteger reference = new AtomicInteger(0);
-    private static final Map<String, ColumnFamilyHandle> cfHandles = new ConcurrentHashMap<>();
     private static final String defaultColumnFamily = new String(RocksDB.DEFAULT_COLUMN_FAMILY, StandardCharsets.UTF_8);
     private static final Map<Long, Integer> indexKeyLenCache = new ConcurrentHashMap<>();
     private static final Integer VARIABLE_LEN_SENTINEL = -2;
@@ -69,6 +86,13 @@ public class RocksDBFactory
     private RocksDBFactory() { }
 
     static RocksDB createRocksDB(String rocksDBPath) throws RocksDBException,SinglePointIndexException
+    {
+        return createRocksDB(rocksDBPath, legacyCfHandles);
+    }
+
+    private static RocksDB createRocksDB(String rocksDBPath,
+                                         Map<String, ColumnFamilyHandle> targetCfHandles)
+            throws RocksDBException,SinglePointIndexException
     {
         long openStartNanos = System.nanoTime();
         // 1. Get existing column families (returns empty list for new database)
@@ -181,7 +205,7 @@ public class RocksDBFactory
         for (int i = 0; i < descriptors.size(); i++)
         {
             String cfName = new String(descriptors.get(i).getName(), StandardCharsets.UTF_8);
-            cfHandles.putIfAbsent(cfName, handles.get(i));
+            targetCfHandles.putIfAbsent(cfName, handles.get(i));
         }
 
         return db;
@@ -247,17 +271,18 @@ public class RocksDBFactory
      */
     public static synchronized ColumnFamilyHandle getOrCreateColumnFamily(long tableId, long indexId, int vNodeId) throws RocksDBException,SinglePointIndexException
     {
+        DbState state = stateFor(tableId);
         String cfName = IndexUtils.getCFName(tableId, indexId, vNodeId, multiCF);
 
         // Return cached handle if exists
-        if (cfHandles.containsKey(cfName))
+        if (state.cfHandles.containsKey(cfName))
         {
             // Every index wrapper owns one factory reference.  The existing
             // handle fast path used to return without acquiring that
             // reference, so closing a short-lived wrapper could close the
             // shared RocksDB while another index was still using it.
-            getRocksDB();
-            return cfHandles.get(cfName);
+            getRocksDB(tableId);
+            return state.cfHandles.get(cfName);
         }
 
         Integer keyLen = null;
@@ -269,17 +294,17 @@ public class RocksDBFactory
 
         }
 
-        RocksDB db = getRocksDB();
+        RocksDB db = getRocksDB(tableId);
         // getRocksDB() may have opened an existing database and populated
-        // cfHandles, so check again before attempting to create the family.
-        ColumnFamilyHandle existingHandle = cfHandles.get(cfName);
+        // the state handles, so check again before attempting to create the family.
+        ColumnFamilyHandle existingHandle = state.cfHandles.get(cfName);
         if (existingHandle != null)
         {
             return existingHandle;
         }
         ColumnFamilyDescriptor newCF = createCFDescriptor(cfName.getBytes(StandardCharsets.UTF_8), keyLen);
         ColumnFamilyHandle handle = db.createColumnFamily(newCF);
-        cfHandles.put(cfName, handle);
+        state.cfHandles.put(cfName, handle);
         return handle;
     }
 
@@ -304,12 +329,13 @@ public class RocksDBFactory
         // Open the database before constructing RocksDB-native descriptors so
         // the JNI library is loaded on runtimes where BloomFilter constructors
         // resolve native symbols eagerly.
-        RocksDB db = getOpenRocksDB();
+        DbState state = stateFor(tableId);
+        RocksDB db = getOpenRocksDB(tableId);
         List<ColumnFamilyDescriptor> descriptors = new ArrayList<>();
         for (Integer vNodeId : new TreeSet<>(vNodeIds))
         {
             String cfName = IndexUtils.getCFName(tableId, indexId, vNodeId, true);
-            if (cfHandles.containsKey(cfName))
+            if (state.cfHandles.containsKey(cfName))
             {
                 continue;
             }
@@ -332,23 +358,31 @@ public class RocksDBFactory
         for (int i = 0; i < descriptors.size(); i++)
         {
             String cfName = new String(descriptors.get(i).getName(), StandardCharsets.UTF_8);
-            cfHandles.putIfAbsent(cfName, handles.get(i));
+            state.cfHandles.putIfAbsent(cfName, handles.get(i));
         }
     }
 
     protected static synchronized Map<String, ColumnFamilyHandle> getAllCfHandles()
     {
-        return cfHandles;
+        return legacyCfHandles;
     }
 
     public static synchronized RocksDB getRocksDB() throws RocksDBException,SinglePointIndexException
     {
-        if (instance == null || instance.isClosed())
+        return getRocksDB(0L);
+    }
+
+    public static synchronized RocksDB getRocksDB(long tableId)
+            throws RocksDBException, SinglePointIndexException
+    {
+        DbState state = stateFor(tableId);
+        if (state.instance == null || state.instance.isClosed())
         {
-            instance = createRocksDB(dbPath);
+            state.instance = createRocksDB(state.path, state.cfHandles);
+            state.reference = 0;
         }
-        reference.incrementAndGet();
-        return instance;
+        state.reference++;
+        return state.instance;
     }
 
     /**
@@ -357,35 +391,86 @@ public class RocksDBFactory
      */
     static synchronized RocksDB getOpenRocksDB() throws RocksDBException, SinglePointIndexException
     {
-        if (instance == null || instance.isClosed())
+        return getOpenRocksDB(0L);
+    }
+
+    static synchronized RocksDB getOpenRocksDB(long tableId)
+            throws RocksDBException, SinglePointIndexException
+    {
+        DbState state = stateFor(tableId);
+        if (state.instance == null || state.instance.isClosed())
         {
-            instance = createRocksDB(dbPath);
+            state.instance = createRocksDB(state.path, state.cfHandles);
+            state.reference = 0;
         }
-        return instance;
+        return state.instance;
     }
 
     public static synchronized void close()
     {
-        if (instance != null && reference.decrementAndGet() == 0)
+        close(0L);
+    }
+
+    public static synchronized void close(long tableId)
+    {
+        DbState state = dbStates.get(stateKey(tableId));
+        if (state == null || state.instance == null || state.instance.isClosed())
         {
-            for (ColumnFamilyHandle handle : cfHandles.values())
+            return;
+        }
+        if (state.reference > 0)
+        {
+            state.reference--;
+        }
+        if (state.reference == 0)
+        {
+            for (ColumnFamilyHandle handle : state.cfHandles.values())
             {
                 handle.close();
             }
-            cfHandles.clear();
-            instance.close();
-            instance = null;
+            state.cfHandles.clear();
+            state.instance.close();
+            state.instance = null;
         }
     }
 
     static synchronized void clearCFHandles()
     {
-        cfHandles.clear();
+        legacyCfHandles.clear();
+        for (DbState state : dbStates.values())
+        {
+            state.cfHandles.clear();
+        }
     }
 
     public static synchronized String getDbPath()
     {
         return dbPath;
+    }
+
+    public static synchronized String getDbPath(long tableId)
+    {
+        return statePath(tableId);
+    }
+
+    private static long stateKey(long tableId)
+    {
+        return tableScoped ? tableId : SHARED_DB_ID;
+    }
+
+    private static String statePath(long tableId)
+    {
+        if (!tableScoped)
+        {
+            return dbPath;
+        }
+        return new File(dbPath, "table-" + tableId).getPath();
+    }
+
+    private static DbState stateFor(long tableId)
+    {
+        long stateKey = stateKey(tableId);
+        return dbStates.computeIfAbsent(stateKey, ignored -> new DbState(stateKey, statePath(tableId)));
     }
 
     private static Integer getIndexKeyLen(long tableId, long indexId) throws MetadataException

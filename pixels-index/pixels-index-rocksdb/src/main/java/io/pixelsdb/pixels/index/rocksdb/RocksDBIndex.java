@@ -73,8 +73,8 @@ public class RocksDBIndex extends CachingSinglePointIndex
         this.tableId = tableId;
         this.indexId = indexId;
         // initialize RocksDB instance
-        this.rocksDBPath = RocksDBFactory.getDbPath();
-        this.rocksDB = RocksDBFactory.getRocksDB();
+        this.rocksDBPath = RocksDBFactory.getDbPath(tableId);
+        this.rocksDB = RocksDBFactory.getRocksDB(tableId);
         this.unique = unique;
         this.writeOptions = new WriteOptions().setDisableWAL(disableWAL);
         this.columnFamilyHandle = RocksDBFactory.getOrCreateColumnFamily(tableId, indexId, indexOption.getVNodeId());
@@ -554,7 +554,7 @@ public class RocksDBIndex extends CachingSinglePointIndex
         if (closed.compareAndSet(false, true))
         {
             // Issue #1158: do not directly close the rocksDB instance as it is shared by other indexes
-            RocksDBFactory.close();
+            RocksDBFactory.close(tableId);
             writeOptions.close();
         }
     }
@@ -567,7 +567,7 @@ public class RocksDBIndex extends CachingSinglePointIndex
             try
             {
                 // Issue #1158: do not directly close the rocksDB instance as it is shared by other indexes
-                RocksDBFactory.close();
+                RocksDBFactory.close(tableId);
                 writeOptions.close();
                 FileUtils.deleteDirectory(new File(rocksDBPath));
             }

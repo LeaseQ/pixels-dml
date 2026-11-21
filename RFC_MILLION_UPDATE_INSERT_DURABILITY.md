@@ -1329,3 +1329,75 @@ historical vnode CF at once; thread-count and write-buffer tuning cannot remove
 this native open cost.  The override jar was removed after the probe and the
 runtime was restored to the original full jar, so the metric change is
 observability only and is not part of the running benchmark configuration.
+
+## Opt-in table-scoped RocksDB state probe (2026-11-23)
+
+The next small optimization isolates RocksDB column families by table. The
+historical implementation opens one shared database for every primary and tag
+index. This makes the first write to a new table pay the native open cost for
+all historical column families and couples unrelated tables' memory and
+lifecycle. The change adds:
+
+```properties
+index.rocksdb.table.scoped=false
+```
+
+The default is deliberately `false`, preserving shared-database behavior. With
+the opt-in enabled, each table uses
+`<index.rocksdb.data.path>/table-<tableId>`, and primary/tag index handles are
+owned by that table's RocksDB state. `RocksDBIndex` and `PixelsTagIndex` pass
+the table ID through all open/close paths. The module compiled successfully on
+cds20 with the remote JDK 23 Maven build.
+
+The fixed probe used a 68-column source with 10,000 generated rows and two
+independent primary-key targets. Both passed:
+
+```text
+target C INSERT: count/min/max/distinct = 10000/1/10000/10000
+target D INSERT: count/min/max/distinct = 10000/1/10000/10000
+RocksDB directories: table-1975, table-1976
+CF counts before tag UPDATE: table-1975=129, table-1976=129
+```
+
+The tag target then ran the supported two-column update and compaction path:
+
+```sql
+UPDATE pixels.bench68_v2.e2e_scoped_tagfix_20261123
+SET tag_1_type='CCC', tag_1_para=DECIMAL '3.1400'
+WHERE id BETWEEN 1 AND 10000;
+```
+
+The daemon recorded 10,000 primary keys and two tag updates. As expected for
+the versioned UPDATE protocol, the pre-compaction read still showed the old
+materialized tag values. Tag-aware compaction completed in 0.956 s of physical
+rewrite time and published one compact file. Post-compaction checks passed:
+
+```text
+rows=10000
+count(tag_1_type='CCC')=10000
+count(tag_1_para=3.1400)=10000
+count(both predicates)=10000
+min(id)=1, max(id)=10000, distinct(id)=10000
+tag predicate result=10000
+```
+
+The final layout had `table-1977=130` CFs (the extra CF is the tag index),
+while the independent primary-only table remained `table-1976=129`. This is
+direct evidence that tag-index writes and compaction remain in the per-table
+namespace and do not merge with another table.
+
+Two non-result failures were captured. The first deployment omitted the
+`RocksDBFactory$DbState` inner class from the override jar and failed at class
+loading; rebuilding the jar with the outer and inner classes fixed it. A
+separate target used two already-materialized `v-0-*` paths and caused the
+compactor to construct a nested path; it was discarded and the clean single
+root-layout arm above was used. Neither failure is included in throughput
+numbers.
+
+This probe validates correctness and namespace isolation, but is not a
+million-row acceptance result. It also does not claim restart persistence: the
+isolated runtime currently uses a stale recovery checkpoint backup for safe
+experiments, so a restart would intentionally retire newly-created files. A
+valid persistence arm requires first producing a checkpoint that contains the
+new table files. The optimization remains opt-in until that checkpoint-backed
+restart test and a fair 1M-row A/B throughput comparison are completed.

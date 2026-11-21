@@ -205,6 +205,7 @@ public final class PixelsTagIndex implements Closeable
     private final ColumnFamilyHandle columnFamilyHandle;
     private final WriteOptions writeOptions;
     private final boolean ownsFactoryReference;
+    private final long tableId;
     /**
      * Values already read or written by this long-lived index instance.  The
      * IndexServer keeps one instance per table/index, so repeated UPDATE
@@ -219,6 +220,7 @@ public final class PixelsTagIndex implements Closeable
      */
     PixelsTagIndex(RocksDB rocksDB)
     {
+        this.tableId = 0L;
         this.rocksDB = requireNonNull(rocksDB, "rocksDB is null");
         this.columnFamilyHandle = null;
         this.writeOptions = new WriteOptions();
@@ -231,8 +233,9 @@ public final class PixelsTagIndex implements Closeable
     public PixelsTagIndex(long tableId, long indexId, int vNodeId)
             throws RocksDBException, SinglePointIndexException
     {
+        this.tableId = tableId;
         this.columnFamilyHandle = RocksDBFactory.getOrCreateColumnFamily(tableId, indexId, TAG_VNODE_ID);
-        this.rocksDB = RocksDBFactory.getOpenRocksDB();
+        this.rocksDB = RocksDBFactory.getOpenRocksDB(tableId);
         this.writeOptions = new WriteOptions();
         this.ownsFactoryReference = true;
     }
@@ -821,7 +824,7 @@ public final class PixelsTagIndex implements Closeable
         writeOptions.close();
         if (ownsFactoryReference)
         {
-            RocksDBFactory.close();
+            RocksDBFactory.close(tableId);
         }
     }
 }
