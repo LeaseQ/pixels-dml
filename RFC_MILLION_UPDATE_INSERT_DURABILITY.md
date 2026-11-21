@@ -849,3 +849,50 @@ that the full 68-column INSERT target has been reached. The accepted broad
 baseline remains the real 68-column table-to-table INSERT at roughly
 52--63K rows/s, while the exact shared-key UPDATE route remains roughly
 157--166K rows/s end-to-end SQL wall throughput.
+
+### Stable warm path profiling and the cold reopen split (2026-11-22)
+
+The same isolated 68-column table was profiled with JFR on the Retina/index
+service while running grouped 1M-row INSERTs. This separates a daemon restart
+effect from the steady-state write path:
+
+```text
+after daemon restart:
+  primary_ms=59632.567, main_index_ms=746.302, total_ms=60378.990
+  JFR included RocksDB.open/createRocksDB/getOpenRocksDB
+
+stable warm run 1:
+  SQL wall=10.296 s, primary_ms=2172.276,
+  main_index_ms=507.538, daemon total_ms=2679.884
+
+stable warm run 2:
+  SQL wall=13.208 s, primary_ms=2162.692,
+  main_index_ms=447.017, daemon total_ms=2609.742
+```
+
+The stable JFR contained 133 execution samples and no `RocksDB.open` samples.
+Its dominant sampled frames were protobuf/gRPC decode and request handling
+(`PrimaryIndexEntry.parsePartialFrom`, `putPrimaryIndexEntries`, and
+`putGroupedPrimaryEntries`), followed by MainIndex buffer/SQLite flush. This
+means the 60-second post-restart event is a one-time service-level reopen of
+the existing multi-column-family RocksDB, not a per-row INSERT cost. A future
+startup-prewarm option is therefore a correctness-preserving latency fix, but
+it should not be counted as a steady-state throughput improvement.
+
+The Trino-side metrics explain the remaining end-to-end variance. In the two
+warm runs, PageSink data writes were 1.661 s and 2.205 s, index-writer metrics
+were approximately 4.083 s and 4.122 s including RPC/wall aggregation, and
+publish/commit stayed below 50 ms. Query elapsed time was 10.296 s and
+13.208 s, so the difference was outside the daemon's stable primary path,
+mainly source-scan/task-finishing scheduling. The two observed end-to-end
+rates were about 97.1K and 75.7K rows/s. Correctness after the second run was
+`count/min/max/distinct(id)=6000000/1/6000000/6000000`.
+
+This changes the optimization priority: do not spend another iteration on
+primary bucket hashing or MainIndex before measuring the source scan and task
+finishing path. The next high-value experiment is a controlled INSERT with
+the same 68-column shape but a materialized/local source, then an explicit
+comparison of source-read time, PageSink write time, and task-finishing time.
+Only after that comparison should a packed primary-index RPC be considered;
+the current JFR evidence suggests protobuf allocation is a secondary warm-path
+cost, not the cause of the original plateau.
