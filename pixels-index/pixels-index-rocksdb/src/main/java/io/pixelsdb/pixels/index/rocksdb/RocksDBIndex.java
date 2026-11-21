@@ -60,6 +60,12 @@ public class RocksDBIndex extends CachingSinglePointIndex
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private final AtomicBoolean removed = new AtomicBoolean(false);
     private static final boolean multiCF = Boolean.parseBoolean(ConfigFactory.Instance().getProperty("index.rocksdb.multicf"));
+    /**
+     * Opt-in benchmark knob only.  WAL must remain enabled by default because
+     * INSERT index writes are part of the crash-recovery contract.
+     */
+    private static final boolean disableWAL = Boolean.parseBoolean(
+            ConfigFactory.Instance().getProperty("index.rocksdb.disable.wal"));
 
     public RocksDBIndex(long tableId, long indexId, boolean unique, IndexOption indexOption) throws RocksDBException,SinglePointIndexException
     {
@@ -70,7 +76,7 @@ public class RocksDBIndex extends CachingSinglePointIndex
         this.rocksDBPath = RocksDBFactory.getDbPath();
         this.rocksDB = RocksDBFactory.getRocksDB();
         this.unique = unique;
-        this.writeOptions = new WriteOptions();
+        this.writeOptions = new WriteOptions().setDisableWAL(disableWAL);
         this.columnFamilyHandle = RocksDBFactory.getOrCreateColumnFamily(tableId, indexId, indexOption.getVNodeId());
     }
 

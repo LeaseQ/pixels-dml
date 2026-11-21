@@ -656,3 +656,43 @@ CLI COMPACT probe was not accepted as a visibility result because the synthetic
 table's ordered-path metadata was absent after the isolated recovery reset;
 existing UPDATE/tag correctness claims therefore remain based on the previously
 validated tables and compact flow.
+
+### Rejected grouped-writer concurrency and WAL probes (2026-11-21)
+
+The accepted batch-CF run used a 32-thread daemon pool. Two isolated fresh
+table probes tested whether changing that pool size or disabling RocksDB WAL
+could close the remaining INSERT gap. The tests used the same generated 68-
+column 1M-row SQL shape and verified the exact row count and distinct primary
+keys where the query completed.
+
+The concurrency result was not monotonic:
+
+| Daemon grouped writer threads | Grouped primary | SQL wall | Decision |
+| ---: | ---: | ---: | --- |
+| 32, warm baseline | 7.922 s | 23 s | current best |
+| 64 | 52.867 s | about 66 s | rejected; severe contention |
+| 16 | 47.545 s | about 66 s | rejected; no improvement |
+
+The first 16/64 measurements after a full daemon restart also included the
+one-time RocksDB reopen cost; a later warm 32-thread run returned to the
+8--10-second primary-index range. This warm-up effect is why the thread-size
+probes are retained as directional evidence rather than a strict steady-state
+benchmark. The important result is that increasing the pool beyond the
+validated 32 threads is harmful on this host, consistent with RocksDB/CF
+contention rather than a lack of Java executor parallelism.
+
+An opt-in `index.rocksdb.disable.wal` switch was added for an isolated probe,
+with the default remaining `false`. After the restart/open cost was excluded,
+the second WAL-off 1M run recorded:
+
+```text
+grouped_threads=32 primary_ms=8900.253
+main_index_ms=539.224 total_ms=9439.585
+primary_put_wall_ms=10650.670
+```
+
+This is not faster than the default-WAL 1M runs (`primary_put_wall_ms` about
+10.3 seconds), so disabling WAL is rejected: it adds crash-recovery risk
+without an observed throughput benefit. The isolated runtime configuration was
+restored to `index.rocksdb.disable.wal=false`; the switch remains only as a
+documented benchmark knob for future controlled experiments.
