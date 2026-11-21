@@ -1275,3 +1275,32 @@ improves cold INSERT by roughly an order of magnitude, but does not by itself
 reach the million-row target.  The next optimization should reduce the
 per-CF/per-vnode memory and publication cost, or reduce the number of CFs held
 open, while preserving tag-aware UPDATE and recovery semantics.
+
+## RocksDB max-write-buffer-count probe (2026-11-22)
+
+The single-table baseline used `index.rocksdb.max.write.buffer.number=3`.
+Because each vnode is a column family, an arm with the same 64 MiB per-CF
+buffer but `max.write.buffer.number=1` was tested in a new RocksDB directory.
+The source again passed the exact 1M-row check and the indexed target passed
+the exact-value check:
+
+```text
+max_write_buffer_number=1:
+  E2E = 11.837 s ~=84.5K rows/s
+  grouped primary_ms=3354.738; main_index_ms=786.811
+  RSS ~=28.5 GiB
+  count/min/max/distinct/value-check = 1000000/1/1000000/1000000/1000000
+
+single-table default max_write_buffer_number=3:
+  E2E = 9.916 s ~=100.8K rows/s
+  RSS ~=31--33 GiB in the corresponding cold run
+```
+
+The count-1 arm reduces memory by roughly 2--3 GiB but is about 19% slower,
+so it is rejected as a throughput optimization.  It may remain useful as a
+resource-constrained diagnostic setting, but is not enabled.  A count-2 arm
+was not assigned a throughput number: the isolated Retina did not reach READY
+within roughly four minutes while replaying the stale checkpoint and spawned
+about 1,800 recovery-related threads.  That arm was aborted as environment
+interference, not interpreted as a RocksDB result.  The runtime was restored
+to the single-table path with the default count 3 and marked READY.
