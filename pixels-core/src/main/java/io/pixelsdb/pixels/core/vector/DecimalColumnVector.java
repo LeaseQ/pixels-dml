@@ -154,6 +154,19 @@ public class DecimalColumnVector extends ColumnVector
     }
 
     @Override
+    public void add(long value)
+    {
+        if (writeIndex >= getLength())
+        {
+            ensureSize(writeIndex * 2, true);
+        }
+        int index = writeIndex++;
+        // The value is already the unscaled decimal value at this column's scale.
+        vector[index] = value;
+        isNull[index] = false;
+    }
+
+    @Override
     public void add(byte[] bytes)
     {
         if (checkBytesNull(bytes))
