@@ -926,3 +926,41 @@ making writer=32 a deployment default, repeat it on the normal target/source
 pair and check read-side effects from the higher fragment count. The current
 accepted UPDATE baseline remains 157--166K rows/s; the INSERT route now has a
 repeatable isolated warm result of about 114K rows/s at the selected point.
+
+### Negative probes and Trino-side JFR (2026-11-22)
+
+Two additional isolated probes were run and deliberately not retained as
+optimizations:
+
+1. A `DictionaryBlock` fast path for one-entry dictionaries compiled cleanly
+   and passed compilation of the new PageSink test, but did not improve the
+   warm 68-column INSERT. After connector restart, the first comparable run
+   was 13.593 s and the next warm run was 10.331 s; the accepted writer=32
+   baseline is 8.774 s. The connector was restored to the previous jar.
+2. Increasing `row.batch.size` from 10,000 to 20,000 reduced flush count per
+   writer but made the query slower: Trino elapsed was 12.844 s versus 8.774 s
+   at 10,000. The 10,000 setting was restored. This workload's wide decimal
+   and string columns do not benefit from the larger row batch.
+
+A 2,300-sample JFR of the stable INSERT on the restored connector makes the
+next priority explicit. The hottest roots were:
+
+```text
+PixelsRecordReaderImpl.readBatch       800 samples in sampled stacks
+PixelsFilePageSource.getNextPage       638
+ScanFilterAndProjectOperator...process 516
+StringColumnReader.readSelected        324
+RunLenIntEncoder.encode/write          301/292
+StringColumnWriter.write/newPixel      220/205
+PixelsPageSink.appendValue              110
+PixelsInsertIndexWriter.appendBatch     30
+```
+
+The counts are JFR stack-sample counts, not exclusive CPU percentages, but the
+ordering is sufficient to reject another primary-index-only iteration. The
+dominant cost is the table-to-table source read plus string/decimal decoding
+and output encoding. The next implementation candidates are therefore a
+reader-to-writer vector path that preserves tag semantics, reducing repeated
+variable-width materialization, and a controlled source-scan benchmark that
+separates read CPU from writer CPU. Any such change must retain the hidden
+timestamp/visibility filtering and the existing tag index publication rules.
