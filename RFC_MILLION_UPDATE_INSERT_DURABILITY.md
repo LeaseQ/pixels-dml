@@ -502,10 +502,21 @@ indexed target: a second 1M batch completed in 6.654 seconds with exact 2M-row
 post-checks, about 150K rows/s SQL wall; grouped primary writes used one RPC per
 file and the daemon primary-put wall was about 2.95 seconds.  This is a useful
 warm-path result, but it is not yet a production acceptance result because the
-cold and warm table-to-table INSERT statements returned commit errors 10213
-after their data/index entries were visible.  The next implementation priority
-is to make publication/transaction status agree with the durable metadata and
-then repeat the same clean chain.
+cold INSERT returned commit error 10213 after its data/index entries were
+visible.  This error is `TRANS_LEASE_EXPIRED`: the transaction lease is fixed
+at 300,000 ms while the cold vnode initialization takes about 385 seconds.
+The warm 6.654-second batch did commit successfully.  The connector previously
+had `extendTransLease()` available but did not call it for active Trino
+transactions; the long-query detector only considered its separate 1,800-second
+offload threshold.
+
+The connector now checks and extends the lease for every active, non-offloaded
+query during the detector's five-second polling cycle.  After deploying this
+change to the isolated Trino, a fresh indexed target (`table_id=621`,
+`index_id=611`) ran the same cold 1M-row INSERT in 409.300 seconds and
+successfully committed.  The final check returned exactly 1,000,000 rows with
+IDs `500000001`--`501000000`, all distinct.  This closes the transaction-status
+gap for cold INSERT; it does not reduce the vnode initialization cost itself.
 
 ## Acceptance criteria and remaining work
 
@@ -526,6 +537,9 @@ then repeat the same clean chain.
 - [x] Build/deploy the shared-primary-key RPC, compare old/new request bytes and
   warm UPDATE wall time, and verify multi-column tag correctness at the direct
   IndexServer boundary.
+- [x] Keep the Trino transaction lease alive through cold vnode initialization;
+  a fresh 409-second indexed INSERT now commits successfully instead of
+  returning `TRANS_LEASE_EXPIRED` 10213.
 - [ ] Run the same shared-key uniqueness-proof route through a populated Trino
   SQL table and accept its table-level UPDATE throughput only after data
   visibility, correctness, and restart checks pass.
