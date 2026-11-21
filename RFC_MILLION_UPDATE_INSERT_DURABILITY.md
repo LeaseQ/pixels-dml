@@ -808,3 +808,44 @@ The pre-compaction read still showed the original visible tag values, which is
 expected for this versioned update path and is not counted as post-compaction
 tag correctness. Existing compacted UPDATE evidence remains the correctness
 baseline for the update route.
+
+### Primary bucket-hash allocation probe (2026-11-21/22)
+
+JFR on the grouped primary-index service showed repeated work in
+`IndexUtils.getBucketIdFromByteBuffer`: the old implementation converted each
+key to a temporary byte array and Guava `HashCode` object for SHA-256 bucket
+selection. Commit `0421124e` replaces those allocations with a thread-local
+key buffer, `MessageDigest`, and digest buffer. Commit `db72b9e1` corrects the
+byte order after verification that Guava `HashCode.asInt()` is little-endian;
+the bucket assignment is therefore unchanged.
+
+The change was deployed only to the isolated runtime. On an indexed 68-column
+table (`profile_bucket_hash_pk_20261122`, table 1822, index 1809), using the
+same 1M-row synthetic shape for each run, the observed grouped metrics were:
+
+```text
+cold first 1M: SQL wall 72.473 s
+  primary_ms=61476.399, main_index_ms=781.534, total_ms=62258.068
+warm next 1M: SQL wall 11.723 s
+  primary_ms=2181.589, main_index_ms=519.156, total_ms=2700.859
+warm next 1M: SQL wall 11.153 s
+  primary_ms=2053.225, main_index_ms=478.767, total_ms=2532.034
+post-run correctness: count/min/max/distinct(id)=3000000/1/3000000/3000000
+```
+
+This is useful evidence that the warm grouped primary path can reach about
+90K rows/s for this synthetic value shape, but it is not a causal A/B
+acceptance result: the old-jar comparison was blocked by an independent
+recovery issue. After a prior recovery, the checkpoint pointer remained in the
+isolated etcd namespace while its body had been removed, so the fail-closed
+Retina startup correctly refused to boot. The stale isolated pointer was
+removed, `retina.recovery.bootstrap.regular=true` was used, and visibility for
+the three catalog-regular files of this probe was rebuilt through the existing
+`addVisibility` RPC. The recovery behavior must be fixed and separately
+validated before using restart recovery as a performance acceptance gate.
+
+The bucket-hash optimization remains a low-risk retained probe, not a claim
+that the full 68-column INSERT target has been reached. The accepted broad
+baseline remains the real 68-column table-to-table INSERT at roughly
+52--63K rows/s, while the exact shared-key UPDATE route remains roughly
+157--166K rows/s end-to-end SQL wall throughput.
