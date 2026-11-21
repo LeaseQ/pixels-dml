@@ -40,6 +40,10 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 
 /**
@@ -49,7 +53,16 @@ import java.util.stream.Collectors;
 public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
 {
     private static final int TAG_INDEX_STREAM_PRIMARY_KEYS_PER_CHUNK = 8192;
+    private static final int GROUPED_PRIMARY_WRITE_THREADS = Math.max(1,
+            Integer.getInteger("pixels.index.grouped.primary.write.threads", 32));
     private static final Logger logger = LogManager.getLogger(IndexServiceImpl.class);
+    private static final ExecutorService groupedPrimaryWriteExecutor = Executors.newFixedThreadPool(
+            GROUPED_PRIMARY_WRITE_THREADS,
+            runnable -> {
+                Thread thread = new Thread(runnable, "Pixels-Grouped-Primary-Write");
+                thread.setDaemon(true);
+                return thread;
+            });
     private final Map<TagIndexKey, PixelsTagIndex> tagIndexes = new HashMap<>();
 
     public IndexServiceImpl() { }
@@ -298,6 +311,37 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             long tableId = request.getTableId();
             long indexId = request.getIndexId();
             IndexOption indexOption = new IndexOption(request.getIndexOption());
+            if (indexOption.getVNodeId() < 0)
+            {
+                long primaryStartNanos = System.nanoTime();
+                putGroupedPrimaryEntries(tableId, indexId, entries);
+                long primaryNanos = System.nanoTime() - primaryStartNanos;
+                long mainIndexInitStartNanos = System.nanoTime();
+                MainIndex mainIndex = MainIndexFactory.Instance().getMainIndex(tableId);
+                long mainIndexInitNanos = System.nanoTime() - mainIndexInitStartNanos;
+                long mainIndexStartNanos = System.nanoTime();
+                for (Boolean mainSuccess : mainIndex.putEntries(entries))
+                {
+                    if (!mainSuccess)
+                    {
+                        throw new MainIndexException("Failed to put entry into main index");
+                    }
+                }
+                long mainIndexNanos = System.nanoTime() - mainIndexStartNanos;
+                builder.setErrorCode(ErrorCode.SUCCESS);
+                logger.info("[PIXELS_PRIMARY_INDEX_GROUPED_METRIC] table_id={} index_id={} entries={} grouped_threads={} primary_ms={} main_index_init_ms={} main_index_ms={} total_ms={}",
+                        tableId,
+                        indexId,
+                        entries.size(),
+                        GROUPED_PRIMARY_WRITE_THREADS,
+                        primaryNanos / 1_000_000.0,
+                        mainIndexInitNanos / 1_000_000.0,
+                        mainIndexNanos / 1_000_000.0,
+                        (System.nanoTime() - totalStartNanos) / 1_000_000.0);
+                responseObserver.onNext(builder.build());
+                responseObserver.onCompleted();
+                return;
+            }
             long singlePointInitStartNanos = System.nanoTime();
             SinglePointIndex singlePointIndex = SinglePointIndexFactory.Instance().getSinglePointIndex(tableId, indexId, indexOption);
             long singlePointInitNanos = System.nanoTime() - singlePointInitStartNanos;
@@ -346,6 +390,50 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
         }
         responseObserver.onNext(builder.build());
         responseObserver.onCompleted();
+    }
+
+    private void putGroupedPrimaryEntries(long tableId, long indexId,
+            List<IndexProto.PrimaryIndexEntry> entries) throws SinglePointIndexException
+    {
+        Map<Integer, List<IndexProto.PrimaryIndexEntry>> entriesByBucket = new HashMap<>();
+        for (IndexProto.PrimaryIndexEntry entry : entries)
+        {
+            int bucketId = IndexUtils.getBucketIdFromByteBuffer(entry.getIndexKey().getKey());
+            entriesByBucket.computeIfAbsent(bucketId, ignored -> new ArrayList<>()).add(entry);
+        }
+        List<Future<Boolean>> futures = new ArrayList<>(entriesByBucket.size());
+        for (Map.Entry<Integer, List<IndexProto.PrimaryIndexEntry>> bucket : entriesByBucket.entrySet())
+        {
+            futures.add(groupedPrimaryWriteExecutor.submit(() -> {
+                SinglePointIndex singlePointIndex = SinglePointIndexFactory.Instance().getSinglePointIndex(
+                        tableId, indexId, IndexOption.builder().vNodeId(bucket.getKey()).build());
+                return singlePointIndex.putPrimaryEntries(bucket.getValue());
+            }));
+        }
+        try
+        {
+            for (Future<Boolean> future : futures)
+            {
+                if (!future.get())
+                {
+                    throw new SinglePointIndexException("Failed to put grouped primary index entries");
+                }
+            }
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+            throw new SinglePointIndexException("Interrupted while putting grouped primary index entries", e);
+        }
+        catch (ExecutionException e)
+        {
+            Throwable cause = e.getCause();
+            if (cause instanceof SinglePointIndexException)
+            {
+                throw (SinglePointIndexException) cause;
+            }
+            throw new SinglePointIndexException("Failed to put grouped primary index entries", cause);
+        }
     }
 
     @Override

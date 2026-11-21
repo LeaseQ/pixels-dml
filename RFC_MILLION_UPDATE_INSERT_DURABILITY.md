@@ -413,6 +413,48 @@ tests and about 63K rows/s for the corrected ten-million-row run.  The next
 INSERT work should target writer/task parallelism and the SQLite main-index
 flush path; simply increasing vnode RPC concurrency is not sufficient.
 
+### Grouped primary-index experiment (2026-11-21, not yet accepted)
+
+The server metrics identify the dominant cost as the aggregate SinglePoint
+RocksDB work: an eight-writer 1M-row run spent about 89.4 seconds in the sum of
+the 1,024 vnode RPCs, while the MainIndex stage was about 8.5 seconds.  A
+server-side experiment was therefore added behind two opt-in JVM properties:
+
+```text
+-Dpixels.insert.index.grouped.primary.write=true
+-Dpixels.index.grouped.primary.write.threads=32
+```
+
+The connector sends all pending vnode entries for one file in one grouped RPC;
+the daemon repartitions those entries by bucket, writes independent RocksDB
+buckets in a bounded 32-thread pool, and writes the MainIndex batch once.  The
+default behavior remains unchanged.  Because the daemon's default inbound
+Index RPC limit is 64 MiB, the connector now also caps an opt-in grouped RPC at
+200,000 entries by default, configurable with
+`pixels.insert.index.grouped.primary.write.max.entries`; this keeps larger
+10M/writer tests from converting a performance optimization into a protocol
+failure.
+
+The first isolated run after deploying the connector used eight Trino writers
+and one million rows.  It completed with exact correctness
+(`1,000,000`, IDs `100,000,001`--`101,000,000`, all IDs distinct), and the
+connector reported `primary_rpc_count=1` for each of the eight files.  However,
+the daemon still emitted the legacy `PIXELS_PRIMARY_INDEX_METRIC` with
+`vnode=-1`, rather than the new grouped metric.  This proves only that the
+client reduced the RPC count; it is not evidence that the server-side grouped
+RocksDB path ran.  The SQL wall was 15.008 seconds (about 66.6K rows/s), slower
+than the accepted 7.980-second eight-writer baseline, so this result is
+explicitly rejected as an optimization result.
+
+The follow-up after restarting the isolated coordinator overlapped with the
+service reconnection and ended in a gRPC GOAWAY/internal error; it is discarded
+and its partially attempted ID range is not used as evidence.  The remaining
+validation requirement is to restart every isolated daemon role that can host
+IndexService, confirm `[PIXELS_PRIMARY_INDEX_GROUPED_METRIC]`, then rerun fresh
+1M and 10M ranges and verify count/min/max/distinct IDs.  Until those metrics
+are present, grouped primary writes remain experimental and are not a default
+or accepted INSERT optimization.
+
 ## Acceptance criteria and remaining work
 
 - [x] INSERT files publish as `REGULAR` with a valid row-id hull.
