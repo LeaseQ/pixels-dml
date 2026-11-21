@@ -1205,3 +1205,42 @@ optional memory-protection/diagnostic control, but it is not enabled in the
 runtime and is not an acceptance configuration. The isolated runtime was
 restored to the original daemon jar and the default 64 MiB/2/4 RocksDB
 settings, then restarted and marked READY.
+
+## Clean RocksDB namespace and wide-source construction probe (2026-11-22)
+
+The preceding cold-index probes all reused a shared RocksDB directory that had
+accumulated roughly 8,000 column families from historical experiments.  To
+separate the workload from that state, the isolated Retina was restarted with
+the same original daemon jar and default RocksDB tuning, but with a new empty
+`index.rocksdb.data.path`.
+
+The clean namespace materially changed the narrow indexed INSERT baseline:
+
+```text
+fresh narrow 100K pk target: E2E = 4.989 s
+fresh narrow 1M pk target:   E2E = 5.857 s ~=170.7K rows/s
+correctness for 1M target:   count/min/max/distinct = 1000000/1/1000000/1000000
+Retina RSS after 1M target:  ~=28.5 GiB
+```
+
+This is the strongest evidence so far that the historical shared-CF state is a
+first-order bottleneck: the same isolated machine previously ranged from tens
+of seconds to more than two minutes for cold indexed probes, with RSS near
+70--80 GiB.  It does not yet prove that a new directory is a production-safe
+fix.  In particular, the current recovery checkpoint is older than these
+tables; after restart, post-checkpoint rows are not durable and must not be
+counted as a successful persistence result.
+
+The corresponding 68-column source construction was deliberately not accepted
+as a wide-table baseline in this run.  One malformed `--file` invocation and a
+duplicate trailing semicolon produced 2M rows instead of 1M.  Several retries
+also exposed a Trino-side construction artifact: large `UNION ALL` source
+inserts fan out to thousands of writers and can leave one final driver in a
+long tail after all Pixels page sinks have completed.  Those queries were
+cancelled and excluded.  A future wide benchmark must first verify an exact
+1M-row unique source, then measure only the target table-to-table INSERT; source
+generation time and writer-tail failures must be reported separately.
+
+The clean namespace therefore becomes the preferred isolated baseline for the
+next experiment, while the shared-CF namespace and the malformed wide-source
+arms remain diagnostic/rejected results.
