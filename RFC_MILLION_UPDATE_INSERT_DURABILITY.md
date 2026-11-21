@@ -1561,3 +1561,12 @@ primary relocation, and metadata publication. INSERT remains the main gap to
 the million-row target; the next code work should focus on grouped primary
 index service cost and parallel source/task execution, while preserving the
 tag-index-before-COMPACT contract.
+
+After the post-COMPACT hot append, a source-ID offset mistake was detected:
+the source used for that append already contained IDs 4,000,001--5,000,000,
+so adding 11M created a valid but non-contiguous 15M--16M range. No duplicate
+rows were committed. Four corrective 1M appends with offsets 7M, 8M, 9M, and
+10M filled the missing 11M--15M ranges. The final authoritative check is now
+`count/min/max/distinct = 16000000/1/16000000/16000000`, with the materialized
+`UPD1M` tag still present on exactly 1M rows. The non-contiguous intermediate
+check is excluded from throughput conclusions.
