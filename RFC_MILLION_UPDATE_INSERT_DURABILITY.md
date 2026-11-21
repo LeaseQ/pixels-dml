@@ -567,3 +567,41 @@ be profiled before another implementation change.
 - [ ] Run the same shared-key uniqueness-proof route through a populated Trino
   SQL table and accept its table-level UPDATE throughput only after data
   visibility, correctness, and restart checks pass.
+
+### Correctly deployed lease-renewal E2E and rejected lock-scope experiment (2026-11-21)
+
+The first post-fix cold INSERT reruns were invalid as deployment tests: the
+isolated Trino process had not been restarted with the active plugin/runtime
+combination, and one restart attempt used a shared launcher.  The isolated
+process was then restarted directly with its own `runtime/trino` classpath,
+`runtime/trino-data`, and `runtime/pixels` configuration.  A temporary
+diagnostic build showed the expected lease heartbeat in the actual process:
+transaction `180020` was renewed every five seconds throughout a 100,000-row
+cold write and committed successfully.  The diagnostic logging was removed
+after confirmation.
+
+A fresh indexed 68-column table (`table_id=1023`, `index_id=1012`) was then
+loaded with 1,000,000 generated rows and eight Trino writers.  The accepted
+E2E result was:
+
+```text
+SQL wall = 555 s (Trino timeline = 552.494 s)
+rows = 1,000,000; ids = 4000000001--4001000000; distinct ids = 1,000,000
+publish total = 150.973 ms; commit_ms = 7.845
+primary grouped stage ~=548 s; grouped_threads=32
+```
+
+The transaction was renewed continuously across the five-minute lease window,
+committed successfully, and the post-check returned the exact row count and
+ID range.  This is the first clean million-row cold INSERT result with both
+lease evidence and a successful commit after the earlier false-success
+(`10203`/`10213`) cases.  It confirms that the remaining cold-path bottleneck is
+per-vnode/index initialization, not transaction publication.
+
+The second exploratory daemon change that removed the factory-wide vnode/CF
+locks was not accepted.  It produced a correct 1M-row result but measured
+about 555 seconds versus the prior 513--536 second cold runs, with no evidence
+of end-to-end improvement.  The source and isolated runtime are restored to
+the pre-experiment lock scope; further optimization should be driven by a
+profile of the RocksDB/vnode initialization path rather than another
+lock-scope guess.
