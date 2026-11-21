@@ -1096,3 +1096,31 @@ result is valid semantic evidence, but no post-restart persistence claim is
 accepted for this rerun. The finding is recorded as: recovery checkpoint
 pointer/body retention must be fixed and a current checkpoint must be
 published before restart persistence can be re-accepted.
+
+## RocksDB background-flush A/B (2026-11-22)
+
+The isolated runtime was then tested with only its Retina configuration
+changed from `max.background.flushes=2, max.background.compactions=4` to
+`32,16`. A new one-million-row fixed source and a new `pk=id` target were
+used; the original connector and the grouped client path were unchanged.
+
+```text
+default 2/4, first 1M pk INSERT:
+  SQL wall = 141.886 s; about 7.0K rows/s
+  primary_put_wall_ms = 134032
+
+experimental 32/16, first 1M pk INSERT:
+  SQL wall = 84.108 s; about 11.9K rows/s
+  primary_put_wall_ms = 75030
+  daemon grouped-primary primary_ms = 72562; main_index_ms = 699
+  file write_ms = 2237
+  Retina RSS observed during the run ~= 72 GB
+```
+
+The higher background concurrency gives a real 40.7% cold-index wall-time
+improvement, but it is not an acceptance configuration: the absolute rate is
+still far below the target and memory amplification is substantial. The
+runtime was restored to the default 2/4 values and Retina was restarted and
+marked READY. This experiment supports a lower-resource initialization design
+(for example bounded vnode/CF creation and staged prewarming), not simply
+raising all RocksDB thread counts.
