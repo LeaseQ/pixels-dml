@@ -70,16 +70,18 @@ public class RocksDBFactory
 
     static RocksDB createRocksDB(String rocksDBPath) throws RocksDBException,SinglePointIndexException
     {
+        long openStartNanos = System.nanoTime();
         // 1. Get existing column families (returns empty list for new database)
         List<byte[]> existingColumnFamilies;
-        try
+        try (Options listOptions = new Options())
         {
-            existingColumnFamilies = RocksDB.listColumnFamilies(new Options(), rocksDBPath);
+            existingColumnFamilies = RocksDB.listColumnFamilies(listOptions, rocksDBPath);
         } catch (RocksDBException e)
         {
             // For new database, return list containing only default column family
             existingColumnFamilies = Collections.singletonList(RocksDB.DEFAULT_COLUMN_FAMILY);
         }
+        long listColumnFamiliesMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - openStartNanos);
         // 2. Ensure default column family is included
         boolean existDefaultCF = false;
         for (byte[] cf : existingColumnFamilies)
@@ -121,6 +123,8 @@ public class RocksDBFactory
             }
             descriptors.add(createCFDescriptor(existingColumnFamily, keyLen));
         }
+        long descriptorPreparationMs = TimeUnit.NANOSECONDS.toMillis(
+                System.nanoTime() - openStartNanos) - listColumnFamiliesMs;
 
         // 4. Open DB
         List<ColumnFamilyHandle> handles = new ArrayList<>();
@@ -161,7 +165,14 @@ public class RocksDBFactory
                     .setDbLogDir(statsPath);
 
         }
+        long rocksDBOpenStartNanos = System.nanoTime();
         RocksDB db = RocksDB.open(dbOptions, rocksDBPath, descriptors, handles);
+        long rocksDBOpenMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - rocksDBOpenStartNanos);
+        long totalOpenMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - openStartNanos);
+        logger.info("[PIXELS_ROCKSDB_OPEN_METRIC] path={} existing_cf={} list_cf_ms={} " +
+                        "descriptor_ms={} db_open_ms={} total_ms={}",
+                rocksDBPath, existingColumnFamilies.size(), listColumnFamiliesMs,
+                descriptorPreparationMs, rocksDBOpenMs, totalOpenMs);
         if(enableRocksDBStats)
         {
             startRocksDBLogThread(db);
