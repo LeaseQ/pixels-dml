@@ -2547,6 +2547,45 @@ Decision: **reject disabling WAL** as a production optimization and keep WAL
 enabled. Continue investigation in the server-side grouped primary write and
 source/task scheduling paths.
 
+## Warm INSERT JFR: grouped-RPC decode and re-bucketing are the next code target (2026-11-22)
+
+To separate the remaining Java/service work from storage configuration, a new
+explicit-primary-key 68-column probe table was warmed once and then measured
+with a second 1M-row INSERT under the normal WAL-enabled grouped-p4 runtime.
+The warm SQL wall was 3.719 s. Retina recording
+`runtime/jfr/insert-e2e-warm-20261122.jfr` lasted 5 seconds and contained 261
+`jdk.ExecutionSample` events.
+
+The most frequent leaf samples were:
+
+```text
+57  IndexServiceImpl.putGroupedPrimaryEntries
+47  PutPrimaryIndexEntriesRequest.Builder.mergeFrom
+25  PrimaryIndexEntry.Builder.mergeFrom
+19  java.util.HashMap.getNode
+14  sun.security.provider.DigestBase.engineUpdate
+7   SqliteMainIndex.putEntries
+```
+
+Across complete sampled stacks, protobuf request/entry parsing accounted for
+the largest repeated group (`PutPrimaryIndexEntriesRequest.parsePartialFrom`
+242 samples; `PrimaryIndexEntry.parsePartialFrom` 144), followed by
+`IndexServiceImpl.putGroupedPrimaryEntries` and
+`IndexUtils.getBucketIdFromByteBuffer`. The samples are not a wall-time
+profile, but they are consistent with the service implementation: the client
+already knows each entry's bucket, while the grouped RPC sends mixed buckets
+and the daemon hashes every key again into a `HashMap` before dispatching to
+the per-vnode RocksDB writers.
+
+The next candidate is therefore a protocol-level grouped request that carries
+the already-resolved vnode/bucket grouping (or an equivalent per-entry bucket
+sidecar), allowing the daemon to skip repeated key hashing and generic
+re-bucketing while retaining one RPC per Trino writer and the existing
+per-vnode `WriteBatch`/WAL semantics. This is only a candidate: it must be
+benchmarked against the current 32-writer grouped-p4 path and must preserve
+abort bookkeeping, tag publication ordering, and the explicit primary-key
+correctness checks. No code change was made from this JFR alone.
+
 ## Fixed-source writer-count sweep below 32 (2026-11-22)
 
 The grouped p4 runtime was kept unchanged while the Trino session writer count
