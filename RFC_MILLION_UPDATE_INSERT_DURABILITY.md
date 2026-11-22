@@ -3258,3 +3258,40 @@ below the lower-hundreds-of-thousands goal. The gap is not explained by the
 file encoder alone: the warm arm still spends about 4.0 s in primary-index
 puts, while the total remote wall is 9.5 s. The no-index candidate9 result must
 not be used to claim that the target has been reached.
+
+## Session-controlled writer count on a clean indexed target (2026-11-23)
+
+The candidate10 source had been through repeated UPDATE/COMPACT experiments,
+so candidate11 was created with the same explicit `pk='id'` metadata and was
+fed by the single-file materialized candidate9 source. This isolated the
+writer-count/session effect from the source layout. The first two arms used
+the connector's default writer shape and are retained as a control:
+
+```text
+default session, 1M rows:  query elapsed 8.038 s ~= 124.4K rows/s
+default session, 1M rows:  query elapsed 7.471 s ~= 133.8K rows/s
+```
+
+The historical benchmark's session controls were then applied explicitly:
+
+```text
+task_min_writer_count=32
+task_scale_writers_enabled=false
+```
+
+Two fresh one-million-row appends were performed into the same indexed target.
+Both created 32 fragments, used the grouped primary-index route, and passed
+the exact uniqueness/range checks:
+
+```text
+first 32-writer arm:  query elapsed 3.989 s ~= 250.7K rows/s
+warm 32-writer arm:   query elapsed 3.739 s ~= 267.4K rows/s
+final target:         count/min/max/distinct = 3000000/7000000001/10001000000/3000000
+```
+
+This explains the earlier apparent plateau: the 8--10 s results were not
+using the session configuration of the accepted 24--32 writer benchmark. The
+current isolated runtime reaches the lower-hundreds-of-thousands INSERT goal
+on a real primary-index table-to-table path. It is still well below 1M rows/s;
+the remaining measured cost is distributed across 32 per-file finishing/index
+paths rather than the final metadata publish (225 ms on the warm arm).
