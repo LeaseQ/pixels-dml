@@ -1627,3 +1627,51 @@ the gap to the million-row target. Next experiments should target grouped
 primary-index/RocksDB write cost or task/source execution, with every INSERT
 table explicitly declaring its primary key and path root before accepting a
 number.
+
+## Warm table-to-table INSERT JFR split (2026-11-23)
+
+The clean tagged target from the previous section was used for two additional
+warm table-to-table appends. The source was the same target with
+`WHERE id <= 1000000`; the destination IDs were offset by 1M and 2M, so both
+arms inserted one million new primary-key rows without changing the schema or
+the tag columns. The isolated Trino used 32 writers with writer scaling
+disabled, while the isolated Retina remained on the already-deployed
+64-thread grouped-primary setting.
+
+```text
+append IDs 1,000,001..2,000,000: 6.863 s CLI wall, 145.7K rows/s
+  grouped-primary: 1M entries, max request total ~= 1.60 s
+  exact count/min/max/distinct after append = 2M/1/2M/2M
+
+append IDs 2,000,001..3,000,000: 5.355 s CLI wall, 186.7K rows/s
+  grouped-primary: 1M entries, max request total ~= 0.91 s
+  exact count/min/max/distinct after append = 3M/1/3M/3M
+```
+
+The two numbers are warm-path probes, not a new fixed-source acceptance
+baseline; they are retained to show the attainable range after compaction and
+to avoid comparing against the earlier cold RocksDB-open path. The index
+service metrics and RocksDB LOG show no write stalls or pending compaction
+bytes during the probe. This makes a RocksDB background-stall explanation
+unlikely for the current warm path.
+
+A 6-second JFR on the isolated Trino during the second arm collected 554
+execution samples. The most frequent relevant frames were:
+
+```text
+PixelsPageSink.appendPage                         161
+PixelsPageSink.appendColumnValues                157
+PixelsWriterImpl.writeColumnVectors              102
+ScanFilterAndProjectOperator / PixelsFilePageSource 63 / 63
+PixelsRecordReaderImpl.readBatch                  53
+PixelsInsertIndexWriter.appendBatch               18
+IndexServiceGrpc.putPrimaryIndexEntries           13
+```
+
+These are stack-sample counts rather than exclusive CPU percentages, but the
+ordering is sufficient to change the next optimization priority. The warm
+index path is no longer the dominant sampled Trino-side cost; PageSink vector
+conversion, Pixels column encoding, and source/task scheduling are the next
+targets. No code change is accepted from this probe. The next A/B must use a
+fresh, materialized one-million-row source and paired fresh targets, and must
+capture Trino query timeline metrics instead of relying only on CLI wall time.
