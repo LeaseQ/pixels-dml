@@ -1746,6 +1746,38 @@ in history as a measured negative result; future writer work should target
 encoding/batch materialization with a profiler-backed hypothesis rather than
 this diagnostic-only allocation.
 
+## Rebuilt materialized-source INSERT baseline (2026-11-23)
+
+The historical fixed-source table had survived recovery as metadata with zero
+visible rows, so it was not usable evidence. A new independent source,
+`bench68_v2.fixed_source_fresh_20261122`, was created through the connector
+with the full 68-column schema and no primary index. It was materialized once
+from the valid target and verified exactly as
+`1000000/1/1000000/1000000`. It was not modified during the performance arms.
+
+The destination remained the valid tagged target
+`page_dispatch_target_clean64_e2e2_20261123`, with `pk=id`, a single-root path,
+and the original core jar. Each arm inserted the fixed source with a distinct
+one-million-ID offset, used `task_scale_writers_enabled=false`, and validated
+the complete destination count, range, and distinctness:
+
+```text
+4 writers:  Trino timeline 6.850 s, approximately 146K rows/s
+32 writers: Trino timeline 3.257 s, approximately 307K rows/s
+32 writers warm repeat: Trino timeline 3.375 s, approximately 296K rows/s
+final destination: count/min/max/distinct = 17000000/1/17000000/17000000
+```
+
+The query timelines also separate the scheduling shape: the 4-writer arm spent
+about 5.176 s in finishing, while the two 32-writer arms spent about 1.604 s
+and 1.548 s. This is the first clean, materialized-source E2E INSERT evidence
+in the current runtime that reaches the lower hundreds-of-thousands target
+range without changing the tagging or primary-index semantics. The 32-writer
+setting is therefore retained as the fixed-source benchmark configuration, not
+yet as a global deployment default; the result does not claim the million-row
+target, and source-free/empty-table and self-source numbers must not be mixed
+with it.
+
 ## Selected-read null scratch probe (2026-11-23)
 
 The stable INSERT JFR had `PixelsRecordReaderImpl.readBatch` and string-column
