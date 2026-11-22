@@ -229,6 +229,48 @@ with stage-level evidence, rather than increasing concurrency again.
 The isolated runtime remains on the restored old connector, 32 daemon grouped
 threads, and p16 UPDATE resolver settings.
 
+## Follow-up: PageSink stage split and grouped-primary negative control (candidate54/55)
+
+Candidate54 added temporary timing around the Trino PageSink conversion loop.
+The instrumentation was deployed only to the isolated runtime and then
+removed. The 1M-row INSERT used the same 32-writer shape and passed the exact
+count/distinct/range check:
+
+```text
+candidate54: CLI wall=8.023 s, Trino elapsed=6.22 s
+correctness: count=1,000,000, distinct_id=1,000,000,
+             min_id=7,000,000,001, max_id=7,001,000,000
+PageSink conversion sum across 32 sinks: 4.308 s
+Pixels writer write sum:                    18.621 s
+Pixels index append sum:                    14.042 s
+primary_put sum / wall sum:                 46.410 s / 47.530 s
+main-index flush sum:                        3.221 s
+TableWriter finishWall sum:                 56.82 s
+```
+
+These timings are sums across drivers, not end-to-end wall time. They rule out
+the PageSink cell-conversion loop as the dominant stable bottleneck. The
+primary-index write and writer finish path remain the stronger candidates.
+
+Candidate55 then disabled the connector's grouped-primary route while keeping
+the 32-writer query and `flush.parallelism=4`. This is a valid correctness
+control, but it is a clear performance regression:
+
+```text
+candidate55: CLI wall=18.107 s, Trino elapsed=16.21 s
+correctness: count=1,000,000, distinct_id=1,000,000,
+             min_id=7,000,000,001, max_id=7,001,000,000
+primary RPCs: 128 per sink (32 sinks)
+primary_put sum / wall sum: 1,352.861 s / 343.604 s
+```
+
+The grouped-primary route is therefore retained. The experiment also explains
+why `flush.parallelism=4` did not affect candidate54: when grouped writes are
+enabled and no staged bucket flush occurs, one grouped request is sent before
+the per-vnode flush branch. No source optimization is accepted from these two
+probes; the isolated Trino was restored to grouped-primary=true with the full
+runtime environment.
+
 ## Remote artifacts
 
 ```text
@@ -254,4 +296,7 @@ logs/insert-candidate52-indexed-32writers-baseline-20261123.log
 logs/insert-candidate53-indexed-64writers-baseline-20261123.log
 logs/query-candidate52-summary-20261123.txt
 logs/query-candidate52-operators-20261123.txt
+logs/build-sink-stage-instrumentation-20261123.log
+logs/insert-candidate54-indexed-32writers-sink-stages-20261123.log
+logs/insert-candidate55-indexed-32writers-grouped-false-20261123.log
 ```
