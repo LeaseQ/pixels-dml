@@ -1258,33 +1258,60 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             Map<Integer, List<IndexProto.IndexKey>> keysByBucket = new HashMap<>();
             for (IndexProto.IndexKey key : request.getIndexKeysList())
             {
-                int bucketId = IndexUtils.getBucketIdFromByteBuffer(key.getKey());
-                keysByBucket.computeIfAbsent(bucketId, ignored -> new ArrayList<>()).add(key);
-                singlePointIndexes.computeIfAbsent(bucketId, ignored -> {
-                    try
-                    {
-                        return SinglePointIndexFactory.Instance().getSinglePointIndex(
-                                request.getTableId(), request.getIndexId(),
-                                IndexOption.builder().vNodeId(bucketId).build());
-                    }
-                    catch (SinglePointIndexException e)
-                    {
-                        throw new IndexLookupRuntimeException(e);
-                    }
-                });
+                if (request.getIgnoreMissing())
+                {
+                    int bucketId = IndexUtils.getBucketIdFromByteBuffer(key.getKey());
+                    keysByBucket.computeIfAbsent(bucketId, ignored -> new ArrayList<>()).add(key);
+                    singlePointIndexes.computeIfAbsent(bucketId, ignored -> {
+                        try
+                        {
+                            return SinglePointIndexFactory.Instance().getSinglePointIndex(
+                                    request.getTableId(), request.getIndexId(),
+                                    IndexOption.builder().vNodeId(bucketId).build());
+                        }
+                        catch (SinglePointIndexException e)
+                        {
+                            throw new IndexLookupRuntimeException(e);
+                        }
+                    });
+                }
             }
             Map<IndexProto.IndexKey, Long> resolvedRowIds = new HashMap<>();
-            for (Map.Entry<Integer, List<IndexProto.IndexKey>> bucket : keysByBucket.entrySet())
+            if (request.getIgnoreMissing())
             {
-                List<Long> rowIds = singlePointIndexes.get(bucket.getKey()).getUniqueRowIds(bucket.getValue());
-                for (int i = 0; i < rowIds.size(); i++)
+                for (Map.Entry<Integer, List<IndexProto.IndexKey>> bucket : keysByBucket.entrySet())
                 {
-                    resolvedRowIds.put(bucket.getValue().get(i), rowIds.get(i));
+                    List<Long> rowIds = singlePointIndexes.get(bucket.getKey()).getUniqueRowIds(bucket.getValue());
+                    for (int i = 0; i < rowIds.size(); i++)
+                    {
+                        resolvedRowIds.put(bucket.getValue().get(i), rowIds.get(i));
+                    }
                 }
             }
             for (IndexProto.IndexKey key : request.getIndexKeysList())
             {
-                long rowId = resolvedRowIds.getOrDefault(key, -1L);
+                long rowId;
+                if (request.getIgnoreMissing())
+                {
+                    rowId = resolvedRowIds.getOrDefault(key, -1L);
+                }
+                else
+                {
+                    int bucketId = IndexUtils.getBucketIdFromByteBuffer(key.getKey());
+                    SinglePointIndex singlePointIndex = singlePointIndexes.computeIfAbsent(bucketId, ignored -> {
+                        try
+                        {
+                            return SinglePointIndexFactory.Instance().getSinglePointIndex(
+                                    request.getTableId(), request.getIndexId(),
+                                    IndexOption.builder().vNodeId(bucketId).build());
+                        }
+                        catch (SinglePointIndexException e)
+                        {
+                            throw new IndexLookupRuntimeException(e);
+                        }
+                    });
+                    rowId = singlePointIndex.getUniqueRowId(key);
+                }
                 if (rowId < 0)
                 {
                     if (request.getIgnoreMissing())
