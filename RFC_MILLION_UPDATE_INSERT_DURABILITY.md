@@ -2429,3 +2429,21 @@ Decision: reject p2 and p8 as the next optimization direction and restore the
 isolated runtime to grouped p4. The remaining INSERT gap is not explained by
 this client-side flush fan-out knob; future work should measure or reduce the
 server-side grouped RocksDB/main-index path and source/task scheduling.
+
+The daemon-side grouped metrics support that direction. For the same target
+index (`table_id=2292`, `index_id=2243`), the 32 per-file requests averaged
+approximately:
+
+```text
+                 primary_ms   main_index_ms   total_ms
+p4 cold              586.6          35.7        622.3
+p4 warm              314.8          27.3        342.1
+p8 warm              303.8          18.8        322.6
+p2 warm              468.9          50.0        518.9
+```
+
+These are service-side averages, not SQL wall rates. They show that the main
+index contribution is small relative to the grouped primary write, and that
+p2 increases primary-write queueing even though it reduces client fan-out.
+The p8 service average is not enough to win end-to-end because source/task
+and publication scheduling also contribute to SQL wall time.
