@@ -2081,6 +2081,36 @@ The hotspot remains a valid follow-up target, but a future change must reduce
 the complete writer/finishing path rather than only the local percentile
 work.
 
+## Projection isolation and synchronous column-write probe (2026-11-24, rejected)
+
+To separate SQL projection cost from the Pixels writer, a second immutable
+source, `bench68_v2.e2e_prescaled_source_20261124`, was materialized with the
+ID offset already applied. It passed the exact source check
+`1000000/40100001/41100000/1000000`. An indexed target consumed it with the
+ordinary `INSERT INTO target SELECT * FROM source` shape. The first arm was
+15.086 s because the new target opened its primary-index state; the warm arm
+from a second pre-offset source was 5.009 s, about 200K rows/s. The target
+check after both arms was exact:
+
+```text
+2000000/40100001/42100000/2000000
+```
+
+This overlaps the original-core `id + offset` warm range of 4.512--5.366 s,
+so the projection expression is not the dominant gap on this fixture.
+
+The JFR-guided writer candidate added an opt-in
+`pixels.writer.column.write.parallel=false` mode that wrote the 68 column
+vectors synchronously, leaving the existing cached-thread-pool path as the
+default. It was deployed only to the isolated Trino. The candidate made the
+next 1M-row source materialization run for more than two minutes, compared
+with roughly 1--3 s for the original parallel path; no target E2E arm was
+accepted. The candidate queries were cancelled, the source change was
+reverted, and the isolated Trino/core jar were restored to the original
+parallel implementation. This rejects a blanket synchronous column-write
+strategy; any future writer scheduling change needs bounded per-batch
+parallelism rather than serializing all columns.
+
 ## Main-index buffer `putIfAbsent` probe (2026-11-22)
 
 The Retina JFR also showed `MainIndexBuffer.insert` together with
