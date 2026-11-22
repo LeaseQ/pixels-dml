@@ -3210,3 +3210,51 @@ tag values. This run is retained as a failed materialization observation, not
 as correctness evidence; the previously accepted candidate8
 INSERT -> UPDATE -> COMPACT -> restart gate remains the only accepted
 materialized result.
+
+## Primary-index INSERT recheck with explicit table metadata (2026-11-23)
+
+The first candidate created during this pass (`e2e68_fresh_candidate9_20261123`)
+was intentionally not accepted: its DDL omitted `pk='id'` and therefore did
+not create a primary index. Its 1M-row table-to-table INSERT took 5.683 s, but
+the connector emitted `index_ms=0` and no `PIXELS_INSERT_INDEX_METRIC`. That
+number is useful only as a no-index data-path probe, not as the INSERT result
+for the tag-aware primary-key workload.
+
+A clean replacement (`e2e68_fresh_candidate10_20261123`) used the same 68-column
+schema and a single root, with the complete supported metadata:
+
+```sql
+WITH (
+  storage = 'file',
+  paths = 'file:///.../e2e68_fresh_candidate10_20261123/v-0-ordered',
+  pk = 'id',
+  pk_scheme = 'rocksdb'
+)
+```
+
+The source was the validated 1M-row `e2e68_fresh_candidate8_20261122` table.
+The destination checks passed after both arms:
+
+```text
+after first append:  1000000 / 7000000001 / 7001000000 / 1000000
+after warm append:   2000000 / 7000000001 / 8001000000 / 2000000
+```
+
+Measured remote CLI wall and connector evidence were:
+
+```text
+primary-index first append: 12.341 s ~= 81.0K rows/s
+  primary_put_wall_ms=5919.612, primary_rpc_count=5
+  sink write_ms=803.195, index_ms=1445.566
+
+warm append with id + 1,000,000,000: 9.489 s ~= 105.4K rows/s
+  primary_put_wall_ms=3992.687, primary_rpc_count=5
+  sink write_ms=582.929, index_ms=870.485
+```
+
+Both INSERTs were real table-to-table operations and both used the primary
+index route. They are therefore accepted as comparable evidence, but remain
+below the lower-hundreds-of-thousands goal. The gap is not explained by the
+file encoder alone: the warm arm still spends about 4.0 s in primary-index
+puts, while the total remote wall is 9.5 s. The no-index candidate9 result must
+not be used to claim that the target has been reached.
