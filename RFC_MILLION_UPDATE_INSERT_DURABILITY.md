@@ -3309,3 +3309,35 @@ On this machine and fixture, 24 writers are currently the better session
 point than 32 writers (315.4K versus 250.7--267.4K rows/s). This is a
 benchmark-session result, not a global connector default change; the target
 still does not approach 1M rows/s.
+
+## Indexed INSERT -> UPDATE -> COMPACT completion on candidate11 (2026-11-23)
+
+The same candidate11 then exercised the complete tag-aware route on a populated
+indexed table. A one-million-row exact primary-key range was updated with
+`tag_1_type='U24'` and `tag_1_para=24.0000`:
+
+```text
+UPDATE query elapsed: 9.545 s ~= 104.8K rows/s
+rows=1000000, primary_key_resolve_ms=8382.522
+request_build_ms=271.922, rpc_count=1, rpc_ms=528.088, total_ms=9257.642
+```
+
+As expected for the tag-before-COMPACT design, an immediate physical readback
+still showed the old tag values. The isolated Pixels CLI then ran
+`COMPACT -n no -c 8`; the 4M-row target required approximately seven minutes
+of compaction work. The post-COMPACT readback passed:
+
+```text
+total rows = 4000000
+tag_1_type = 'U24' = 1000000
+tag_1_para min/max = 24.0000 / 24.0000
+updated-range U24 count = 1000000
+```
+
+This is a complete correctness/materialization E2E for the current fixture.
+It also makes the remaining performance split explicit: INSERT reaches
+315.4K rows/s at the 24-writer benchmark point, UPDATE reaches 104.8K rows/s
+before COMPACT, and COMPACT is a separate multi-minute materialization stage
+on a 4M-row table. The million-row goal is therefore not yet met end-to-end;
+the next high-value optimization target remains primary-key resolution for
+UPDATE and the compaction scan/rewrite path, not the tag publication semantics.
