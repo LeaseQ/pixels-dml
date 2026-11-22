@@ -504,13 +504,17 @@ public class PixelsWriterImpl implements PixelsWriter
         CompletableFuture<?>[] futures = new CompletableFuture[columnVectors.length];
         AtomicInteger dataLength = new AtomicInteger(0);
         int commonColumnLength = columnVectors.length - (hasHiddenColumn ? 1 : 0);
+        // All column writes in this batch have the same caller. Capture the
+        // diagnostic stack once instead of allocating one stack per column;
+        // the stack is only formatted on the exceptional ClassCastException
+        // path below.
+        StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
         for (int i = 0; i < commonColumnLength; ++i)
         {
             CompletableFuture<Void> future = new CompletableFuture<>();
             ColumnWriter writer = columnWriters[i];
             ColumnVector columnVector = columnVectors[i];
             int ii = i;
-            StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
             columnWriterService.execute(() ->
             {
                 try
