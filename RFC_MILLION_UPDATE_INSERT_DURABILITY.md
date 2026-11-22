@@ -1906,3 +1906,55 @@ SSH session, both JDK 23 and `PIXELS_HOME=/home/pixels/validation-million-update
 must be exported explicitly. Without them, the launcher first selected Java 11
 and then the connector fell back to jar-bundled configuration; neither state is
 valid benchmark evidence.
+
+## Fixed-source index cost upper bound and writer sweep (2026-11-22)
+
+The indexed and unindexed paths were compared with the same materialized
+`fixed_source_fresh_20261122` and the same 68-column projection. A no-primary-key
+target provides an upper bound for the file/source path but does not provide
+tagging semantics:
+
+```text
+no-index target, first 1M: 3.269 s, approximately 306K rows/s
+no-index target, warm 1M:  1.702 s, approximately 587K rows/s
+indexed target, 24 writers: 3.257--3.279 s, approximately 305--307K rows/s
+indexed target, 32 writers: 3.266--3.322 s, approximately 301--306K rows/s
+```
+
+The warm no-index target was intentionally allowed to receive the same source
+twice, so its final check is `2000000/1/1000000/1000000`; this is an upper-bound
+timing, not a uniqueness result. The indexed target remained unique and its
+post-sweep check was `37000000/1/39000000/37000000`, with sampled tag values
+still `UPD1M/3.1400` and the intentionally NULL tag pairs unchanged.
+
+A client-writer sweep filled the missing point between the earlier 4/32/64
+tests:
+
+```text
+16 writers: 6.248 s cold, 4.094 s warm
+24 writers: 3.257 s, 3.279 s
+32 writers: 3.266 s, 3.322 s
+64 writers: 3.757 s (earlier fixed-source negative control)
+```
+
+The current sweet spot is therefore 24--32 writers. The unindexed upper bound
+and the indexed comparison show that the primary-index path adds roughly
+1.6 seconds on this warm fixture; changing the client writer count outside the
+24--32 range does not close that gap.
+
+## Retina-side JFR probe for indexed INSERT (2026-11-22)
+
+The isolated Retina process was recorded with Java 11's `settings=profile`
+configuration during a 24-writer indexed fixed-source INSERT. The query wrote
+1,000,000 rows successfully in 3.523 seconds. The 118 execution samples are
+not an exclusive CPU profile, but their stack shape is consistent with the
+component metrics: the most frequent deep frames were
+`MainIndexBuffer.snapshotForFlush`, `SqliteMainIndex.flushCache`,
+`IndexServiceImpl.flushIndexEntriesOfFile`, and
+`SqliteMainIndex.putEntries`; protobuf parse/build and
+`IndexServiceImpl.putGroupedPrimaryEntries` were also present. This shifts the
+next code audit toward main-index snapshot/flush batching and lock scope,
+while retaining the primary grouped-write path and tag publication ordering.
+
+No runtime configuration was changed by this probe. The indexed target was
+left on the original connector and the isolated daemon configuration.
