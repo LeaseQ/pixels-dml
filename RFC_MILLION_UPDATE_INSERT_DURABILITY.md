@@ -3561,3 +3561,38 @@ fixture. The default remains serial until broader failure-injection and larger
 table validation are completed. The remaining bottleneck is still the primary
 resolution RPC path, but its wall-clock cost can now be overlapped safely at a
 moderate concurrency.
+
+### 8M-source-row p4 validation (2026-11-23)
+
+Candidate22 extended the correct-root fixture to eight one-million-row INSERTs
+(`8,000,000` source rows), then updated exactly one million rows to
+`U47/47.0000`. COMPACT was run with the freshly rebuilt jar and
+`-Dpixels.compact.primary-resolve-parallelism=4`:
+
+```text
+tag snapshot:       1,000,000 rows, 62 RPCs,   3.619 s
+physical rewrite:   8,000,000 rows, one output, 33.254 s
+primary resolve:    8,000,000 rows, 496 RPCs, 101.639 s (summed RPC time)
+relocation:         8,000,000 rows, 512 RPCs
+publish:            one output, 72.101 s
+compact CLI:        105 s
+```
+
+The final Trino readback passed after publication:
+
+```text
+total=8000000
+tag_1_type='U47'=1000000
+tag_1_para min/max=9.0000/47.0000
+updated-range U47=1000000
+```
+
+This validates the opt-in p4 pipeline at 8M source rows: the physical rewrite
+and the asynchronous source-row resolution complete without lost updates,
+duplicate primary keys, or incorrect tag visibility. The `101.639 s` resolver
+number is a summed RPC metric rather than wall-clock time; the approximately
+`105 s` CLI duration demonstrates that resolution is overlapped with rewrite
+and publication. It remains a throughput bottleneck, so this result is a
+scale/correctness milestone, not evidence that the million-row target has been
+reached for UPDATE itself. The default and the user-facing behavior remain
+unchanged.
