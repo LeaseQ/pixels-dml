@@ -1745,3 +1745,39 @@ the isolated runtime remains on the original core jar. The code commit remains
 in history as a measured negative result; future writer work should target
 encoding/batch materialization with a profiler-backed hypothesis rather than
 this diagnostic-only allocation.
+
+## Selected-read null scratch probe (2026-11-23)
+
+The stable INSERT JFR had `PixelsRecordReaderImpl.readBatch` and string-column
+decoding near the top of the source-side samples. A code audit found that every
+`readSelected` implementation allocated a fresh `boolean[size]` null scratch
+array for each selected batch. Commit `986e15c2` changed these readers to reuse
+one scratch array per `ColumnReader`, growing it only when a larger batch is
+seen. No vector layout, null bit meaning, tag column, or on-disk format was
+changed. The candidate compiled successfully in the isolated JDK 11 Maven
+build.
+
+The isolated E2E comparison used the explicit 68-column tagged target, 32 fixed
+Trino writers, writer scaling disabled, and one-million-row table-to-table
+appends. The original core jar first extended the target from 9M to 10M rows:
+
+```text
+original control: 5.677 s, approximately 176.1K rows/s
+exact check: 10000000/1/10000000/10000000
+```
+
+After the candidate restart, the first arm was 11.266 s due to restart/cache
+state; the warm arm extended the target from 10M to 11M rows in 5.946 s
+(approximately 168.2K rows/s), with exact check
+`11000000/1/11000000/11000000`. The connector was restored to the original
+core jar and a post-restart control pair was run. Its warm arm took 5.995 s
+(approximately 166.8K rows/s), with final exact check
+`14000000/1/14000000/14000000`.
+
+The candidate warm arm was only 0.8% faster than the paired post-rollback warm
+control, while the preceding original arm was 5.677 s. This is not a repeatable
+gain against the observed run-to-run variance, so the candidate is **rejected**
+and commit `02b9c0a1` reverts it. The isolated runtime remains on the original
+core jar. The probe is still useful: selected-read scratch allocation is a
+real allocation hotspot worth measuring with an allocation-focused recording,
+but it is not currently a throughput lever on this E2E fixture.
