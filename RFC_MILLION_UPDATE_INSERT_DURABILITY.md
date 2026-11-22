@@ -2001,3 +2001,40 @@ INSERT benchmark may not be called restart-durable until the post-INSERT file
 metadata is confirmed `REGULAR` and the recovery checkpoint is confirmed to
 contain the files. The next validation pass must include that check before
 any further warm A/B comparison.
+
+## Fixed-jar checkpoint persistence re-test (2026-11-22)
+
+The previous restart failure was reproduced with the stale runtime jar: after
+the 300-second GC cycle published
+`recovery_cds20_0.bin`, the old same-timestamp cleanup path removed the body
+and left the pointer unusable. The source fix in `pixels-dml` commit
+`46d397c6` skips deletion when the displaced body path is the newly published
+body path. A fresh isolated daemon full jar was built from the validation
+branch and deployed only to the validation Retina:
+
+```text
+jar SHA256 = e549a70ef801421cb68e201cfcd10f1d58200bda7c6ad5777433e5031058a69c
+```
+
+With that jar, a new 68-column source and `pk='id'` target were created. The
+source contained 10,000 rows, `tag_1_type='DUR'`,
+`tag_1_para=2.0000`, and NULL values in the remaining tag pairs. The target
+passed its pre-restart check. After the GC scheduler published a checkpoint
+with `rgs=2754`, the body remained present at 1.8 MiB. Retina was then
+restarted, recovered from the checkpoint, and explicitly completed the
+isolated single-node `RECOVERING -> READY` handshake with
+`RetinaService.markReady(recoveryEpoch)`.
+
+The post-restart Trino check was exact:
+
+```text
+count/min/max/distinct = 10000/1/10000/10000
+tag_1_type='DUR'       = 10000
+tag_1_para=2.0000      = 10000
+tag_2_type IS NULL     = 10000
+```
+
+This is the first clean restart-persistence result for a newly inserted
+tag-capable table after deploying the same-timestamp checkpoint fix. It does
+not change the INSERT throughput baseline, and it does not claim that the
+manual READY handshake can be omitted in a production lifecycle.
