@@ -2038,3 +2038,43 @@ This is the first clean restart-persistence result for a newly inserted
 tag-capable table after deploying the same-timestamp checkpoint fix. It does
 not change the INSERT throughput baseline, and it does not claim that the
 manual READY handshake can be omitted in a production lifecycle.
+
+## Main-index buffer `putIfAbsent` probe (2026-11-22)
+
+The Retina JFR also showed `MainIndexBuffer.insert` together with
+`HashMap.containsKey`, `HashMap.put`, and `HashMap.getNode`. Commit `8f24742d`
+replaced the duplicate `containsKey` plus `put` sequence with
+`HashMap.putIfAbsent`, preserving duplicate rejection and cache admission. The
+change was built as daemon jar
+`69e5a2e4de1e6fcf0daa00daa9ebf7e64c5fcf4c806101f90828e130611fd07b` and
+deployed only to the isolated Retina. The original fixed-recovery jar was
+restored after the A/B; the code probe was reverted by `8241f3f6`.
+
+The first two candidate INSERTs were deliberately excluded because the client
+did not send the fixed 32-writer session. With
+`task_scale_writers_enabled=false,task_min_writer_count=32`, the candidate
+used the same 68-column materialized source and tagged `pk='id'` target for two
+one-million-row appends:
+
+```text
+candidate warm 1: 4.50 s, approximately 222K rows/s
+candidate warm 2: 3.90 s, approximately 256K rows/s
+```
+
+After a checkpoint and restart, the original jar passed the recovery check and
+provided the paired control. The first post-restart control was 27.3 s and was
+excluded as cache warm-up. Subsequent controls were:
+
+```text
+original warm 1: 4.06 s, approximately 246K rows/s
+original warm 2: 3.52 s, approximately 284K rows/s
+original warm 3: 3.24 s, approximately 308K rows/s
+```
+
+The candidate did not beat the stable original warm range and was slower than
+the last two controls. The probe is therefore **rejected** and reverted. The
+final exact check after all accepted appends was
+`count/min/max/distinct = 8010000/1/11100000/8010000`, with
+`tag_1_type='PIA'` on 8,000,000 rows and `tag_2_type IS NULL` on 8,010,000
+rows. No correctness regression was observed; the result is a negative
+throughput finding, not a change to the INSERT baseline.
