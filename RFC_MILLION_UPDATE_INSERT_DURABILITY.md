@@ -3379,3 +3379,22 @@ but the default remains 1 until broader concurrency and failure-injection
 validation is completed. On this fixture, tag-aware UPDATE now reaches roughly
 0.4M rows/s, while indexed INSERT remains at roughly 0.315M rows/s at its
 24-writer point. Neither path has reached 1M rows/s yet.
+
+### Primary-resolution batch-size matrix (2026-11-23)
+
+With the new opt-in resolver parallelism held at 16, two additional batch sizes
+were tested on fresh 1M-row ranges of candidate11:
+
+```text
+batch size  primary_key_resolve_ms  connector_total_ms  Trino_elapsed
+32,768      1,997.169              2,858.796           4.520 s
+65,536      1,532.389              2,171.124           2.445 s
+131,072     3,011.357              3,953.767           5.652 s
+```
+
+The 131,072-key requests took about 1.6 s each on the daemon, so reducing the
+number of waves did not compensate for the larger per-request RocksDB work.
+The 32,768-key arm also lost to the 65,536-key point. The matrix therefore
+rejects both new batch sizes and restores the isolated runtime to
+`batch_size=65536, parallelism=16`; the default source behavior remains
+serialized (`parallelism=1`).
