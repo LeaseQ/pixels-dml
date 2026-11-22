@@ -3341,3 +3341,41 @@ before COMPACT, and COMPACT is a separate multi-minute materialization stage
 on a 4M-row table. The million-row goal is therefore not yet met end-to-end;
 the next high-value optimization target remains primary-key resolution for
 UPDATE and the compaction scan/rewrite path, not the tag publication semantics.
+
+## Opt-in parallel primary-key resolution for UPDATE (2026-11-23)
+
+The serialized UPDATE resolver issued one 65,536-key snapshot lookup at a time.
+For 1M rows this creates 16 independent batches; daemon probes showed roughly
+0.4--0.6 s of service time per batch. The connector now supports the opt-in
+JVM property:
+
+```text
+-Dpixels.update.primary-key-resolve-parallelism=N
+```
+
+The default is `1`, preserving the previous serialized behavior. When enabled,
+the connector submits independent snapshot batches concurrently but joins
+their results in input order, so key filtering and tag ordering remain stable.
+The change compiled successfully on cds20 with the isolated connector build;
+it was not enabled in the main runtime.
+
+The isolated candidate11 table was used for fresh one-million-row ranges. The
+same 65,536-key batch size and one shared tag-index RPC were retained:
+
+```text
+parallelism  primary_key_resolve_ms  connector_total_ms  Trino_elapsed  rate
+1             8,382.522              9,257.642           9.545 s       104.8K/s
+4             2,958.079              3,676.256           3.918 s       255.2K/s
+8             1,866.437              2,804.700           3.079 s       324.8K/s
+16            1,532.389              2,171.124           2.445 s       409.0K/s
+32            1,427.836              2,069.087           2.358 s       424.1K/s
+```
+
+The 16- and 32-way arms have the same effective maximum of 16 tasks for a
+1M-row request; their small difference is within run-to-run scheduling and
+RocksDB variance. The candidate is therefore accepted as an opt-in UPDATE
+optimization, with 16 as the useful configured ceiling for this batch size,
+but the default remains 1 until broader concurrency and failure-injection
+validation is completed. On this fixture, tag-aware UPDATE now reaches roughly
+0.4M rows/s, while indexed INSERT remains at roughly 0.315M rows/s at its
+24-writer point. Neither path has reached 1M rows/s yet.
