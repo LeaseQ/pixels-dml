@@ -3065,3 +3065,89 @@ The next narrowly scoped fix is the recovery lifecycle: preserve the compact
 output's REGULAR metadata and checkpoint visibility entry through checkpoint
 publication/cleanup, then repeat the same restart readback. Only after that
 gate passes should throughput optimization be promoted.
+
+## Checkpoint visibility fix: clean candidate8 E2E (2026-11-22)
+
+The checkpoint fix was rebuilt and exercised from a clean isolated snapshot.
+The Java regression suite passed 31/31 tests; the daemon fat jar was rebuilt
+with the fix and deployed only to `runtime/e2e-fresh-20261122`.
+
+The accepted table used the dataset fixture's single-root-path construction:
+
+```text
+table: validationfresh.e2e68_fresh_candidate8_20261122
+columns: 68
+rows: 1,000,000
+primary key: id (7000000001..7001000000)
+paths: one file:// root; connector derives v-0-ordered and v-0-compact
+```
+
+### INSERT and UPDATE
+
+```text
+INSERT: 1,000,000 rows
+Trino query elapsed: 12.216 s       ~= 81.9k rows/s
+CLI shell wall: 14.289 s             ~= 70.0k rows/s
+SELECT count/min/max: 1,000,000 / 7000000001 / 7001000000
+
+UPDATE: 1,000,000 rows
+Trino query elapsed: 11.723 s       ~= 85.3k rows/s
+CLI shell wall: 13.592 s             ~= 73.6k rows/s
+primary_key_resolve_ms: 9,931.028
+UPDATE connector total_ms: 11,322.453
+rpc_count=1, rpc_ms=962.353
+```
+
+The INSERT metrics were `primary_put_wall_ms=6,125.029` and
+`main_flush_ms=909.446`. The UPDATE route was logged as exact MPP primary-key
+eligible, and all 1,000,000 keys resolved.
+
+### COMPACT and same-timestamp checkpoint rewrite
+
+Tag-aware COMPACT completed with the correct root-path layout:
+
+```text
+tag resolve: 1,000,000 rows, 62 RPCs, 12.205 s
+physical rewrite: 17.186 s
+publish: 8.634 s
+relocated rows: 1,000,000, relocation RPCs: 128
+```
+
+Post-COMPACT checks passed:
+
+```text
+total=1,000,000
+tag_1_type='R'=1,000,000
+tag_1_para min=max=9.0000
+tag_1_type='R' AND tag_1_para=9.0000 => 1,000,000
+boundary ids 7000000001 and 7001000000 => ('R', 9.0000)
+```
+
+The checkpoint evidence directly exercises the bug fixed by commits
+`8cb3e5d0` and `a82ad7fa`: before COMPACT, the latest body had
+`checkpointAppliedTs=4, rgs=305`; after COMPACT, the timestamp remained 4 but
+the body was republished with `rgs=306`. The visibility-generation change
+therefore prevents the stable-timestamp early return from losing the compact
+file.
+
+### Restart durability gate
+
+Retina was stopped and restarted with the Java 23 module opens. It loaded
+`recovery_cds20_4.bin` and reported `baselineFiles=1`; the normal recovery
+epoch handshake was then performed:
+
+```text
+STATE=RECOVERING
+STATE_AFTER=READY
+```
+
+After the restart and readiness transition, all of the following still
+passed: total row count 1,000,000; updated tag count 1,000,000; tag predicate
+count 1,000,000; and both boundary rows `(R, 9.0000)`. This candidate therefore
+passes the previously failed persistence gate. The earlier candidate5 failure
+remains recorded as a regression and was not overwritten.
+
+This fixes a correctness/durability blocker, not the throughput target.
+Candidate8 remains at roughly 70--82k rows/s for INSERT and 74--85k rows/s for
+UPDATE depending on shell-versus-Trino wall definition, so the lower
+hundreds-of-thousands target is still outstanding.
