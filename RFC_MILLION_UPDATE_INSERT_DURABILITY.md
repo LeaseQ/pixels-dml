@@ -2507,3 +2507,17 @@ not used as a durability claim.
 Final decision: **reject** both the synchronized and lock-free cross-CF
 single-WriteBatch variants. Keep the source tree and isolated runtime on the
 original per-vnode grouped implementation.
+
+## Fixed-source writer-count sweep below 32 (2026-11-22)
+
+The grouped p4 runtime was kept unchanged while the Trino session writer count
+was varied on the same explicit-primary-key 68-column source. The session used
+`task_scale_writers_enabled=false` and set `task_min_writer_count` to the test
+point. A 16-writer cold arm took 10.231 s; its warm arm took 3.797 s
+(approximately 263K rows/s). Two 24-writer arms took 3.956 s and 3.745 s,
+respectively (approximately 267K rows/s on the warm arm). These are both below
+the established 32-writer warm arm at 3.610 s (approximately 277K rows/s).
+
+All arms completed and the fixed target retained unique primary keys. Decision:
+keep 32 as the reproducible writer-count point for this fixture and reject
+further writer-count tuning as the immediate path to the million-row target.
