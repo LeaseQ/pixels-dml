@@ -33,6 +33,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.HashSet;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -131,6 +132,51 @@ public class RocksDBIndex extends CachingSinglePointIndex
                     + tableId + ", indexId=" + indexId, e);
         }
         return rowId;
+    }
+
+    @Override
+    protected List<Long> getUniqueRowIdsInternal(List<IndexProto.IndexKey> keys) throws SinglePointIndexException
+    {
+        if (!unique)
+        {
+            throw new SinglePointIndexException("getUniqueRowIds should only be called on unique index");
+        }
+        if (keys.isEmpty())
+        {
+            return ImmutableList.of();
+        }
+        ReadOptions readOptions = RocksDBThreadResources.getReadOptions();
+        readOptions.setPrefixSameAsStart(true)
+                .setTotalOrderSeek(false)
+                .setVerifyChecksums(false);
+        List<Long> rowIds = new ArrayList<>(keys.size());
+        try (RocksIterator iterator = rocksDB.newIterator(columnFamilyHandle, readOptions))
+        {
+            for (IndexProto.IndexKey key : keys)
+            {
+                ByteBuffer keyBuffer = toKeyBuffer(key);
+                long rowId = -1L;
+                iterator.seek(keyBuffer);
+                if (iterator.isValid())
+                {
+                    ByteBuffer keyFound = ByteBuffer.wrap(iterator.key());
+                    if (startsWith(keyFound, keyBuffer))
+                    {
+                        ByteBuffer valueBuffer = RocksDBThreadResources.getValueBuffer();
+                        iterator.value(valueBuffer);
+                        rowId = valueBuffer.getLong();
+                        rowId = rowId == TOMBSTONE_ROW_ID ? -1L : rowId;
+                    }
+                }
+                rowIds.add(rowId);
+            }
+        }
+        catch (Exception e)
+        {
+            throw new SinglePointIndexException("Error reading a batch from RocksDB CF for tableId="
+                    + tableId + ", indexId=" + indexId, e);
+        }
+        return rowIds;
     }
 
     @Override

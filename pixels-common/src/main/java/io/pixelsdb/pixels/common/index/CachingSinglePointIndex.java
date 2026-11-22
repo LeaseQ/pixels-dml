@@ -67,6 +67,41 @@ public abstract class CachingSinglePointIndex implements SinglePointIndex
     }
 
     @Override
+    public List<Long> getUniqueRowIds(List<IndexProto.IndexKey> keys) throws SinglePointIndexException
+    {
+        if (cache == null)
+        {
+            return getUniqueRowIdsInternal(keys);
+        }
+        List<Long> rowIds = new java.util.ArrayList<>(java.util.Collections.nCopies(keys.size(), -1L));
+        List<IndexProto.IndexKey> misses = new java.util.ArrayList<>();
+        List<Integer> missPositions = new java.util.ArrayList<>();
+        for (int i = 0; i < keys.size(); i++)
+        {
+            IndexProto.IndexKey key = keys.get(i);
+            final String cacheKey = LatestVersionCache.buildCacheKey(key);
+            final String cacheValue = cache.get(cacheKey);
+            if (cacheValue != null)
+            {
+                long[] entry = LatestVersionCache.parseCacheValue(cacheValue);
+                if (entry[0] <= key.getTimestamp())
+                {
+                    rowIds.set(i, entry[1]);
+                    continue;
+                }
+            }
+            misses.add(key);
+            missPositions.add(i);
+        }
+        List<Long> resolved = getUniqueRowIdsInternal(misses);
+        for (int i = 0; i < resolved.size(); i++)
+        {
+            rowIds.set(missPositions.get(i), resolved.get(i));
+        }
+        return rowIds;
+    }
+
+    @Override
     public final boolean putEntry(IndexProto.IndexKey key, long rowId) throws SinglePointIndexException
     {
         boolean success = putEntryInternal(key, rowId);
@@ -227,6 +262,16 @@ public abstract class CachingSinglePointIndex implements SinglePointIndex
     // These methods perform the actual index operations without caching
 
     protected abstract long getUniqueRowIdInternal(IndexProto.IndexKey key) throws SinglePointIndexException;
+
+    protected List<Long> getUniqueRowIdsInternal(List<IndexProto.IndexKey> keys) throws SinglePointIndexException
+    {
+        List<Long> rowIds = new java.util.ArrayList<>(keys.size());
+        for (IndexProto.IndexKey key : keys)
+        {
+            rowIds.add(getUniqueRowIdInternal(key));
+        }
+        return rowIds;
+    }
     protected abstract boolean putEntryInternal(IndexProto.IndexKey key, long rowId) throws SinglePointIndexException;
     protected abstract boolean putPrimaryEntriesInternal(List<IndexProto.PrimaryIndexEntry> entries) throws SinglePointIndexException;
     protected abstract boolean putSecondaryEntriesInternal(List<IndexProto.SecondaryIndexEntry> entries) throws SinglePointIndexException;

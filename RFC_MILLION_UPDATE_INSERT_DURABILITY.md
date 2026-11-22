@@ -2922,3 +2922,40 @@ measure that cost against the prior 501K--763K rows/s exact-route baseline.
 The accepted order is: dense correctness, sparse correctness, post-compaction
 correctness, then throughput optimization. Any optimization that bypasses
 existence filtering is rejected regardless of its rows/s result.
+
+## Batched primary-index existence lookup (2026-11-22, pending E2E throughput)
+
+The exact UPDATE correctness fix makes primary-index existence resolution an
+unavoidable part of the supported route. Code inspection found that the
+RocksDB implementation created a fresh `RocksIterator` for every generated
+primary key. This is particularly expensive for a dense 1M-row range: the
+lookup is already grouped into RPC batches, but the daemon still paid iterator
+construction and teardown once per key.
+
+The candidate adds an order-preserving batch lookup API with the old point
+lookup as the default fallback. `CachingSinglePointIndex` preserves the
+existing cache behavior, while `RocksDBIndex` reuses one configured read
+iterator for all keys in a vnode batch. It still performs the same version-aware
+`seek` and logical-prefix check for every key; it does not use `MultiGet`,
+which would be incorrect because an index key can have multiple timestamped
+versions and the lookup must select the newest visible version. The daemon
+groups the request by vnode, resolves each group through the batch API, and
+then emits entries in the original request order. Missing-key filtering and
+strict missing-key failure semantics are unchanged.
+
+The candidate compiled successfully on cds20: `pixels-common` regenerated the
+protobuf classes and installed successfully, and the direct `pixels-daemon`
+package completed successfully. The focused RocksDB regression passed:
+`testGetUniqueRowIdsBatchPreservesVersionAndMissingSemantics` (1 test, 0
+failures). The complete legacy `TestRocksDBIndex` class had one unrelated
+pre-existing failure in `testPutEntries` while the new batch test passed; that
+failure is retained as a test-environment result and is not attributed to this
+change.
+
+No end-to-end rows/s claim is made yet. The isolated runtime remains blocked by
+the missing published Retina recovery-checkpoint body described above, so this
+candidate must be measured against the dense UPDATE baseline after a safe
+runtime recovery. Acceptance requires: dense UPDATE correctness, sparse-key
+correctness, post-compaction correctness, and a reproducible reduction in
+`primary_key_resolve_ms` or total SQL wall time without changing the tagging
+contract.

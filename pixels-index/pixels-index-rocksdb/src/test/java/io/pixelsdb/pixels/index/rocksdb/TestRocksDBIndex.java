@@ -186,6 +186,24 @@ public class TestRocksDBIndex
     }
 
     @Test
+    public void testGetUniqueRowIdsBatchPreservesVersionAndMissingSemantics() throws SinglePointIndexException
+    {
+        byte[] key1 = "testGetUniqueRowIdsBatch-1".getBytes();
+        byte[] key2 = "testGetUniqueRowIdsBatch-2".getBytes();
+        long timestamp = 10_000L;
+        uniqueIndex.putEntry(indexKey(key1, timestamp - 1), 101L);
+        uniqueIndex.putEntry(indexKey(key1, timestamp), 102L);
+        uniqueIndex.putEntry(indexKey(key2, timestamp), 202L);
+
+        List<Long> rowIds = uniqueIndex.getUniqueRowIds(List.of(
+                indexKey(key1, timestamp),
+                indexKey(key2, timestamp + 1),
+                indexKey("testGetUniqueRowIdsBatch-missing".getBytes(), timestamp)));
+
+        assertEquals(List.of(102L, 202L, -1L), rowIds);
+    }
+
+    @Test
     public void testSeekFindsNextVersionWithSameLogicalPrefix() throws Exception
     {
         // Use Default Prefix Len = 4

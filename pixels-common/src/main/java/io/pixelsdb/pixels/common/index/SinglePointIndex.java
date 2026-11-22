@@ -108,6 +108,22 @@ public interface SinglePointIndex extends Closeable
     long getUniqueRowId(IndexProto.IndexKey key) throws SinglePointIndexException;
 
     /**
+     * Get row ids for a batch of keys from a unique index. The returned list
+     * has the same order and size as {@code keys}; a negative row id means
+     * that the corresponding key is absent. Implementations may use a shared
+     * read cursor, while the default preserves the point-lookup semantics.
+     */
+    default List<Long> getUniqueRowIds(List<IndexProto.IndexKey> keys) throws SinglePointIndexException
+    {
+        java.util.ArrayList<Long> rowIds = new java.util.ArrayList<>(keys.size());
+        for (IndexProto.IndexKey key : keys)
+        {
+            rowIds.add(getUniqueRowId(key));
+        }
+        return rowIds;
+    }
+
+    /**
      * Get the row id(s) of an index key. <b>This method can be called on unique or non-unique index.</b>
      * @param key the index key
      * @return the row ids, or empty list if no legal row ids are found
