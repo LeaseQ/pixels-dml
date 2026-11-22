@@ -2686,6 +2686,43 @@ current INSERT bottleneck. The next useful experiment should target grouped
 request decode/object allocation or service-side request scheduling with a
 measurement that can isolate those costs.
 
+### Compact vnode sidecar follow-up (2026-11-22, rejected)
+
+The previous sidecar probe used `repeated uint32`, which added a protobuf
+element and parsing overhead for every row. This follow-up kept the same
+grouped request but added an opt-in `bytes virtualNodeIds` field: one unsigned
+byte per entry, valid for the current 128-bucket layout. The daemon used the
+sidecar when its length and bucket range were valid, otherwise falling back to
+the original SHA-256 bucket calculation. The field was backward-compatible and
+the property was opt-in (`pixels.insert.index.grouped.primary.write.compact.vnode`).
+
+The first deployment exposed and fixed a packaging-only issue: the connector
+jar had been updated without the matching `pixels-common` dependency, causing
+`NoSuchMethodError` before any rows were written. That run is excluded. After
+deploying the complete connector ZIP, the fixed-source E2E produced:
+
+```text
+compact sidecar: cold 9.050 s; warm 4.535 s, 3.731 s, 3.346 s
+control (original connector): cold 7.217 s; warm 3.980 s, 3.520 s, 3.418 s
+```
+
+Both tables passed the exact primary-key check after four 1M-row arms:
+`4,000,000/100,001/1,100,000/1,000,000`. The daemon grouped metrics covered
+the same 4M rows and 128 requests per arm: the compact-sidecar table summed
+about 90.5 s of `primary_ms`, versus about 69.8 s for the immediate control.
+These service sums overlap concurrent requests and are diagnostic rather than
+SQL wall time, but they do not show a server-side win. The SQL results likewise
+show only run-to-run overlap, not a stable improvement over the original
+grouped path.
+
+The compact sidecar and daemon overlay were removed from the isolated runtime;
+the original connector, daemon jar, and grouped-p4 properties are active again.
+Decision: **reject** the compact vnode sidecar as an INSERT throughput
+optimization. The remaining target is not the SHA-256 bucket lookup alone;
+future work should reduce grouped protobuf entry/object overhead or improve
+the per-vnode RocksDB write path, with a same-process control captured in the
+same run.
+
 ## Fixed-source writer-count sweep below 32 (2026-11-22)
 
 The grouped p4 runtime was kept unchanged while the Trino session writer count
