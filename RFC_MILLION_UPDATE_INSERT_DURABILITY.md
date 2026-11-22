@@ -1778,6 +1778,24 @@ yet as a global deployment default; the result does not claim the million-row
 target, and source-free/empty-table and self-source numbers must not be mixed
 with it.
 
+## Fixed-source 64-writer negative control (2026-11-23)
+
+The same materialized one-million-row source and tagged primary-key target were
+used for a 64-writer arm after the fixed-source 32-writer baseline. The arm
+inserted a fresh ID range and passed the exact destination check:
+
+```text
+64 writers: Trino timeline 3.757 s, approximately 266K rows/s
+final check for this arm: 18000000/1/18000000/18000000
+```
+
+This is slower than the two fixed-source 32-writer arms at 3.257 s and 3.375 s
+(approximately 296--307K rows/s). The 64-writer timeline also spent about
+2.026 s finishing versus 1.548--1.604 s for the 32-writer arms, while primary
+index request tails increased as more files contended for the same grouped
+service. The result rejects a higher Trino writer count as the next route to
+the million-row target; 32 writers remains the fixed-source benchmark point.
+
 ## Selected-read null scratch probe (2026-11-23)
 
 The stable INSERT JFR had `PixelsRecordReaderImpl.readBatch` and string-column
