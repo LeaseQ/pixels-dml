@@ -2483,3 +2483,27 @@ state. After rollback, the durable target check was exactly
 This is a valid rollback/integrity check, not evidence that the candidate
 lost committed data. Decision: **reject** the single-WriteBatch design and
 keep the existing per-vnode grouped writes.
+
+### Lock-free follow-up to isolate the monitor effect
+
+The first candidate held the `RocksDBFactory` class monitor across the native
+write. Since that could itself serialize the 32 grouped RPCs, a follow-up
+removed the monitor while keeping the same cross-CF batch shape and reran the
+fixed-source arm. It produced 32 batch markers and an exact pre-restart check:
+
+```text
+SQL wall = 12.513 s
+target = 16,000,000/20,100,001/43,100,000/16,000,000
+```
+
+The result is still far below the normal per-vnode grouped p4 warm result of
+3.610 s. Its per-request `primary_ms` rose through roughly 5.9--8.0 s, so the
+large cross-CF WriteBatch itself remains the limiting shape even without the
+Java monitor. The follow-up was rolled back as well. Recovery from the
+previous checkpoint then returned the original target exactly to
+`15,000,000/20,100,001/42,100,000/15,000,000`; the uncheckpointed 16M arm is
+not used as a durability claim.
+
+Final decision: **reject** both the synchronized and lock-free cross-CF
+single-WriteBatch variants. Keep the source tree and isolated runtime on the
+original per-vnode grouped implementation.
