@@ -3596,3 +3596,38 @@ and publication. It remains a throughput bottleneck, so this result is a
 scale/correctness milestone, not evidence that the million-row target has been
 reached for UPDATE itself. The default and the user-facing behavior remain
 unchanged.
+
+### Correct-root p8 sanity check (2026-11-23)
+
+The earlier p8 rejection came from a bad-layout/stability experiment. To
+separate that fixture problem from the parallel resolver itself, candidate23
+used a fresh standard table root, a 2M-row table-to-table INSERT, and one exact
+1M-row UPDATE to `U48/48.0000`. COMPACT was run with
+`-Dpixels.compact.primary-resolve-parallelism=8`:
+
+```text
+tag snapshot:       1,000,000 rows, 62 RPCs,   2.214 s
+physical rewrite:   2,000,000 rows, one output,  8.082 s
+primary resolve:    2,000,000 rows, 123 RPCs,  24.283 s (summed RPC time)
+relocation:         2,000,000 rows, 128 RPCs
+publish:            one output, 17.336 s
+compact CLI:        25 s
+```
+
+The final readback passed:
+
+```text
+total=2000000
+distinct_id=2000000
+tag_1_type='U48'=1000000
+tag_1_para min/max=9.0000/48.0000
+updated-range U48=1000000
+```
+
+This is a valid correctness result for p8 on the standard root layout and
+shows that the old bad-layout p8 failure must not be generalized to all p8
+runs. It is not yet a controlled p4-vs-p8 benchmark: candidate23 was produced
+by a single 2M-row table-to-table INSERT and therefore had a different ordered
+file layout from the earlier p4 fixtures. The p8 result is retained as an
+opt-in candidate, but no default is changed until a matched-layout repeat and
+an 8M-scale run confirm a stable wall-clock benefit.
