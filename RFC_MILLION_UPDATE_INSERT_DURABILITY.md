@@ -1860,3 +1860,49 @@ therefore **rejected** as a throughput optimization; the isolated configuration
 is restored to 4. The result reinforces that the next work should instrument
 Trino finishing and grouped-index queueing together, rather than independently
 raising executor parallelism.
+
+## All-null page-column bulk append probe (2026-11-22)
+
+The fixed 68-column source contains 58 columns that are NULL for all 1,000,000
+source rows (the unpopulated tag pairs). The connector candidate in
+`pixels-trino-dml` commit `f7d72cd` used the Trino `ValueBlock` null bitmap to
+recognize a selected page range that was entirely NULL, then filled the target
+Pixels vector's null bits with `Arrays.fill` and advanced its write index once.
+Mixed-null, null-free, dictionary, RLE, and value/tag conversion paths were left
+unchanged. The candidate was compiled with the isolated JDK 23 build and loaded
+only by the isolated Trino instance. It was reverted by `207181e` after the
+measurement.
+
+The E2E test used the materialized
+`bench68_v2.fixed_source_fresh_20261122`, the tagged indexed target
+`bench68_v2.page_dispatch_target_clean64_e2e2_20261123`, 32 Trino writers,
+`task_scale_writers_enabled=false`, and a fixed source ID offset per arm. The
+candidate's fair warm arms were:
+
+```text
+all-null bulk candidate: 4.102 s, approximately 244K rows/s
+all-null bulk candidate: 4.041 s, approximately 247K rows/s
+```
+
+After restoring the original connector jar, the comparable controls were:
+
+```text
+original after restart: 8.208 s, approximately 122K rows/s
+original warm control:  3.866 s, approximately 259K rows/s
+original warm control:  3.267 s, approximately 306K rows/s
+```
+
+The candidate is therefore **rejected**: its best fair arm was about 23.7%
+slower than the final original warm control, and it did not improve the prior
+3.257--3.375 s fixed-source baseline. The final exact table check was
+`32000000/1/34000000/32000000`; the two unused ID ranges were caused by failed
+HTTP session-header attempts and were not counted as successful arms. There
+were no duplicate IDs. Tag preservation also held (`tag_1_type='UPD1M'`,
+`tag_1_para=3.1400`, and the intentionally NULL `tag_2_*` columns remained
+unchanged). The isolated runtime is back on the original connector jar.
+
+Operational note: when restarting the isolated launcher from a non-interactive
+SSH session, both JDK 23 and `PIXELS_HOME=/home/pixels/validation-million-update/runtime/pixels`
+must be exported explicitly. Without them, the launcher first selected Java 11
+and then the connector fell back to jar-bundled configuration; neither state is
+valid benchmark evidence.
