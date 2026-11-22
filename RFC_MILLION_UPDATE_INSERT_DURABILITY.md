@@ -3443,3 +3443,38 @@ snapshot phase, but the larger remaining bottleneck is the primary resolution
 performed while rewriting source rows. Further compaction work should target
 that 124-RPC path; writer-count tuning is not the next lever. The code was
 compiled on cds20 and was used only by the isolated CLI jar.
+
+### Physical-rewrite asynchronous resolution A/B (2026-11-23; rejected)
+
+An additional candidate attempted to overlap source-row primary-key resolution
+with the physical rewrite. The implementation submitted bounded 16,384-key
+resolution batches to an opt-in executor and applied results in input order;
+the default serial path was unchanged. Two fresh 2M-row tables were prepared
+from the same source fixture, each with one 1M-row tagged update:
+
+```text
+fixture       resolver       physical rewrite wall   publish     result
+candidate12   serial         107.7 s                  18.5 s       correct
+candidate13   parallel=8     156.0 s                  17.5 s       correct
+```
+
+Both tables retained 2,000,000 rows and exactly 1,000,000 updated rows. The
+serial candidate resolved 2,000,000 rows in 145 RPCs (25.924 s summed RPC
+time); the parallel candidate used 142 RPCs (25.783 s summed RPC time). The
+summed RPC metric is not a wall-clock metric, but the end-to-end rewrite and
+CLI wall clocks show no benefit and a substantial regression for `parallel=8`.
+
+During follow-up attempts the isolated Trino connector also reported repeated
+gRPC `GOAWAY`/connection-closed errors while metadata and transaction calls
+were being made. The isolated Trino process had to be restarted with the
+runtime's explicit JDK and `PIXELS_HOME` configuration before it could be
+probed again; subsequent INSERT attempts were still not reliable enough for a
+new performance arm. This is recorded as a stability warning, not as proof of
+a direct causal relationship to the candidate.
+
+The asynchronous physical-rewrite candidate is therefore rejected and was not
+committed. The next compaction investigation should first isolate index-service
+contention and connection health, then test lower-concurrency or a different
+batching architecture only after the runtime is stable. The accepted changes
+remain the opt-in snapshot parallelism and the opt-in UPDATE resolver
+parallelism.
