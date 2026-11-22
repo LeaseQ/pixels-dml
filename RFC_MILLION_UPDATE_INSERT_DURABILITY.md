@@ -2875,3 +2875,50 @@ zero during these fresh INSERTs. The runtime is now restored to
 `max.background.flushes=2`, LZ4, WAL enabled, with the original daemon and
 connector processes active. This makes the next investigation a grouped
 native-write scheduling/lock profile, not another background-flush knob.
+
+## Exact UPDATE sparse-key correctness fix (2026-11-22)
+
+The first sparse-key E2E exposed a correctness defect in the original exact
+route. For a finite predicate such as `id BETWEEN 1 AND 3`, the encoder
+expanded the whole inclusive range and appended tag entries without checking
+whether every generated primary key existed. With only ids 1 and 3 present,
+the statement reported three updated rows; after inserting id 2 and running
+compaction, id 2 incorrectly inherited the tag. This is a correctness failure,
+not an acceptable approximation for the million-row benchmark.
+
+The fix adds an optional `ignoreMissing` field to
+`ResolvePrimaryEntriesRequest`. The strict existing API remains unchanged for
+compaction and other callers. The exact UPDATE path now resolves generated
+primary keys in batches of 65,536, keeps only returned existing keys, appends
+tags for that filtered set, and reports the filtered count. A separate
+`primary_key_resolve_ms` metric makes the new cost visible. The daemon-side
+resolver skips absent primary-index entries only when this explicit flag is
+set; missing primary locations still fail the request.
+
+Validation on the isolated cds20 runtime used a table with primary index
+`id`, inserted ids 1 and 3, and executed the range UPDATE. The fixed runtime
+produced the following evidence:
+
+```text
+UPDATE: 2 rows
+[PIXELS_PRIMARY_RESOLVE_METRIC] tableId=2712, indexId=2663,
+  keys=3, resolved=2, serviceMs=5.603451
+[PIXELS_TAG_INDEX_SHARED_METRIC] ... logicalUpdates=2, primaryKeys=2
+```
+
+The subsequent insert of id 2 retained its original `N/2.0000` values on
+ordinary reads; no tag was appended for the missing key. The earlier unfixed
+run is retained as the regression witness showing the `3 rows` result and the
+post-compaction ghost tag. A full post-fix compaction rerun was not promoted
+to an acceptance result because the exploratory runtime later lost its
+published recovery-checkpoint body and the fail-closed Retina recovery guard
+correctly refused a fresh restart. No checkpoint or metadata was deleted or
+fabricated to force that test.
+
+This fix is therefore an UPDATE correctness gate, not yet a performance win.
+For a dense 1M-row range it adds primary-index existence resolution (expected
+to be measurable in `primary_key_resolve_ms`); the next performance run must
+measure that cost against the prior 501K--763K rows/s exact-route baseline.
+The accepted order is: dense correctness, sparse correctness, post-compaction
+correctness, then throughput optimization. Any optimization that bypasses
+existence filtering is rejected regardless of its rows/s result.

@@ -130,6 +130,21 @@ public interface IndexService
     }
 
     /**
+     * Resolve primary keys, optionally omitting keys absent from the primary
+     * index. The default preserves the strict behavior of older implementations.
+     */
+    default List<IndexProto.ResolvePrimaryEntry> resolvePrimaryEntries(long tableId, long indexId,
+            List<IndexProto.IndexKey> keys, boolean ignoreMissing) throws IndexException
+    {
+        if (ignoreMissing)
+        {
+            throw new UnsupportedOperationException(
+                    "optional-missing primary resolution is not supported by this IndexService scheme");
+        }
+        return resolvePrimaryEntries(tableId, indexId, keys);
+    }
+
+    /**
      * Put an index entry into the primary index.
      * @param entry the index entry
      * @return true on success

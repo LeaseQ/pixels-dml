@@ -1273,6 +1273,10 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                 long rowId = singlePointIndex.getUniqueRowId(key);
                 if (rowId < 0)
                 {
+                    if (request.getIgnoreMissing())
+                    {
+                        continue;
+                    }
                     builder.setErrorCode(ErrorCode.INDEX_ENTRY_NOT_FOUND);
                     failed = true;
                     break;

@@ -413,6 +413,10 @@ message ResolvePrimaryEntriesRequest {
   uint64 tableId = 1;
   uint64 indexId = 2;
   repeated IndexKey indexKeys = 3;
+  // When true, omit keys absent from the primary index instead of failing the
+  // complete batch. This is used by exact UPDATE to avoid tagging gaps in a
+  // finite primary-key range.
+  bool ignoreMissing = 4;
 }
 
 message ResolvePrimaryEntry {

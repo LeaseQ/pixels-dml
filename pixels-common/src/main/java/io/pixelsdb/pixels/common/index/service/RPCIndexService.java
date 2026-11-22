@@ -346,11 +346,19 @@ public class RPCIndexService implements IndexService
     public List<IndexProto.ResolvePrimaryEntry> resolvePrimaryEntries(long tableId, long indexId,
             List<IndexProto.IndexKey> keys) throws IndexException
     {
+        return resolvePrimaryEntries(tableId, indexId, keys, false);
+    }
+
+    @Override
+    public List<IndexProto.ResolvePrimaryEntry> resolvePrimaryEntries(long tableId, long indexId,
+            List<IndexProto.IndexKey> keys, boolean ignoreMissing) throws IndexException
+    {
         IndexProto.ResolvePrimaryEntriesResponse response = stub.resolvePrimaryEntries(
                 IndexProto.ResolvePrimaryEntriesRequest.newBuilder()
                         .setTableId(tableId)
                         .setIndexId(indexId)
                         .addAllIndexKeys(keys)
+                        .setIgnoreMissing(ignoreMissing)
                         .build());
         checkTagIndexResponse(response.getErrorCode(), "resolve primary entries");
         return response.getEntriesList();
