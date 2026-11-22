@@ -72,6 +72,9 @@ public class CompactExecutor implements CommandExecutor
 {
     /** Keep relocation RPCs comfortably below the configured gRPC message limit. */
     static final int MAX_PRIMARY_RELOCATION_ENTRIES_PER_RPC = 16_384;
+    /** Experimental opt-in parallelism for independent primary-index buckets. */
+    static final int PRIMARY_RELOCATE_PARALLELISM = Math.max(1, Integer.getInteger(
+            "pixels.compact.primary-relocate-parallelism", 1));
     private final RetinaService retinaService = RetinaService.Instance();
 
     @Override
@@ -630,7 +633,8 @@ public class CompactExecutor implements CommandExecutor
                 long fileId = fileIds.get(result);
                 relocationRpcCount += updatePrimaryIndexLocations(
                         indexService, tableId, indexId, fileId,
-                        result.relocatedLocations(), result.primaryKeysByRowId());
+                        result.relocatedLocations(), result.primaryKeysByRowId(),
+                        PRIMARY_RELOCATE_PARALLELISM);
                 relocatedRowCount += result.relocatedLocations().size();
             }
             System.out.println("[PIXELS_COMPACTION_RESOLVE_METRIC] rows=" + primaryResolveRowCount +
@@ -668,6 +672,20 @@ public class CompactExecutor implements CommandExecutor
             Map<Long, IndexProto.IndexKey> primaryKeysByRowId)
             throws IndexException, MetadataException
     {
+        return updatePrimaryIndexLocations(indexService, tableId, indexId, fileId,
+                relocatedLocations, primaryKeysByRowId, 1);
+    }
+
+    static int updatePrimaryIndexLocations(
+            IndexService indexService,
+            long tableId,
+            long indexId,
+            long fileId,
+            Map<Long, IndexProto.RowLocation> relocatedLocations,
+            Map<Long, IndexProto.IndexKey> primaryKeysByRowId,
+            int parallelism)
+            throws IndexException, MetadataException
+    {
         requireNonNull(indexService, "indexService is null");
         requireNonNull(relocatedLocations, "relocatedLocations is null");
         requireNonNull(primaryKeysByRowId, "primaryKeysByRowId is null");
@@ -695,21 +713,84 @@ public class CompactExecutor implements CommandExecutor
             entriesByBucket.computeIfAbsent(bucketId, ignored -> new ArrayList<>()).add(entry);
         }
 
-        int rpcCount = 0;
-        for (Map.Entry<Integer, List<IndexProto.PrimaryIndexEntry>> bucket : entriesByBucket.entrySet())
+        if (parallelism <= 1 || entriesByBucket.size() <= 1)
         {
-            List<IndexProto.PrimaryIndexEntry> entries = bucket.getValue();
-            for (int offset = 0; offset < entries.size(); offset += MAX_PRIMARY_RELOCATION_ENTRIES_PER_RPC)
+            int rpcCount = 0;
+            for (List<IndexProto.PrimaryIndexEntry> entries : entriesByBucket.values())
             {
-                int end = Math.min(entries.size(), offset + MAX_PRIMARY_RELOCATION_ENTRIES_PER_RPC);
-                List<IndexProto.PrimaryIndexEntry> batch = entries.subList(offset, end);
-                if (!indexService.putPrimaryIndexEntries(tableId, indexId, batch,
-                        IndexOption.builder().vNodeId(bucket.getKey()).build()))
-                {
-                    throw new MetadataException("failed to update IndexServer for compacted primary rows");
-                }
-                rpcCount++;
+                rpcCount += updatePrimaryIndexBucket(indexService, tableId, indexId, fileId,
+                        entries, io.pixelsdb.pixels.common.utils.IndexUtils.getBucketIdFromByteBuffer(
+                                entries.get(0).getIndexKey().getKey()));
             }
+            return rpcCount;
+        }
+
+        int workerCount = Math.min(parallelism, entriesByBucket.size());
+        ExecutorService executor = Executors.newFixedThreadPool(workerCount);
+        List<Future<Integer>> futures = new ArrayList<>(entriesByBucket.size());
+        try
+        {
+            for (Map.Entry<Integer, List<IndexProto.PrimaryIndexEntry>> bucket : entriesByBucket.entrySet())
+            {
+                int bucketId = bucket.getKey();
+                List<IndexProto.PrimaryIndexEntry> entries = List.copyOf(bucket.getValue());
+                futures.add(executor.submit(() -> updatePrimaryIndexBucket(
+                        indexService, tableId, indexId, fileId, entries, bucketId)));
+            }
+            int rpcCount = 0;
+            for (Future<Integer> future : futures)
+            {
+                try
+                {
+                    rpcCount += future.get();
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    throw new MetadataException("interrupted while relocating compacted primary rows", e);
+                }
+                catch (ExecutionException e)
+                {
+                    Throwable cause = e.getCause();
+                    if (cause instanceof IndexException)
+                    {
+                        throw (IndexException) cause;
+                    }
+                    if (cause instanceof MetadataException)
+                    {
+                        throw (MetadataException) cause;
+                    }
+                    throw new MetadataException("failed to relocate compacted primary rows", cause);
+                }
+            }
+            return rpcCount;
+        }
+        finally
+        {
+            executor.shutdownNow();
+        }
+    }
+
+    private static int updatePrimaryIndexBucket(
+            IndexService indexService,
+            long tableId,
+            long indexId,
+            long fileId,
+            List<IndexProto.PrimaryIndexEntry> entries,
+            int bucketId)
+            throws IndexException, MetadataException
+    {
+        int rpcCount = 0;
+        for (int offset = 0; offset < entries.size(); offset += MAX_PRIMARY_RELOCATION_ENTRIES_PER_RPC)
+        {
+            int end = Math.min(entries.size(), offset + MAX_PRIMARY_RELOCATION_ENTRIES_PER_RPC);
+            List<IndexProto.PrimaryIndexEntry> batch = entries.subList(offset, end);
+            if (!indexService.putPrimaryIndexEntries(tableId, indexId, batch,
+                    IndexOption.builder().vNodeId(bucketId).build()))
+            {
+                throw new MetadataException("failed to update IndexServer for compacted primary rows");
+            }
+            rpcCount++;
         }
         return rpcCount;
     }

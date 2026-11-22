@@ -3646,3 +3646,37 @@ Candidate24 also passed the final readback with `total=2000000`,
 updated range. The repeat makes p8 a stable opt-in result for this fixture,
 but it still does not justify changing the default or claiming a general
 8M-scale improvement.
+
+### Opt-in parallel primary-index relocation (2026-11-23)
+
+The 8M p4 profile showed that publish/relocation, rather than physical
+rewriting, had become the dominant wall-clock phase. `CompactExecutor` was
+issuing relocation RPCs bucket by bucket in one serial loop. A new opt-in
+property, `pixels.compact.primary-relocate-parallelism`, now runs independent
+vnode buckets concurrently while preserving the existing RPC batch size and
+the order of batches within each bucket. Its default is `1`, so existing
+behavior is unchanged unless explicitly enabled.
+
+Two matched 2M standard-root runs used p8 source-row resolution and p8 bucket
+relocation:
+
+```text
+arm / fixture                  tag snapshot   primary resolve   rewrite   publish   CLI
+p8/p8 / candidate25           2.226 s        24.680 s           8.696 s   6.749 s  15 s
+p8/p8 / candidate26           2.082 s        24.529 s           8.538 s   6.711 s  15 s
+```
+
+The control candidate24 used the same source-table shape and p8 source-row
+resolution with relocation parallelism left at its default of one:
+
+```text
+p8/p1 / candidate24           2.099 s        25.249 s           8.022 s  17.779 s  25 s
+```
+
+Both p8/p8 runs passed final readback with 2,000,000 total rows, 2,000,000
+distinct primary keys, and exactly 1,000,000 updated rows in the requested
+range (`U50` and `U51`, respectively). The relocation RPC count remained 128;
+the improvement comes from overlapping independent bucket RPCs, not from
+weakening correctness or reducing the number of index updates. The result is
+therefore retained as a stable opt-in optimization, but the default remains
+serial pending an 8M-scale run and index-service saturation/failure testing.
