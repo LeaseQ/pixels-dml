@@ -2651,6 +2651,41 @@ protocol as well; the next code experiment must reduce the nested protobuf
 entry representation or the number of service-side request objects, not only
 the bucket lookup.
 
+### Client-side grouped bookkeeping follow-up (2026-11-22, rejected)
+
+The existing grouped writer already keeps `pendingEntriesByBucket`, so the
+client can recover the successful keys for abort cleanup from the bucket
+sections that were sent. The candidate changed only this bookkeeping path: it
+used the known chunk/bucket intersections instead of hashing every completed
+entry again with `bucketIdResolver`. No daemon or protobuf change was made,
+and the implementation accounted for a bucket split by the grouped
+`max.entries` chunk boundary.
+
+The candidate was compiled and deployed only to the isolated Trino runtime.
+Using the same materialized 1M-row, 68-column source, explicit primary key,
+fixed 32-writer session, and normal grouped-p4 properties, the target passed
+the two-arm correctness check exactly:
+`2,000,000/100,001/1,100,000/1,000,000` for count/min/max/distinct. The
+end-to-end SQL wall times were:
+
+```text
+candidate cold after restart: 9.490 s (~105K rows/s)
+candidate warm 1:              3.998 s (~250K rows/s)
+candidate warm 2:              3.975 s (~251K rows/s)
+candidate warm 3:              3.106 s (~322K rows/s)
+normal grouped-p4 warm:        2.816--3.610 s (~277--355K rows/s)
+```
+
+Even after the post-restart effect was removed, the candidate did not beat the
+normal path consistently and had no compensating protocol or server-side
+benefit. It was rolled back from the isolated Trino plugin backup; the daemon
+and Retina were not changed. Decision: **reject** this bookkeeping-only
+optimization as an end-to-end throughput improvement. The abort bookkeeping
+still merits a focused unit test if this path is revisited, but it is not the
+current INSERT bottleneck. The next useful experiment should target grouped
+request decode/object allocation or service-side request scheduling with a
+measurement that can isolate those costs.
+
 ## Fixed-source writer-count sweep below 32 (2026-11-22)
 
 The grouped p4 runtime was kept unchanged while the Trino session writer count
