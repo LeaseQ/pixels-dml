@@ -2447,3 +2447,39 @@ index contribution is small relative to the grouped primary write, and that
 p2 increases primary-write queueing even though it reduces client fan-out.
 The p8 service average is not enough to win end-to-end because source/task
 and publication scheduling also contribute to SQL wall time.
+
+## Cross-CF single-WriteBatch probe (2026-11-22, rejected)
+
+The grouped service path already combines all vnode entries into one RPC, but
+then calls `RocksDB.write()` once per vnode column family from the grouped
+executor. Because the isolated deployment has `index.cache.enabled=false`, an
+opt-in candidate was compiled to put all 128 vnode CF batches from one grouped
+request into a single cross-CF RocksDB `WriteBatch`. The default path and the
+cache-enabled path were left unchanged.
+
+The candidate compiled with targeted `javac` on cds20 and was deployed only by
+putting the two candidate daemon classes first on the isolated Retina
+classpath. Recovery of `recovery_cds20_360092.bin` completed, and a 15M-row
+count read passed before the INSERT. The E2E arm produced 32
+`PIXELS_PRIMARY_INDEX_GROUPED_BATCH` markers, confirming that the candidate
+path was actually used. It then performed very poorly:
+
+```text
+single cross-CF WriteBatch, 1M rows: SQL wall 40.330 s
+candidate primary_ms: approximately 32--35 s
+normal grouped p4 warm control: SQL wall 3.610 s
+```
+
+The single native write serialized work that the normal per-CF writes overlap;
+it is rejected. The candidate classes were removed from the local and remote
+validation source copies, and the isolated Retina was restored to the original
+low-watermark classpath.
+
+The candidate arm was not used as a durability result: Retina was restarted
+after the arm without first publishing a new checkpoint, so recovery correctly
+replayed the last checkpoint and did not expose the uncheckpointed post-arm
+state. After rollback, the durable target check was exactly
+`15,000,000/20,100,001/42,100,000/15,000,000` for count/min/max/distinct.
+This is a valid rollback/integrity check, not evidence that the candidate
+lost committed data. Decision: **reject** the single-WriteBatch design and
+keep the existing per-vnode grouped writes.
