@@ -190,7 +190,7 @@ public class LongTimeColumnReader extends ColumnReader
         boolean endOfPixel;
         if (decoding || !nullsPadding)
         {
-            isNull = new boolean[size];
+            isNull = getSelectedNullScratch(size);
         }
         for (int i = vectorIndex; numLeft > 0;)
         {

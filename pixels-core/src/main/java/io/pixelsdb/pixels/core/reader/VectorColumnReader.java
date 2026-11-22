@@ -197,7 +197,7 @@ public class VectorColumnReader extends ColumnReader
 
         // read without copying the de-compacted content and isNull
         int numLeft = size, numToRead, bytesToDeCompact, vectorWriteIndex = vectorIndex;
-        boolean[] isNull = new boolean[size];
+        boolean[] isNull = getSelectedNullScratch(size);
         for (int i = vectorIndex; numLeft > 0; )
         {
             if (elementIndex / pixelStride < (elementIndex + numLeft) / pixelStride)

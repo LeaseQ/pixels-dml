@@ -200,7 +200,7 @@ public class DoubleColumnReader extends ColumnReader
         boolean endOfPixel;
         if (!nullsPadding)
         {
-            isNull = new boolean[size];
+            isNull = getSelectedNullScratch(size);
         }
         for (int i = vectorIndex; numLeft > 0; )
         {

@@ -436,7 +436,7 @@ public class StringColumnReader extends ColumnReader
                 // we get bytes here to reduce memory copies and avoid creating many small byte arrays
                 byte[] buffer = dictContentBuf.array();
                 int numLeft = size, numToRead, bytesToDeCompact, vectorWriteIndex = vectorIndex;
-                boolean[] isNull = new boolean[size];
+                boolean[] isNull = getSelectedNullScratch(size);
                 boolean endOfPixel;
                 for (int i = vectorIndex; numLeft > 0;)
                 {
@@ -530,7 +530,7 @@ public class StringColumnReader extends ColumnReader
                         "dictionaries in the column vector and the input buffer are inconsistent");
 
                 int numLeft = size, numToRead, bytesToDeCompact, vectorWriteIndex = vectorIndex;
-                boolean[] isNull = new boolean[size];
+                boolean[] isNull = getSelectedNullScratch(size);
                 boolean endOfPixel;
                 for (int i = vectorIndex; numLeft > 0;)
                 {
@@ -624,7 +624,7 @@ public class StringColumnReader extends ColumnReader
             // we get bytes here to reduce memory copies and avoid creating many small byte arrays.
             byte[] buffer = contentBuf.array();
             int numLeft = size, numToRead, bytesToDeCompact, vectorWriteIndex = vectorIndex;
-            boolean[] isNull = new boolean[size];
+            boolean[] isNull = getSelectedNullScratch(size);
             boolean endOfPixel;
             for (int i = vectorIndex; numLeft > 0;)
             {
