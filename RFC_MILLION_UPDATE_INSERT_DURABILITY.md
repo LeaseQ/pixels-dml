@@ -1704,3 +1704,44 @@ backup; SHA-256 of the restored jar and backup is identical, and the final
 post-rollback check remained `5000000/1/5000000/5000000`. The next connector
 experiment should measure Pixels writer encoding and task finishing separately
 before changing this hot loop again.
+
+## Writer diagnostic stack reuse probe (2026-11-23)
+
+`pixels-dml` commit `39fbdd78` changed `PixelsWriterImpl.writeColumnVectors` to
+capture the caller stack once per row batch instead of once per column. The
+stack is only formatted on the existing exceptional `ClassCastException` path,
+so the change preserves diagnostics while removing repeated stack allocation in
+the normal path. The candidate was rebuilt on the isolated JDK 11 Maven build,
+deployed only to the isolated Trino plugin, and the original core jar was saved
+outside the plugin directory for rollback.
+
+The probe used the same explicit 68-column tagged table, 32 fixed Trino writers,
+writer scaling disabled, and one-million-row table-to-table appends. The first
+two candidate arms extended the clean target from 5M to 7M rows:
+
+```text
+candidate arm 1: 7.722 s, approximately 129.5K rows/s
+candidate arm 2: 6.875 s, approximately 145.5K rows/s
+candidate final exact check: 7000000/1/7000000/7000000
+```
+
+The connector was then restored to the original core jar and restarted in the
+same isolated runtime. A post-rollback pair extended the table from 7M to 9M
+rows:
+
+```text
+baseline arm 1 after restart: 11.331 s
+baseline warm arm 2:          6.642 s, approximately 150.6K rows/s
+baseline final exact check:    9000000/1/9000000/9000000
+```
+
+The first post-deployment arm is affected by restart/cache state, but the warm
+comparison still shows the candidate about 3.5% slower than the paired baseline
+arm; the candidate's first arm was also materially slower. Index metrics showed
+normal successful writes and the RocksDB logs reported zero write stalls and
+zero pending compaction bytes. There was no correctness regression, but there
+was no repeatable throughput gain. The candidate is therefore **rejected** and
+the isolated runtime remains on the original core jar. The code commit remains
+in history as a measured negative result; future writer work should target
+encoding/batch materialization with a profiler-backed hypothesis rather than
+this diagnostic-only allocation.
