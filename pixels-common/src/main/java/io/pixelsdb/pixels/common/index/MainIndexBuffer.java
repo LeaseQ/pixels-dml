@@ -201,14 +201,11 @@ public class MainIndexBuffer implements Closeable
          * Issue #1115: do post-sorting, build a row id array and sorted it in ascending order.
          * This consumes less memory and is much faster than building a tree map from fileBuffer.
          */
-        long[] rowIds = new long[fileBuffer.size()];
-        int rowIdIndex = 0;
-        for (Long rowId : fileBuffer.keySet())
-        {
-            rowIds[rowIdIndex++] = rowId;
-        }
-        Arrays.sort(rowIds);
-        for (long rowId : rowIds)
+        Long[] rowIds = new Long[fileBuffer.size()];
+        rowIds = fileBuffer.keySet().toArray(rowIds);
+        List<Long> sortedRowIds = Arrays.asList(rowIds);
+        Collections.sort(sortedRowIds);
+        for (long rowId : sortedRowIds)
         {
             IndexProto.RowLocation location = fileBuffer.get(rowId);
             checkArgument(fileId == location.getFileId());
