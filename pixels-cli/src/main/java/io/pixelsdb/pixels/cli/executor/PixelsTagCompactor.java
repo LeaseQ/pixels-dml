@@ -55,6 +55,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static java.util.Objects.requireNonNull;
 
@@ -64,6 +68,9 @@ final class PixelsTagCompactor
     private static final int READ_BATCH_SIZE = 1024;
     /** Keep source-row resolution requests bounded for wide or composite primary keys. */
     static final int MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC = 16_384;
+    /** Experimental opt-in parallelism for independent tag snapshot resolutions. */
+    static final int PRIMARY_RESOLVE_PARALLELISM = Math.max(1, Integer.getInteger(
+            "pixels.compact.primary-resolve-parallelism", 1));
 
     @FunctionalInterface
     interface PrimaryLookup
@@ -261,9 +268,7 @@ final class PixelsTagCompactor
         Map<Long, PixelsTagCompactionUpdateMap.Location> rowLocations = new HashMap<>();
         Set<ByteBuffer> distinctPrimaryKeys = new HashSet<>();
         List<IndexProto.IndexKey> pendingKeys = new ArrayList<>(MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC);
-        int resolveRpcCount = 0;
-        int resolvedRowCount = 0;
-        long resolveNanos = 0L;
+        List<List<IndexProto.IndexKey>> batches = new ArrayList<>();
 
         for (IndexProto.TagIndexEntry entry : tagEntries)
         {
@@ -281,27 +286,69 @@ final class PixelsTagCompactor
                 }
                 if (pendingKeys.size() >= MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC)
                 {
-                    long start = System.nanoTime();
-                    List<IndexProto.ResolvePrimaryEntry> resolvedEntries = indexService.resolvePrimaryEntries(
-                            primaryTableId, primaryIndexId, pendingKeys);
-                    resolveNanos += System.nanoTime() - start;
-                    resolveRpcCount++;
-                    resolvedRowCount += recordTagRows(
-                            pendingKeys, resolvedEntries, primaryKeyRowIds, primaryKeysByRowId, rowLocations);
+                    batches.add(List.copyOf(pendingKeys));
                     pendingKeys.clear();
                 }
             }
         }
         if (!pendingKeys.isEmpty())
         {
-            long start = System.nanoTime();
-            List<IndexProto.ResolvePrimaryEntry> resolvedEntries = indexService.resolvePrimaryEntries(
-                    primaryTableId, primaryIndexId, pendingKeys);
-            resolveNanos += System.nanoTime() - start;
-            resolveRpcCount++;
-            resolvedRowCount += recordTagRows(
-                    pendingKeys, resolvedEntries, primaryKeyRowIds, primaryKeysByRowId, rowLocations);
+            batches.add(List.copyOf(pendingKeys));
         }
+
+        int resolveRpcCount = batches.size();
+        int resolvedRowCount = 0;
+        long resolveStart = System.nanoTime();
+        int workerCount = Math.min(PRIMARY_RESOLVE_PARALLELISM, batches.size());
+        if (workerCount <= 1)
+        {
+            for (List<IndexProto.IndexKey> batch : batches)
+            {
+                resolvedRowCount += recordTagRows(batch,
+                        resolvePrimaryBatch(indexService, primaryTableId, primaryIndexId, batch),
+                        primaryKeyRowIds, primaryKeysByRowId, rowLocations);
+            }
+        }
+        else
+        {
+            ExecutorService executor = Executors.newFixedThreadPool(workerCount);
+            try
+            {
+                List<Future<List<IndexProto.ResolvePrimaryEntry>>> futures = new ArrayList<>(batches.size());
+                for (List<IndexProto.IndexKey> batch : batches)
+                {
+                    futures.add(executor.submit(() -> resolvePrimaryBatch(
+                            indexService, primaryTableId, primaryIndexId, batch)));
+                }
+                for (int i = 0; i < futures.size(); i++)
+                {
+                    try
+                    {
+                        resolvedRowCount += recordTagRows(batches.get(i), futures.get(i).get(),
+                                primaryKeyRowIds, primaryKeysByRowId, rowLocations);
+                    }
+                    catch (InterruptedException e)
+                    {
+                        Thread.currentThread().interrupt();
+                        throw new IndexException("interrupted while resolving tag snapshot primary keys", e);
+                    }
+                    catch (ExecutionException e)
+                    {
+                        Throwable cause = e.getCause();
+                        if (cause instanceof IndexException)
+                        {
+                            throw (IndexException) cause;
+                        }
+                        throw new IndexException("failed to resolve tag snapshot primary keys", cause);
+                    }
+                }
+            }
+            finally
+            {
+                executor.shutdownNow();
+            }
+        }
+        long resolveNanos = System.nanoTime() - resolveStart;
         if (primaryKeyRowIds.size() != distinctPrimaryKeys.size())
         {
             throw new IllegalArgumentException("tag index primary key has no primary-index row id");
@@ -327,6 +374,16 @@ final class PixelsTagCompactor
                 PixelsTagCompactionUpdateMap.build(entries, rowLocations);
         return new TagIndexSnapshot(updates, primaryKeyRowIds.size(),
                 resolvedRowCount, resolveRpcCount, resolveNanos);
+    }
+
+    private static List<IndexProto.ResolvePrimaryEntry> resolvePrimaryBatch(
+            IndexService indexService,
+            long primaryTableId,
+            long primaryIndexId,
+            List<IndexProto.IndexKey> batch)
+            throws IndexException
+    {
+        return indexService.resolvePrimaryEntries(primaryTableId, primaryIndexId, batch);
     }
 
     private static int recordTagRows(
