@@ -1831,3 +1831,32 @@ and commit `02b9c0a1` reverts it. The isolated runtime remains on the original
 core jar. The probe is still useful: selected-read scratch allocation is a
 real allocation hotspot worth measuring with an allocation-focused recording,
 but it is not currently a throughput lever on this E2E fixture.
+
+## Fixed-source index flush parallelism probe (2026-11-23)
+
+The isolated Trino JVM normally uses
+`-Dpixels.insert.index.flush.parallelism=4`. With the materialized source and
+32 fixed writers held constant, an isolated configuration A/B temporarily
+changed this value to 8 and then restored it to 4.
+
+The `8` arm used fresh ID ranges and passed the exact destination check through
+20M rows. Its first post-restart timeline was 8.022 s; the warm arm was:
+
+```text
+flush.parallelism=8: 3.862 s, approximately 259K rows/s
+```
+
+After restoring the original JVM configuration, the first arm again showed the
+expected restart cost (7.927 s), and the paired warm control was:
+
+```text
+flush.parallelism=4: 3.876 s, approximately 258K rows/s
+final destination: count/min/max/distinct = 22000000/1/22000000/22000000
+```
+
+The 0.4% difference is below the observed scheduling variance and neither arm
+improved on the earlier 3.257--3.375 s fixed-source 32-writer runs. The probe is
+therefore **rejected** as a throughput optimization; the isolated configuration
+is restored to 4. The result reinforces that the next work should instrument
+Trino finishing and grouped-index queueing together, rather than independently
+raising executor parallelism.
