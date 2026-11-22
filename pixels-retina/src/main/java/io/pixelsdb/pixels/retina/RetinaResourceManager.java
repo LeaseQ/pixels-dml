@@ -87,6 +87,9 @@ public class RetinaResourceManager
     private RecoveryCheckpoint recoveryCheckpoint;
 
     private volatile long latestGcTimestamp = -1;
+    /** In-memory visibility changes that must be represented by a checkpoint. */
+    private final AtomicLong visibilityGeneration = new AtomicLong();
+    private volatile long lastCheckpointVisibilityGeneration = -1;
     private final int totalVirtualNodeNum;
 
     // whether in the RECOVERING lifecycle state
@@ -307,6 +310,7 @@ public class RetinaResourceManager
         if (overwrite)
         {
             RGVisibility prev = rgVisibilityMap.put(rgKey, new RGVisibility(recordNum, timestamp, bitmap));
+            visibilityGeneration.incrementAndGet();
             if (prev != null)
             {
                 // RGVisibility holds a native handle; the replaced instance must be
@@ -316,7 +320,10 @@ public class RetinaResourceManager
         }
         else
         {
-            rgVisibilityMap.computeIfAbsent(rgKey, k -> new RGVisibility(recordNum, timestamp, bitmap));
+            rgVisibilityMap.computeIfAbsent(rgKey, k -> {
+                visibilityGeneration.incrementAndGet();
+                return new RGVisibility(recordNum, timestamp, bitmap);
+            });
         }
     }
 
@@ -363,6 +370,7 @@ public class RetinaResourceManager
             {
                 rgVisibility.close();
             }
+            visibilityGeneration.incrementAndGet();
             return true;
         });
     }
@@ -953,10 +961,14 @@ public class RetinaResourceManager
             return;
         }
 
-        if (timestamp <= this.latestGcTimestamp)
+        long currentVisibilityGeneration = visibilityGeneration.get();
+        if (timestamp < this.latestGcTimestamp
+                || (timestamp == this.latestGcTimestamp
+                && currentVisibilityGeneration == this.lastCheckpointVisibilityGeneration))
         {
             return;
         }
+        boolean forceCheckpoint = timestamp == this.latestGcTimestamp;
 
         try
         {
@@ -1040,7 +1052,7 @@ public class RetinaResourceManager
                         }
                     }
                 }
-                recoveryCheckpoint.generate(timestamp, rgEntries, segments);
+                recoveryCheckpoint.generate(timestamp, rgEntries, segments, forceCheckpoint);
 
                 if (!rgEntries.isEmpty())
                 {
@@ -1072,6 +1084,7 @@ public class RetinaResourceManager
 
             // Step 4: Advance the timestamp only after the full cycle succeeds.
             this.latestGcTimestamp = timestamp;
+            this.lastCheckpointVisibilityGeneration = visibilityGeneration.get();
         } catch (Exception e)
         {
             logger.error("Error while running GC", e);

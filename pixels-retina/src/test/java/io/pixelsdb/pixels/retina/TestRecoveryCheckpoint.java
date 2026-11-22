@@ -588,6 +588,26 @@ public class TestRecoveryCheckpoint
     }
 
     @Test
+    public void testGenerate_forceRepublishesSameTimestampForNewVisibility() throws Exception
+    {
+        String samePath = generatedBodyPath(4007L);
+        stubPointer(samePath);
+        stubCreateCapturingBody();
+        when(etcd.compareAndPut(eq(POINTER_KEY), eq(samePath), eq(samePath))).thenReturn(true);
+
+        checkpoint.generate(4007L, new ArrayList<>(), new ArrayList<>());
+        checkpoint.generate(4007L, new ArrayList<>(Collections.singletonList(
+                new RecoveryCheckpoint.VisibilityEntry(9L, 0, 1, 4007L, new long[]{0L}))),
+                new ArrayList<>(), true);
+
+        verify(storage, times(2)).create(anyString(), eq(true), anyInt());
+        verify(etcd, times(2)).compareAndPut(POINTER_KEY, samePath, samePath);
+        RecoveryCheckpoint.Body rewritten = RecoveryCheckpoint.Body.readFrom(createdBodies.get(1).toByteArray());
+        assertEquals(1, rewritten.getRgEntries().size());
+        assertEquals(9L, rewritten.getRgEntries().get(0).getFileId());
+    }
+
+    @Test
     public void testGenerate_writeFailureDoesNotPublishOrAdvanceTimestamp() throws Exception
     {
         stubPointer(null);

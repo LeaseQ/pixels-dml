@@ -430,7 +430,20 @@ public final class RecoveryCheckpoint
                          List<VisibilityEntry> rgEntries,
                          List<PendingSegmentEntry> segments) throws RetinaException
     {
-        if (checkpointAppliedTs == lastCheckpointAppliedTs)
+        generate(checkpointAppliedTs, rgEntries, segments, false);
+    }
+
+    /**
+     * Publish a checkpoint even when the safe timestamp is unchanged.  A
+     * compaction can add a new visible file without committing a transaction;
+     * such a file still must be represented in the next recovery body.
+     */
+    public void generate(long checkpointAppliedTs,
+                         List<VisibilityEntry> rgEntries,
+                         List<PendingSegmentEntry> segments,
+                         boolean force) throws RetinaException
+    {
+        if (!force && checkpointAppliedTs == lastCheckpointAppliedTs)
         {
             logger.debug("Recovery checkpoint: checkpointAppliedTs={} unchanged since last round; skipping",
                     checkpointAppliedTs);
