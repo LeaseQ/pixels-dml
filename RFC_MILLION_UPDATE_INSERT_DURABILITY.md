@@ -3151,3 +3151,62 @@ This fixes a correctness/durability blocker, not the throughput target.
 Candidate8 remains at roughly 70--82k rows/s for INSERT and 74--85k rows/s for
 UPDATE depending on shell-versus-Trino wall definition, so the lower
 hundreds-of-thousands target is still outstanding.
+
+## Primary-resolution phase probe and batch-size sweep (2026-11-23)
+
+The isolated fresh runtime was instrumented without changing the resolution
+semantics. `IndexServiceImpl.resolvePrimaryEntries` now reports bucket setup,
+single-point RocksDB lookup, and location/response construction separately:
+
+```text
+[PIXELS_PRIMARY_RESOLVE_METRIC]
+keys=... bucketMs=... singlePointMs=... locationResponseMs=... serviceMs=...
+```
+
+The first 1,000,000-row UPDATE after restarting Retina was a cold run and is
+not a steady-state result: its connector `primary_key_resolve_ms` was
+21,586.589 ms, with the first 65,536-key request taking about 11.3 s in
+bucket setup. A subsequent warm run using the default 65,536-key client batch
+was:
+
+```text
+CLI wall: 12.510 s                         ~= 79.9k rows/s
+primary_key_resolve_ms: 9,618.586 ms
+UPDATE connector total_ms: 10,373.895 ms
+request_build_ms: 208.511 ms, rpc_ms: 524.417 ms
+```
+
+The warm Retina phase logs were approximately 30--38 ms for bucket setup,
+426--514 ms for single-point lookup, and 20--48 ms for location/response per
+65,536-key request (with a 16,960-key tail). The single-point phase therefore
+remains the dominant measured server-side stage; request construction and the
+shared tag-index RPC are not the primary limiter.
+
+Two larger client batches were tested against the same isolated table. They
+reduced the number of RPC batches but increased per-request RocksDB work and
+were slower overall:
+
+```text
+batch size   primary_key_resolve_ms   connector total_ms   CLI wall
+65,536       9,618.586                10,373.895           12.510 s
+131,072      11,235.845               12,158.057           15.955 s
+262,144      12,731.467               13,564.642           16.006 s
+```
+
+The default remains 65,536. The Trino connector now reads an optional
+`pixels.update.primary-key-resolve-batch-size` JVM property, defaulting to
+65,536, so future sweeps do not require source edits. The 131,072 and 262,144
+values are rejected as optimizations by this evidence.
+
+An exact RocksDB `multiGet` experiment was also rejected for the UPDATE path.
+UPDATE resolution uses the transaction snapshot timestamp and must retain
+prefix-seek semantics to find the latest visible version; it is not an exact
+`Long.MAX_VALUE` lookup. The experiment was removed and is not part of the
+candidate implementation.
+
+The post-sweep COMPACT attempt resolved 1,000,000 tag rows but reported zero
+physical rewrite outputs, and the readback still showed the prior physical
+tag values. This run is retained as a failed materialization observation, not
+as correctness evidence; the previously accepted candidate8
+INSERT -> UPDATE -> COMPACT -> restart gate remains the only accepted
+materialized result.
