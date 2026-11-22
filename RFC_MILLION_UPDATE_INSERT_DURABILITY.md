@@ -3503,7 +3503,7 @@ It received two one-million-row INSERTs, then one exact one-million-row
 `-Dpixels.compact.primary-resolve-parallelism=2`, COMPACT completed correctly:
 
 ```text
-tag snapshot:       1,000,000 rows, 62 RPCs, 6.480 s
+tag snapshot:       1,000,000 rows, 62 RPCs, 6.526 s
 physical rewrite:   14.845 s (one output)
   primary resolve:  2,000,000 rows, 124 RPCs, 23.777 s
 relocation:         2,000,000 rows, 128 RPCs
@@ -3520,15 +3520,44 @@ updated-range U39=1000000
 ```
 
 This is a valid correctness and phase-profile result for the standard root
-layout, but it is not yet an accepted speedup: the same-jar `parallelism=1`
-control still enters the old nested-path branch and fails before physical
-rewrite. A later p4 attempt was also discarded because its generated DDL
-retained the source table's paths; the invalid table was removed. No p2/p4
-physical-rewrite default or code change is being claimed from these runs.
+layout. Two earlier serial/p4 attempts failed because their generated DDL
+retained already-expanded `v-0-*` paths; that was a fixture-construction error,
+not evidence that the serial code could not handle a root layout. `SHOW CREATE`
+must therefore not be copied verbatim when constructing a fresh benchmark
+table: use a new root URI and explicitly restore the primary-index properties.
 
-The immediate engineering conclusion is that compaction path normalization and
-the serial/parallel implementation split must be fixed before another
-concurrency matrix is meaningful. Until that controlled comparison exists, the
-accepted performance claims remain UPDATE resolver parallelism and tag-snapshot
-parallelism only; the primary-resolution physical rewrite remains an open
-bottleneck rather than a proven optimization.
+### Correct-root async physical-rewrite recheck (2026-11-23)
+
+The source implementation was restored and rebuilt on cds20. It keeps
+`parallelism=1` as the serial path and, for values above one, submits bounded
+16,384-key source-row resolution batches while the reader/writer continues;
+results are applied in submission order before publication. The default was
+not changed. The compactor unit tests passed (3 tests, 0 failures), and a new
+candidate21 run used the freshly rebuilt full jar.
+
+Two independent clean p2 and p4 pairs were then run on the standard root
+layout, followed by a source-built p4 validation:
+
+```text
+arm / fixture       tag snapshot   primary resolve   rewrite   publish   CLI
+p2 / candidate15   6.526 s        23.777 s          14.845 s  17.367 s  32 s
+p2 / candidate19   6.419 s        23.946 s          14.891 s  16.959 s  31 s
+p4 / candidate18   3.442 s        25.753 s           9.999 s  18.011 s  28 s
+p4 / candidate20   3.521 s        24.643 s           9.665 s  18.067 s  27 s
+p4 / candidate21   3.584 s        28.240 s          10.746 s  18.578 s  29 s
+```
+
+Every run processed 2,000,000 source rows, relocated 2,000,000 rows in 128
+RPCs, and passed the final readback with exactly 1,000,000 updated rows and
+the requested tag value. The p4 arms reduce end-to-end CLI time by roughly
+9--13% against the clean p2 arms in this fixture. The summed primary-RPC time
+does not improve; the gain comes from overlapping resolution with source
+reading and physical writing. The earlier p8 rejection remains valid for its
+bad-layout/stability experiment and is not a reason to enable p8 here.
+
+The async source-row resolver is therefore retained as an opt-in candidate,
+with p4 the only compact physical-rewrite setting validated on a correct root
+fixture. The default remains serial until broader failure-injection and larger
+table validation are completed. The remaining bottleneck is still the primary
+resolution RPC path, but its wall-clock cost can now be overlapped safely at a
+moderate concurrency.

@@ -68,7 +68,7 @@ final class PixelsTagCompactor
     private static final int READ_BATCH_SIZE = 1024;
     /** Keep source-row resolution requests bounded for wide or composite primary keys. */
     static final int MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC = 16_384;
-    /** Experimental opt-in parallelism for independent tag snapshot resolutions. */
+    /** Experimental opt-in parallelism for independent tag snapshot and source-row resolutions. */
     static final int PRIMARY_RESOLVE_PARALLELISM = Math.max(1, Integer.getInteger(
             "pixels.compact.primary-resolve-parallelism", 1));
 
@@ -544,12 +544,15 @@ final class PixelsTagCompactor
                 .setReplication(replication)
                 .setBlockPadding(false)
                 .build();
+        ExecutorService primaryResolveExecutor = PRIMARY_RESOLVE_PARALLELISM > 1 ?
+                Executors.newFixedThreadPool(PRIMARY_RESOLVE_PARALLELISM) : null;
         try
         {
             OutputRowPosition outputPosition = new OutputRowPosition();
             for (String sourcePath : sourcePaths)
             {
-                compactSource(schema, tagColumns, primaryKeyOrdinals, writer, sourcePath, footerCache, outputPosition);
+                compactSource(schema, tagColumns, primaryKeyOrdinals, writer, sourcePath, footerCache,
+                        outputPosition, primaryResolveExecutor);
             }
             writer.close();
             // PixelsWriterImpl finalizes the last row group while closing the
@@ -562,6 +565,13 @@ final class PixelsTagCompactor
             writer.abort();
             throw e;
         }
+        finally
+        {
+            if (primaryResolveExecutor != null)
+            {
+                primaryResolveExecutor.shutdownNow();
+            }
+        }
     }
 
     private void compactSource(
@@ -571,7 +581,8 @@ final class PixelsTagCompactor
             PixelsWriter writer,
             String sourcePath,
             PixelsFooterCache footerCache,
-            OutputRowPosition outputPosition)
+            OutputRowPosition outputPosition,
+            ExecutorService primaryResolveExecutor)
             throws IOException, MetadataException
     {
         long sourceFileId = metadataService.getFileId(sourcePath);
@@ -592,6 +603,7 @@ final class PixelsTagCompactor
             List<IndexProto.IndexKey> pendingPrimaryKeys = new ArrayList<>(MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC);
             List<IndexProto.RowLocation> pendingOutputLocations =
                     new ArrayList<>(MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC);
+            List<PendingPrimaryResolution> pendingResolutions = new ArrayList<>();
             for (int rowGroupId = 0; rowGroupId < reader.getRowGroupNum(); rowGroupId++)
             {
                 PixelsReaderOption option = new PixelsReaderOption()
@@ -644,7 +656,15 @@ final class PixelsTagCompactor
                         }
                         if (pendingPrimaryKeys.size() >= MAX_PRIMARY_RESOLUTION_KEYS_PER_RPC)
                         {
-                            resolveAndRecordPrimaryRows(pendingPrimaryKeys, pendingOutputLocations);
+                            if (primaryResolveExecutor == null)
+                            {
+                                resolveAndRecordPrimaryRows(pendingPrimaryKeys, pendingOutputLocations);
+                            }
+                            else
+                            {
+                                submitPrimaryResolution(pendingPrimaryKeys, pendingOutputLocations,
+                                        primaryResolveExecutor, pendingResolutions);
+                            }
                         }
                     }
                     if (rowBatch.endOfFile)
@@ -653,7 +673,16 @@ final class PixelsTagCompactor
                     }
                 }
             }
-            resolveAndRecordPrimaryRows(pendingPrimaryKeys, pendingOutputLocations);
+            if (primaryResolveExecutor == null)
+            {
+                resolveAndRecordPrimaryRows(pendingPrimaryKeys, pendingOutputLocations);
+            }
+            else
+            {
+                submitPrimaryResolution(pendingPrimaryKeys, pendingOutputLocations,
+                        primaryResolveExecutor, pendingResolutions);
+                awaitPrimaryResolutions(pendingResolutions);
+            }
             System.out.println("[PIXELS_COMPACTION_ROW_METRIC] source=" + sourcePath +
                     " rows=" + sourceRows +
                     " batches=" + sourceBatchCount +
@@ -668,6 +697,79 @@ final class PixelsTagCompactor
         }
     }
 
+    private void submitPrimaryResolution(
+            List<IndexProto.IndexKey> primaryKeys,
+            List<IndexProto.RowLocation> outputLocations,
+            ExecutorService primaryResolveExecutor,
+            List<PendingPrimaryResolution> pendingResolutions)
+    {
+        if (primaryKeys.isEmpty())
+        {
+            return;
+        }
+        List<IndexProto.IndexKey> keyBatch = List.copyOf(primaryKeys);
+        List<IndexProto.RowLocation> locationBatch = List.copyOf(outputLocations);
+        Future<PrimaryResolutionResult> future = primaryResolveExecutor.submit(
+                () -> resolvePrimaryBatch(keyBatch));
+        pendingResolutions.add(new PendingPrimaryResolution(keyBatch, locationBatch, future));
+        primaryKeys.clear();
+        outputLocations.clear();
+    }
+
+    private void awaitPrimaryResolutions(List<PendingPrimaryResolution> pendingResolutions)
+            throws IOException
+    {
+        for (PendingPrimaryResolution pending : pendingResolutions)
+        {
+            try
+            {
+                recordPrimaryResolution(pending.keys, pending.outputLocations, pending.future.get());
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted while resolving primary rows during tag-aware compaction", e);
+            }
+            catch (ExecutionException e)
+            {
+                Throwable cause = e.getCause();
+                if (cause instanceof IOException)
+                {
+                    throw (IOException) cause;
+                }
+                throw new IOException("failed to resolve primary rows during tag-aware compaction", cause);
+            }
+        }
+        pendingResolutions.clear();
+    }
+
+    private PrimaryResolutionResult resolvePrimaryBatch(List<IndexProto.IndexKey> primaryKeys)
+            throws IOException
+    {
+        long start = System.nanoTime();
+        try
+        {
+            List<IndexProto.ResolvePrimaryEntry> resolvedEntries = indexService.resolvePrimaryEntries(
+                    primaryTableId, primaryIndexId, primaryKeys);
+            return new PrimaryResolutionResult(resolvedEntries, System.nanoTime() - start);
+        }
+        catch (IndexException e)
+        {
+            throw new IOException("failed to resolve primary rows during tag-aware compaction", e);
+        }
+    }
+
+    private void recordPrimaryResolution(
+            List<IndexProto.IndexKey> primaryKeys,
+            List<IndexProto.RowLocation> outputLocations,
+            PrimaryResolutionResult result)
+    {
+        primaryResolveNanos += result.rpcNanos;
+        primaryResolveRpcCount++;
+        primaryResolveRowCount += result.entries.size();
+        recordResolvedRows(result.entries, outputLocations, relocatedLocations, primaryKeysByRowId);
+    }
+
     private void resolveAndRecordPrimaryRows(
             List<IndexProto.IndexKey> primaryKeys,
             List<IndexProto.RowLocation> outputLocations)
@@ -679,17 +781,7 @@ final class PixelsTagCompactor
         }
         try
         {
-            long start = System.nanoTime();
-            List<IndexProto.ResolvePrimaryEntry> resolvedEntries = indexService.resolvePrimaryEntries(
-                    primaryTableId, primaryIndexId, primaryKeys);
-            primaryResolveNanos += System.nanoTime() - start;
-            primaryResolveRpcCount++;
-            primaryResolveRowCount += resolvedEntries.size();
-            recordResolvedRows(resolvedEntries, outputLocations, relocatedLocations, primaryKeysByRowId);
-        }
-        catch (IndexException e)
-        {
-            throw new IOException("failed to resolve primary rows during tag-aware compaction", e);
+            recordPrimaryResolution(primaryKeys, outputLocations, resolvePrimaryBatch(primaryKeys));
         }
         finally
         {
@@ -881,6 +973,35 @@ final class PixelsTagCompactor
                 return;
             default:
                 throw new IllegalArgumentException("unsupported tag column type: " + type.getCategory());
+        }
+    }
+
+    private static final class PendingPrimaryResolution
+    {
+        private final List<IndexProto.IndexKey> keys;
+        private final List<IndexProto.RowLocation> outputLocations;
+        private final Future<PrimaryResolutionResult> future;
+
+        private PendingPrimaryResolution(
+                List<IndexProto.IndexKey> keys,
+                List<IndexProto.RowLocation> outputLocations,
+                Future<PrimaryResolutionResult> future)
+        {
+            this.keys = keys;
+            this.outputLocations = outputLocations;
+            this.future = future;
+        }
+    }
+
+    private static final class PrimaryResolutionResult
+    {
+        private final List<IndexProto.ResolvePrimaryEntry> entries;
+        private final long rpcNanos;
+
+        private PrimaryResolutionResult(List<IndexProto.ResolvePrimaryEntry> entries, long rpcNanos)
+        {
+            this.entries = entries;
+            this.rpcNanos = rpcNanos;
         }
     }
 }
