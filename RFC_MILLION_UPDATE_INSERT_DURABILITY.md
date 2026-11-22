@@ -2156,3 +2156,75 @@ low-watermark behavior. The next durable fix should make the transaction
 service advance the read-only low watermark for completed autocommit work, or
 provide a lifecycle-safe checkpoint trigger; then rerun the full 2M gate with
 the conservative `includeRunningQueries=true` setting.
+
+## Trino autocommit read classification and restart-durable INSERT (2026-11-22)
+
+The next probe followed the history to commit
+`2977640b85794652a11151a5e3ac39947a73bd9f`. That commit deliberately changed
+Trino to start every transaction with `beginTrans(false)`, because Trino's
+read-only flag was unreliable and a fresh-table UPDATE otherwise received
+timestamp zero. The side effect is that the daemon's immutable transaction
+classification stayed `readOnly=false` even for ordinary SELECT statements,
+so `commitTrans(..., true)` could still push the writer high watermark rather
+than the reader low watermark.
+
+The accepted fix keeps the non-zero start timestamp and adds an explicit
+end-of-life reclassification path:
+
+1. `PixelsTransactionHandle` records whether connector metadata entered a
+   write path (`beginInsert`, `applyUpdate`, MERGE, CREATE TABLE, or DROP
+   TABLE).
+2. On commit or rollback, a handle with no write operation calls the new
+   reserved transaction property `trans_read_only=true` before termination.
+3. `TransContextManager` atomically moves the pending context from the write
+   set to the read-only set and updates the mutable classification. A write
+   transaction is never reclassified after it has started committing.
+
+The reserved property is daemon-side and therefore does not depend on Trino's
+unreliable transaction flag. The conservative default
+`retina.gc.include.running.queries=true` was retained.
+
+### Isolated E2E evidence
+
+The candidate was compiled with targeted `javac` on cds20 and deployed only
+to the isolated validation runtime. The active candidate SHA256 values were:
+
+```text
+pixels-trino-connector-0.2.0-SNAPSHOT.jar
+d737a3118a479d2ff4b63f84168b16fb5e0b78145ae8b0e6e7fc9ae5695fdeb5
+pixels-common-0.2.0-SNAPSHOT.jar
+bff59fe6d4dbb1ae5ede9df53843b96ac056cc9e5d46815dc21cafbf204ace1f
+```
+
+With the old daemon, the control SELECT left `safeTrue=300682` and advanced
+`safeFalse` from `310034` to `330001`. With the candidate daemon and candidate
+connector, the same SELECT moved `safeTrue` from `300682` to `330001`, and the
+runtime published `recovery_cds20_330001.bin`. This isolates the fix to
+completed read-only transaction classification rather than a GC setting.
+
+For restart durability, a fresh 68-column no-index table
+`bench68_v2.lowwm_e2e_target_20261122` was created with one explicit root
+path. A separate table-to-table INSERT copied 100,000 rows from
+`putifabsent_source_20261122`:
+
+```text
+INSERT result = 100000
+pre-restart count/min/max = 100000/100001/200000
+safe watermark before read = 340013/340013 (low/high safe values)
+checkpoint published = recovery_cds20_340013.bin
+checkpoint baselineFiles = 218
+```
+
+Retina was then restarted with the candidate daemon classes, recovered
+`recovery_cds20_340013.bin`, and was marked READY through the normal recovery
+epoch handshake. The post-restart query returned exactly:
+
+```text
+count/min/max = 100000/100001/200000
+```
+
+This closes the previously failing low-watermark durability gap for ordinary
+Trino autocommit reads while preserving the original non-zero timestamp
+behavior needed by UPDATE. The change is accepted for source control; the
+isolated runtime remains the validation target and the main runtime was not
+modified.

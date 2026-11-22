@@ -37,7 +37,12 @@ public class TransContext implements Comparable<TransContext>
 {
     private final long transId;
     private final long timestamp;
-    private final boolean readOnly;
+    /**
+     * Trino starts with a write timestamp so UPDATE on an empty table never
+     * receives snapshot timestamp zero.  It may be reclassified before
+     * termination when no write operation was planned.
+     */
+    private volatile boolean readOnly;
     private final AtomicReference<TransProto.TransStatus> status;
     private final Properties properties;
     private final Lease lease;
@@ -102,6 +107,11 @@ public class TransContext implements Comparable<TransContext>
     public boolean isReadOnly()
     {
         return readOnly;
+    }
+
+    public void setReadOnly(boolean readOnly)
+    {
+        this.readOnly = readOnly;
     }
 
     public void setStatus(TransProto.TransStatus status)

@@ -213,6 +213,18 @@ public class TransService
     }
 
     /**
+     * Reclassify a pending write-timestamp transaction as read-only. Trino
+     * does not reliably report statement read-only state at beginTransaction,
+     * so the connector starts with a non-zero write timestamp and calls this
+     * only after it has observed that no write operation was planned.
+     */
+    public boolean markTransReadOnly(long transId) throws TransException
+    {
+        setTransProperty(transId, io.pixelsdb.pixels.common.utils.Constants.TRANS_CONTEXT_READ_ONLY_KEY, "true");
+        return true;
+    }
+
+    /**
      * Commit a batch of transactions and return whether the execution succeeded.
      * If execution fails, specific error logs can be obtained from the transService logs,
      * such as the transaction does not exist or the commit fails.

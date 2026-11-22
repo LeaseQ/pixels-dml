@@ -540,6 +540,14 @@ public class TransServiceImpl extends TransServiceGrpc.TransServiceImplBase
         TransProto.SetTransPropertyResponse.Builder builder = TransProto.SetTransPropertyResponse.newBuilder();
         if (context != null)
         {
+            if (Constants.TRANS_CONTEXT_READ_ONLY_KEY.equals(key) && Boolean.parseBoolean(value) &&
+                    !TransContextManager.Instance().markTransReadOnly(context.getTransId()))
+            {
+                builder.setErrorCode(ErrorCode.TRANS_INVALID_ARGUMENT);
+                responseObserver.onNext(builder.build());
+                responseObserver.onCompleted();
+                return;
+            }
             String prevValue = (String) context.getProperties().setProperty(key, value);
             if (prevValue != null)
             {

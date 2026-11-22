@@ -504,6 +504,41 @@ public class TransContextManager
         return this.transIdToContext.containsKey(transId);
     }
 
+    /**
+     * Move a pending transaction from the conservative write set to the
+     * read-only set. This is used for Trino statements that had to start with
+     * a write timestamp but performed no write operation.
+     */
+    public boolean markTransReadOnly(long transId)
+    {
+        this.contextLock.writeLock().lock();
+        try
+        {
+            TransContext context = this.transIdToContext.get(transId);
+            if (context == null)
+            {
+                return false;
+            }
+            if (context.isReadOnly())
+            {
+                return true;
+            }
+            if (context.getStatus() != TransProto.TransStatus.PENDING)
+            {
+                return false;
+            }
+            context.setReadOnly(true);
+            this.runningWriteTrans.remove(context);
+            this.readOnlyConcurrency.incrementAndGet();
+            this.runningReadOnlyTrans.add(context);
+            return true;
+        }
+        finally
+        {
+            this.contextLock.writeLock().unlock();
+        }
+    }
+
     public TransContext getTransContext(String externalTraceId)
     {
         // Issue #1099: no lock needed as it does not modify anything.
