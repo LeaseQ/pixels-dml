@@ -215,7 +215,7 @@ public class DecimalColumnReader extends ColumnReader
         boolean endOfPixel;
         if (!nullsPadding)
         {
-            isNull = getSelectedNullScratch(size);
+            isNull = new boolean[size];
         }
         for (int i = vectorIndex; numLeft > 0; )
         {

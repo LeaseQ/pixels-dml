@@ -245,7 +245,7 @@ public class BinaryColumnReader extends ColumnReader
         byte[] contentArray = inputBuffer.array();
         int contentArrayOffset = inputBuffer.arrayOffset() + contentStart;
         int numLeft = size, numToRead, bytesToDeCompact, vectorWriteIndex = vectorIndex;
-        boolean[] isNull = getSelectedNullScratch(size);
+        boolean[] isNull = new boolean[size];
         boolean endOfPixel;
         for (int i = vectorIndex; numLeft > 0; )
         {

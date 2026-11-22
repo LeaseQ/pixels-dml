@@ -45,17 +45,6 @@ public abstract class ColumnReader implements Closeable
 
     int elementIndex = 0;
     boolean hasNull = true;
-    /** Reusable scratch space for selected-read null decoding. */
-    private boolean[] selectedNullScratch;
-
-    final boolean[] getSelectedNullScratch(int size)
-    {
-        if (selectedNullScratch == null || selectedNullScratch.length < size)
-        {
-            selectedNullScratch = new boolean[size];
-        }
-        return selectedNullScratch;
-    }
     /**
      * The current offset in the input buffer of this column chunk from which to decompact the isNull array.
      * It starts from the offset of the bit-packed isNull array in this column chunk.

@@ -234,7 +234,7 @@ public class TimeColumnReader extends ColumnReader
         boolean endOfPixel;
         if (decoding || !nullsPadding)
         {
-            isNull = getSelectedNullScratch(size);
+            isNull = new boolean[size];
         }
         for (int i = vectorIndex; numLeft > 0;)
         {
