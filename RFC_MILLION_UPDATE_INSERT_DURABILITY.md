@@ -2762,3 +2762,55 @@ the established 32-writer warm arm at 3.610 s (approximately 277K rows/s).
 All arms completed and the fixed target retained unique primary keys. Decision:
 keep 32 as the reproducible writer-count point for this fixture and reject
 further writer-count tuning as the immediate path to the million-row target.
+
+## Compression checkpoint gate and client bookkeeping probe (2026-11-22)
+
+The isolated Retina was restored to `index.rocksdb.compression.type=
+LZ4_COMPRESSION` after a NO_COMPRESSION exploratory run. Four fresh LZ4
+targets used the fixed 68-column, 1M-row source and the fixed 32-writer
+session. Their SQL checks were exact:
+`1,000,000/100,001/1,100,000/1,000,000` for every target. The observed
+SQL walls were:
+
+```text
+LZ4 control: 5.655 s (cold), 3.822 s, 3.760 s, 3.711 s (warm)
+```
+
+The earlier NO_COMPRESSION table was not checkpointed before the Retina
+restart and returned zero visible rows afterward. Its wall times therefore
+remain a heat-only observation, not a durable comparison. In addition, the
+fresh LZ4 run's grouped log counters showed 64 requests/2M entries per
+1M-row table, which does not agree with the exact SQL row counts and must be
+explained before a compression decision is accepted. Decision: **do not
+change the compression default**; rerun only with a checkpoint-backed arm and
+reconciled request counters.
+
+The next small candidate addressed a concrete client-side duplicate: grouped
+INSERT computed the vnode hash while appending each entry and then computed
+the same hash again in `recordCompletedGroupedEntries()` after a successful
+RPC, solely to populate abort bookkeeping. The candidate carried a primitive
+bucket id array alongside the flattened grouped entries, preserving the
+protobuf request, tag/index semantics, abort bookkeeping, and RocksDB path.
+It compiled successfully on cds20 with the connector Maven build and was
+deployed only to the isolated Trino. Every candidate target passed the exact
+1M-row check:
+
+```text
+candidate: 6.984 s (cold), 5.200 s, 4.104 s, 4.991 s (warm)
+immediate original LZ4 controls: 5.655 s, 3.822 s, 3.760 s, 3.711 s
+```
+
+The candidate has no repeatable end-to-end gain and was slower across the
+warm set. The original plugin was restored from
+`runtime/logs/duplicate-bookkeeping-20261122/plugin-before`; the source
+change was reverted locally and in the isolated source copy. Decision:
+**reject** this bookkeeping-only optimization. It confirms that the current
+INSERT gap is not explained by this second SHA-256 pass.
+
+During the same fixed-source profile arm, a `/proc` sampler observed a
+4.082-second 1M-row INSERT at approximately 245K rows/s. Trino and Retina
+each accumulated roughly 20--22 CPU-seconds on the 80-thread host (about
+five cores each), while system load stayed below 0.3. This is diagnostic
+evidence against whole-host CPU saturation; the next accepted probe should
+instrument or tune grouped RocksDB write/flush scheduling and reconcile its
+per-request counters, not simply add client writers.
