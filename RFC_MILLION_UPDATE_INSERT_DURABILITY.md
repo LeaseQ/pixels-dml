@@ -3295,3 +3295,17 @@ current isolated runtime reaches the lower-hundreds-of-thousands INSERT goal
 on a real primary-index table-to-table path. It is still well below 1M rows/s;
 the remaining measured cost is distributed across 32 per-file finishing/index
 paths rather than the final metadata publish (225 ms on the warm arm).
+
+A final 24-writer arm on the same target used
+`task_min_writer_count=24, task_scale_writers_enabled=false` and a fresh ID
+range. It completed in 3.171 s, approximately 315.4K rows/s, and passed the
+exact final check:
+
+```text
+count/min/max/distinct = 4000000/7000000001/11001000000/4000000
+```
+
+On this machine and fixture, 24 writers are currently the better session
+point than 32 writers (315.4K versus 250.7--267.4K rows/s). This is a
+benchmark-session result, not a global connector default change; the target
+still does not approach 1M rows/s.
