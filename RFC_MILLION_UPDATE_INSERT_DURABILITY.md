@@ -1958,3 +1958,46 @@ while retaining the primary grouped-write path and tag publication ordering.
 
 No runtime configuration was changed by this probe. The indexed target was
 left on the original connector and the isolated daemon configuration.
+
+## Primitive row-id sort probe and restart durability finding (2026-11-22)
+
+The Retina JFR showed `Long.valueOf`, `AbstractCollection.toArray`, and
+`ComparableTimSort` beneath `MainIndexBuffer.snapshotForFlush`. The candidate
+in commit `d2c4e6d6` keeps the existing HashMap and range-building semantics, but
+copies keys into a primitive `long[]` and calls `Arrays.sort(long[])` instead
+of materializing `Long[]`/`List<Long>` and invoking boxed TimSort. No tag,
+visibility, primary-key, or file format behavior was changed.
+
+The candidate was compiled into an isolated daemon full jar and deployed only
+to the validation Retina. A fresh 68-column source with exactly 1,000,000
+rows, `id=1..1,000,000`, `tag_1_type='SRC'`, `tag_1_para=1.0000`, and all
+other tag pairs NULL was used with a new `pk='id'` target. The cold first
+INSERT completed correctly but spent 174.032 s in the Trino timeline while
+the grouped primary-index metrics showed approximately 170 s of first-use
+RocksDB/index initialization; it is not a fair sort comparison. Two warm
+candidate appends on the same target were:
+
+```text
+candidate warm append 1M: 3.443 s, approximately 290.4K rows/s
+candidate warm append 1M: 3.295 s, approximately 303.5K rows/s
+checks after 3M rows: count/min/max/distinct = 3000000/1/3000000/3000000
+tag checks: tag_1_type='SRC'=3000000, tag_2_type IS NULL=3000000
+```
+
+These results are inside the existing 3.257--3.375 s original-connector
+warm range and do not establish a repeatable gain. The candidate is therefore
+rejected pending a lower-variance allocation-focused benchmark; the original
+daemon jar is restored in the isolated runtime. The candidate code and the
+revert remain in Git history with the measured result.
+
+The restart used to restore the original jar also exposed a durability gap in
+the current validation harness. Recovery reported `baselineFiles=0` and
+`retired=1166`, dropping visibility entries whose catalog type was
+`TEMPORARY_INGEST`. The previously visible validation source, no-index target,
+and indexed target all returned zero rows after the restart, even though their
+table definitions and physical paths remained. This is not a throughput
+result and is not attributed to the primitive sort change. It means an
+INSERT benchmark may not be called restart-durable until the post-INSERT file
+metadata is confirmed `REGULAR` and the recovery checkpoint is confirmed to
+contain the files. The next validation pass must include that check before
+any further warm A/B comparison.
