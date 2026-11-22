@@ -2843,3 +2843,27 @@ source overlay were removed. Decision: **reject** WriteBatch preallocation as
 a standalone optimization. The next probe should address the number and
 overlap of native per-vnode writes, with explicit safeguards against the
 serialization seen in the rejected single cross-CF batch.
+
+## RocksDB background-flush parallelism probe (2026-11-22, rejected)
+
+The original isolated configuration uses
+`index.rocksdb.max.background.flushes=2`. An isolated Retina restart changed
+only this property to `4`; WAL, LZ4 compression, write-buffer sizes,
+compaction settings, grouped request shape, and the 32-writer Trino session
+were unchanged. Four fresh 1M-row targets all passed the exact check
+`1,000,000/100,001/1,100,000/1,000,000`.
+
+```text
+flushes=4: 5.649 s (cold), 4.036 s, 4.413 s, 3.713 s (warm)
+original flushes=2 controls: 5.655 s, 3.822 s, 3.760 s, 3.711 s
+```
+
+The corresponding daemon grouped `primary_ms` sums were about 59.0, 41.1,
+48.0, and 45.5 seconds. They do not show a consistent improvement over the
+original 2-flush runtime, and the SQL warm set is slightly worse overall.
+The configuration was restored to `2` from
+`runtime/logs/rocks-flush4-20261122/pixels.properties.before`, and Retina was
+restarted and marked READY. Decision: **reject** this simple flush-thread
+increase; the next RocksDB experiment needs to distinguish native write
+queueing from background flush/compaction work rather than raising both
+implicitly.
