@@ -2228,3 +2228,32 @@ Trino autocommit reads while preserving the original non-zero timestamp
 behavior needed by UPDATE. The change is accepted for source control; the
 isolated runtime remains the validation target and the main runtime was not
 modified.
+
+## Main-index duplicate-lookup microprobe (2026-11-22, rejected)
+
+The retained JFR evidence points at `MainIndexBuffer` and the SQLite main-index
+flush path, so a minimal candidate changed the existing duplicate check from
+`containsKey(rowId)` followed by `put(rowId, location)` to one `get(rowId)`
+followed by `put`. The owning main-index write lock already protects this
+sequence, and `RowLocation` values are non-null, so the candidate preserved
+the duplicate and cache-admission semantics.
+
+The same materialized one-million-row source and one explicit `pk='id'`
+target were used throughout. The original implementation first built the
+target and then appended IDs 1,000,001--2,000,000 in 4.095 s. After the
+candidate daemon restart, the first append was a restart/cache warm-up at
+14.008 s and was excluded; the next two candidate warm appends took 3.857 s
+and 3.220 s. The exact check after 5M rows was
+`count/min/max/distinct = 5000000/100001/5100000/5000000`.
+
+The daemon was then restarted back to the original implementation after a
+checkpoint, and two control warm appends took 3.072 s and 4.095 s. The final
+control check passed exactly:
+`count/min/max/distinct = 8000000/100001/8100000/8000000`.
+
+The candidate range is inside the control's observed scheduling/cache range;
+there is no repeatable throughput gain. The code was reverted and the
+isolated runtime remains on the original implementation. Decision: **reject**
+this micro-optimization. The next main-index work should target measured
+SQLite flush/lock behavior or a larger end-to-end bottleneck, not individual
+HashMap lookup count.
