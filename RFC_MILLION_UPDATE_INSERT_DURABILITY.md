@@ -2959,3 +2959,109 @@ runtime recovery. Acceptance requires: dense UPDATE correctness, sparse-key
 correctness, post-compaction correctness, and a reproducible reduction in
 `primary_key_resolve_ms` or total SQL wall time without changing the tagging
 contract.
+
+## Fresh 68-column INSERT -> UPDATE -> COMPACT E2E (2026-11-22)
+
+The pending candidate was measured on the rebuilt isolated runtime:
+
+```text
+runtime: e2e-fresh-20261122
+table: validationfresh.e2e68_fresh_candidate5_20261122
+fixture: 68 columns, one root paths URI, pk=id, pk_scheme=rocksdb
+```
+
+The earlier candidate4 table is excluded: it was created before the Retina
+Java-module fix and failed with a missing visibility entry. Candidate5 was
+created after that fix.
+
+### INSERT
+
+```text
+INSERT: 1,000,000 rows
+Trino query elapsed: 11.861 s       ~= 84.3k rows/s
+CLI end-to-end wall: 13.979 s       ~= 71.5k rows/s
+SELECT count(*): 1,000,000
+```
+
+Connector metrics included `primary_put_wall_ms=5881.610`,
+`append_ms=1566.756`, and `write_ms=2063.744`. This is a valid committed and
+readable INSERT, but it is below the historical warm hundreds-of-thousands
+results and does not reach the target.
+
+### UPDATE and tag-aware COMPACT
+
+The exact dense range update was:
+
+```sql
+UPDATE validationfresh.e2e68_fresh_candidate5_20261122
+SET tag_1_type = 'R', tag_1_para = 9.0000
+WHERE id BETWEEN 4000000001 AND 4001000000;
+```
+
+Evidence:
+
+```text
+UPDATE: 1,000,000 rows
+Trino query elapsed: 16.375 s      ~= 61.1k rows/s
+CLI end-to-end wall: 18.462 s      ~= 54.2k rows/s
+primary_key_resolve_ms: 14,794.105
+UPDATE connector total_ms: 16,070.425
+rpc_count=1, rpc_ms=917.980
+tag-index shared service_ms: 688.645
+```
+
+The daemon resolved all 1,000,000 keys in 15 batches of 65,536 plus a
+16,960-key tail. Before COMPACT, ordinary reads still returned the original
+physical tag values; this is expected for the supported versioned UPDATE
+contract. UPDATE records the Tag Index state and COMPACT materializes it.
+
+Tag-aware `COMPACT -s validationfresh -t e2e68_fresh_candidate5_20261122 -n
+no -c 8` completed successfully:
+
+```text
+CLI wall: 53.130 s
+tag resolve: 1,000,000 rows, 62 RPCs, 12.167 s
+physical rewrite: 18.763 s
+publish: 8.391 s
+```
+
+Immediate post-COMPACT checks passed:
+
+```text
+total=1,000,000
+tag_1_type='R'=1,000,000
+tag_1_para min=max=9.0000
+tag_1_type='R' AND tag_1_para=9.0000 => 1,000,000
+boundary ids 4000000001 and 4001000000 => ('R', 9.0000)
+```
+
+This is valid fresh-runtime evidence for the complete in-process
+INSERT -> UPDATE(Tag Index) -> COMPACT -> materialized read path. It does not
+meet the throughput target: INSERT is about 71.5k--84.3k rows/s depending on
+the wall definition, and UPDATE is about 54.2k--61.1k rows/s.
+
+### Restart durability: failed gate, retained as a regression
+
+Retina was restarted with the required Java 23 `java.nio` module opens. It
+loaded checkpoint `recovery_cds20_5.bin` in `RECOVERING`, and the normal
+`get status -> markReady(recoveryEpoch)` handshake was performed. The
+post-handshake read returned:
+
+```text
+total=0
+updated=0
+tag predicate count=0
+```
+
+Recovery logged `baselineFiles=0`, `retired=2`, and `warns=242`; the compacted
+file and its source were subsequently classified as `RETIRED` in metadata.
+The published checkpoint pointer later referenced a body that was no longer
+present. Therefore the in-process COMPACT result is accepted as a functional
+E2E result, but persistence across Retina restart is **failed**, not accepted.
+No checkpoint, metadata row, or physical file was fabricated or manually
+changed to make the check pass.
+
+The next narrowly scoped fix is the recovery lifecycle: preserve the compact
+output's REGULAR metadata and checkpoint visibility entry through checkpoint
+publication/cleanup, then repeat the same restart readback. Only after that
+gate passes should throughput optimization be promoted.
