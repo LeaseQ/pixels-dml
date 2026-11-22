@@ -3740,3 +3740,23 @@ summed primary-resolution time and publish phase remain the dominant costs.
 The defaults remain unchanged; controlled index-service saturation and
 failure-injection testing are still required before considering a default
 parallel setting.
+
+### Relocation p16 rejection (2026-11-23)
+
+Candidate30 repeated the 2M writable fixture with p8 source-row resolution but
+raised `pixels.compact.primary-relocate-parallelism` from 8 to 16:
+
+```text
+tag snapshot:       1,000,000 rows, 62 RPCs,  2.071 s
+physical rewrite:   2,000,000 rows, one output, 7.719 s
+primary resolve:    2,000,000 rows, 124 RPCs, 24.932 s (summed RPC time)
+relocation:         2,000,000 rows, 128 RPCs
+publish:            one output, 7.533 s
+compact CLI:        15 s
+```
+
+The final readback was correct (`total=2000000`, `distinct_id=2000000`, and
+`U54` in exactly 1,000,000 updated rows), but publish was slower than the
+matched p8 runs at approximately 6.7 s and the total CLI time did not improve.
+The p16 arm is rejected as a saturation point; p8 remains the highest
+validated opt-in relocation setting, and the default stays serial.
