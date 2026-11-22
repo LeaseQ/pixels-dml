@@ -2622,6 +2622,35 @@ RPC and investigate a lower-overhead wire representation or a larger-granularity
 server API only if a future probe can remove protobuf overhead as well as the
 hashing.
 
+### Contiguous vnode-range follow-up (2026-11-22, rejected)
+
+The sidecar follow-up reduced the wire metadata to at most one range per
+bucket: the client sent `(virtualNodeId, entryOffset, entryCount)` for the
+already bucket-contiguous entries, and the daemon used `subList` ranges instead
+of hashing each key. Chunk-boundary handling was implemented and checked so a
+bucket split across requests is merged rather than overwritten. The candidate
+was compiled and deployed only to the isolated runtime.
+
+On the same 68-column source and fixed 32-writer session, the results were:
+
+```text
+range candidate cold after restart: 27.896 s
+range candidate warm 1:              4.031 s (~248K rows/s)
+range candidate warm 2:              4.234 s (~236K rows/s)
+normal grouped-p4 warm:              2.816--3.610 s (~277--355K rows/s)
+```
+
+After two arms, the target check was exact:
+`2,000,000/100,001/1,100,000/1,000,000` for count/min/max/distinct. The
+range metadata removed the per-entry vnode field but still lost end-to-end;
+the remaining protobuf decoding, object construction, request scheduling, and
+per-vnode service work dominate the saved hash loop. The runtime was restored
+from the deployment backup with the original grouped-p4 properties and the
+candidate source was reverted. Decision: **reject** the contiguous range
+protocol as well; the next code experiment must reduce the nested protobuf
+entry representation or the number of service-side request objects, not only
+the bucket lookup.
+
 ## Fixed-source writer-count sweep below 32 (2026-11-22)
 
 The grouped p4 runtime was kept unchanged while the Trino session writer count
