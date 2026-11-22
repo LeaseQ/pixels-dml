@@ -3478,3 +3478,57 @@ contention and connection health, then test lower-concurrency or a different
 batching architecture only after the runtime is stable. The accepted changes
 remain the opt-in snapshot parallelism and the opt-in UPDATE resolver
 parallelism.
+
+### Correct-root physical-rewrite follow-up (2026-11-23)
+
+The preceding candidate12/candidate13 physical-rewrite numbers are not a fair
+layout-controlled comparison. Their table definitions supplied the generated
+`v-0-ordered` and `v-0-compact` directories as explicit `paths`. The connector
+then derived another layout below those directories, which explains the two
+physical outputs and the later metadata-path failures. Those runs remain useful
+as a rejected-candidate record, but their rewrite wall clocks must not be used
+as a baseline for the standard table-root layout.
+
+A fresh candidate15 was therefore created with one table-root URI and an
+explicit primary index:
+
+```text
+paths = .../e2e68_fresh_candidate15_20261123
+pk = id
+pk_scheme = rocksdb
+```
+
+It received two one-million-row INSERTs, then one exact one-million-row
+`UPDATE` to `U39/39.0000`. With the experimental physical-rewrite jar and
+`-Dpixels.compact.primary-resolve-parallelism=2`, COMPACT completed correctly:
+
+```text
+tag snapshot:       1,000,000 rows, 62 RPCs, 6.480 s
+physical rewrite:   14.845 s (one output)
+  primary resolve:  2,000,000 rows, 124 RPCs, 23.777 s
+relocation:         2,000,000 rows, 128 RPCs
+publish:            17.367 s
+```
+
+The final readback passed:
+
+```text
+total=2000000
+tag_1_type='U39'=1000000
+tag_1_para min/max=9.0000/39.0000
+updated-range U39=1000000
+```
+
+This is a valid correctness and phase-profile result for the standard root
+layout, but it is not yet an accepted speedup: the same-jar `parallelism=1`
+control still enters the old nested-path branch and fails before physical
+rewrite. A later p4 attempt was also discarded because its generated DDL
+retained the source table's paths; the invalid table was removed. No p2/p4
+physical-rewrite default or code change is being claimed from these runs.
+
+The immediate engineering conclusion is that compaction path normalization and
+the serial/parallel implementation split must be fixed before another
+concurrency matrix is meaningful. Until that controlled comparison exists, the
+accepted performance claims remain UPDATE resolver parallelism and tag-snapshot
+parallelism only; the primary-resolution physical rewrite remains an open
+bottleneck rather than a proven optimization.
