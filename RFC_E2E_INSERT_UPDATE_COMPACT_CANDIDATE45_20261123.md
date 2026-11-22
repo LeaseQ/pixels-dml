@@ -124,6 +124,34 @@ current stable UPDATE evidence is in the lower hundreds of thousands after
 COMPACT, while INSERT still needs a reproducible improvement before code is
 changed.
 
+## Follow-up: grouped primary writer pool 64 threads (candidate46/47)
+
+To isolate daemon-side grouped primary-index write-pool sizing, all three
+isolated daemon roles were restarted with
+`-Dpixels.index.grouped.primary.write.threads=64`. Trino remained on the
+validated p16 UPDATE configuration and the INSERT shape stayed at 32 writers.
+Both 1M-row table-to-table INSERTs passed the basic correctness check:
+
+```text
+candidate46: 8.765 s, 114,090 rows/s,
+             count=1,000,000, distinct_id=1,000,000,
+             min_id=7,000,000,001, max_id=7,001,000,000
+candidate47: 6.176 s, 161,917 rows/s,
+             count=1,000,000, distinct_id=1,000,000,
+             min_id=7,000,000,001, max_id=7,001,000,000
+```
+
+The two 64-thread runs varied substantially and neither exceeded the earlier
+32-writer candidate43 result of 193,386 rows/s (5.171 s). Therefore 64 daemon
+threads is not accepted as a stable optimization. The isolated daemon configs
+were restored to 32 threads after the experiment; no source code change was
+made.
+
+This result also narrows the next INSERT investigation: increasing the grouped
+daemon pool alone is insufficient. The next useful step is to hold the runtime
+warm and instrument the Trino page-sink/source encoding and grouped-primary
+request scheduling stages, then test only the stage shown to dominate.
+
 ## Remote artifacts
 
 ```text
@@ -134,4 +162,8 @@ logs/insert-candidate45-indexed-32writers-flush4-grouped-20261123.log
 logs/update-candidate45-after-insert-p16-20261123.log
 logs/compact-candidate45-full-e2e-no-copy-20261123.log
 logs/update-candidate45-after-compact-p16-20261123.log
+logs/insert-candidate46-indexed-32writers-grouped64-20261123.log
+logs/insert-candidate47-indexed-32writers-grouped64-20261123.log
+logs/retina-grouped64-mark-ready-19990-20261123.log
+logs/retina-grouped32-restore-mark-ready-20261123.log
 ```
