@@ -2814,3 +2814,32 @@ five cores each), while system load stayed below 0.3. This is diagnostic
 evidence against whole-host CPU saturation; the next accepted probe should
 instrument or tune grouped RocksDB write/flush scheduling and reconcile its
 per-request counters, not simply add client writers.
+
+## RocksDB WriteBatch preallocation probe (2026-11-22, rejected)
+
+The grouped primary path creates one RocksDB `WriteBatch` per vnode bucket.
+An opt-in Retina-only overlay constructed `WriteBatch(reservedBytes)` with
+`64 * entries` reserved bytes, controlled by
+`pixels.index.rocksdb.write.batch.reserve.bytes.per.entry=64`. The default
+constructor remained unchanged in the source and the overlay was placed ahead
+of the full daemon jar only on the isolated Retina. The full Maven build was
+not available because the host has no `cmake`; targeted `javac` compilation of
+`RocksDBIndex.java` succeeded, and the overlay was removed after the probe.
+
+On the same 68-column, 1M-row source and 32-writer session, all four target
+checks were exact:
+`1,000,000/100,001/1,100,000/1,000,000`. SQL timelines were:
+
+```text
+reserved WriteBatch: 7.835 s (cold), 5.016 s, 4.128 s, 4.652 s (warm)
+original LZ4 controls: 5.655 s, 3.822 s, 3.760 s, 3.711 s
+```
+
+The daemon grouped metrics also varied without a consistent reduction in
+`primary_ms` (candidate per-table sums were approximately 57.4, 45.4, 48.9,
+and 38.1 seconds). There is no reproducible end-to-end or service-side win.
+The original Retina was restored and marked READY; the system property and
+source overlay were removed. Decision: **reject** WriteBatch preallocation as
+a standalone optimization. The next probe should address the number and
+overlap of native per-vnode writes, with explicit safeguards against the
+serialization seen in the rejected single cross-CF batch.
