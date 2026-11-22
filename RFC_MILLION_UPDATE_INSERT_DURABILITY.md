@@ -1675,3 +1675,32 @@ conversion, Pixels column encoding, and source/task scheduling are the next
 targets. No code change is accepted from this probe. The next A/B must use a
 fresh, materialized one-million-row source and paired fresh targets, and must
 capture Trino query timeline metrics instead of relying only on CLI wall time.
+
+## Per-column PageSink dispatch probe (2026-11-23)
+
+The Trino JFR ordering suggested a small, reversible connector experiment:
+`PixelsPageSink.appendColumnValues` previously called the generic per-cell
+`appendValue` path, repeating the type-category dispatch for every value. The
+candidate in `pixels-trino-dml` commit `014c86b` moved that dispatch outside
+the row loop while preserving null handling, decimal width handling, heap-slice
+retention, RLE handling, and the hidden timestamp column. It compiled on the
+isolated JDK 23 build with test compilation enabled.
+
+The candidate was deployed only to the isolated Trino after a connector
+restart. The test reused the valid 68-column primary-key target and the same
+one-million-row source projection as the preceding warm probe; destination
+IDs were offset to avoid duplicates. Both arms passed exact row validation:
+
+```text
+candidate first arm: 7.147 s, count/min/max/distinct = 4M/1/4M/4M
+candidate warm arm:  5.993 s, count/min/max/distinct = 5M/1/5M/5M
+previous warm probe: 5.355 s for 1M rows (~186.7K rows/s)
+```
+
+The candidate warm arm was approximately 11.9% slower than the preceding
+comparable warm probe. It is therefore **rejected** and is not a retained
+optimization. The isolated connector was restored from its pre-deployment
+backup; SHA-256 of the restored jar and backup is identical, and the final
+post-rollback check remained `5000000/1/5000000/5000000`. The next connector
+experiment should measure Pixels writer encoding and task finishing separately
+before changing this hot loop again.
