@@ -847,7 +847,9 @@ final class PixelsTagCompactor
 
     Map<Long, IndexProto.RowLocation> getRelocatedLocations()
     {
-        return Map.copyOf(relocatedLocations);
+        // Ownership transfers to CompactionResult immediately after compact()
+        // returns; copying millions of entries here doubles peak compaction memory.
+        return relocatedLocations;
     }
 
     static final class OutputRowPosition
