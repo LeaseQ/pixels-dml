@@ -2778,12 +2778,12 @@ LZ4 control: 5.655 s (cold), 3.822 s, 3.760 s, 3.711 s (warm)
 
 The earlier NO_COMPRESSION table was not checkpointed before the Retina
 restart and returned zero visible rows afterward. Its wall times therefore
-remain a heat-only observation, not a durable comparison. In addition, the
-fresh LZ4 run's grouped log counters showed 64 requests/2M entries per
-1M-row table, which does not agree with the exact SQL row counts and must be
-explained before a compression decision is accepted. Decision: **do not
-change the compression default**; rerun only with a checkpoint-backed arm and
-reconciled request counters.
+remain a heat-only observation, not a durable comparison. A first aggregate
+over both `pixels-daemon.log` and `retina.out` appeared to show twice the
+grouped request count; those files duplicate the same Retina log lines. The
+canonical daemon log has 32 requests/1M entries per LZ4 table, matching the
+exact SQL checks. Decision: **do not change the compression default**; rerun
+only with a checkpoint-backed NO_COMPRESSION arm if compression is revisited.
 
 The next small candidate addressed a concrete client-side duplicate: grouped
 INSERT computed the vnode hash while appending each entry and then computed
