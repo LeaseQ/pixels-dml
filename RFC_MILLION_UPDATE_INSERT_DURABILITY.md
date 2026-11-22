@@ -2586,6 +2586,42 @@ benchmarked against the current 32-writer grouped-p4 path and must preserve
 abort bookkeeping, tag publication ordering, and the explicit primary-key
 correctness checks. No code change was made from this JFR alone.
 
+### Client vnode-sidecar A/B (2026-11-22, rejected)
+
+The JFR-derived candidate was implemented as an opt-in protocol field
+`virtualNodeIds`, parallel to `indexEntries`. The Trino writer populated it
+from the bucket map it already maintains, and the daemon used it only for
+grouped requests while retaining the existing per-vnode RocksDB writes. The
+candidate compiled successfully in `pixels-common`, `pixels-daemon`, and the
+Trino connector; the full reactor was not usable on cds20 because its
+unrelated `pixels-retina` native build requires `cmake`.
+
+The candidate was deployed only to the isolated runtime and compared using a
+fresh explicit-primary-key 68-column target, the fixed materialized source,
+and 32 writers:
+
+```text
+candidate cold after restart: 31.021 s
+candidate warm:                4.068 s (~246K rows/s)
+normal grouped-p4 warm:        2.816--3.610 s (~277--355K rows/s)
+```
+
+The cold arm was dominated by post-restart index initialization and is not
+used for the decision. The warm arm was still slower than the normal path,
+despite avoiding server-side SHA-256 bucket calculation. The extra repeated
+protobuf field and its parsing cost outweighed the saved hash/re-bucketing
+work in this workload. The candidate's target passed the exact physical/logical
+check after two arms:
+`2,000,000/100,001/1,100,000/1,000,000` for count/min/max/distinct.
+
+The isolated daemon and connector were then restored from the deployment
+backup, and the Trino JVM was restarted without the sidecar property. The
+candidate source changes were reverted locally. Decision: **reject** the
+parallel vnode-sidecar design in its current form; retain the existing grouped
+RPC and investigate a lower-overhead wire representation or a larger-granularity
+server API only if a future probe can remove protobuf overhead as well as the
+hashing.
+
 ## Fixed-source writer-count sweep below 32 (2026-11-22)
 
 The grouped p4 runtime was kept unchanged while the Trino session writer count
