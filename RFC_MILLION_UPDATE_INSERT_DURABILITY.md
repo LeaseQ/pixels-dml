@@ -3631,3 +3631,18 @@ by a single 2M-row table-to-table INSERT and therefore had a different ordered
 file layout from the earlier p4 fixtures. The p8 result is retained as an
 opt-in candidate, but no default is changed until a matched-layout repeat and
 an 8M-scale run confirm a stable wall-clock benefit.
+
+A matched-layout repeat (candidate24, the same 2M source table shape with a new
+root) produced nearly identical results:
+
+```text
+arm / fixture       tag snapshot   primary resolve   rewrite   publish   CLI
+p8 / candidate23   2.214 s        24.283 s           8.082 s  17.336 s  25 s
+p8 / candidate24   2.099 s        25.249 s           8.022 s  17.779 s  25 s
+```
+
+Candidate24 also passed the final readback with `total=2000000`,
+`distinct_id=2000000`, and exactly `1000000` rows carrying `U49` in the
+updated range. The repeat makes p8 a stable opt-in result for this fixture,
+but it still does not justify changing the default or claiming a general
+8M-scale improvement.
