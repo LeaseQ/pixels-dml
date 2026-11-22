@@ -1570,3 +1570,60 @@ rows were committed. Four corrective 1M appends with offsets 7M, 8M, 9M, and
 `count/min/max/distinct = 16000000/1/16000000/16000000`, with the materialized
 `UPD1M` tag still present on exactly 1M rows. The non-contiguous intermediate
 check is excluded from throughput conclusions.
+
+## 64-thread grouped-primary A/B and clean 1M tag-aware E2E (2026-11-23)
+
+An isolated Retina restart tested the opt-in JVM property
+`-Dpixels.index.grouped.primary.write.threads=64`. Earlier direct-generation
+tables created with `LIKE` did not declare `pk='id'`; their 4.666--4.676 s
+INSERT results measured a no-primary-index path and are explicitly excluded
+from the comparison.
+
+The valid arm used an explicit 68-column schema, a single table-root `paths`
+property, and `pk='id'`. With four Trino writers and scaling disabled, a 1M
+append under the 64-thread setting took 8.860 s, approximately 112.9K rows/s.
+Two preceding warm appends on a primary-index table took 8.902 s and 8.826 s
+(112.3K and 113.3K rows/s). The exact post-append check passed:
+
+```text
+count/min/max/distinct/null-tag = 1000000/1/1000000/1000000/1000000
+```
+
+This is below the accepted four-writer warm range of 124.2--152.6K rows/s.
+The 64-thread property is therefore **rejected as a throughput optimization**;
+it was not made the default and did not change the main runtime.
+
+The same clean target then ran the supported tag path:
+
+```text
+UPDATE wall: 4.598 s for 1,000,000 rows (~217.5K rows/s SQL wall)
+COMPACT -c 8: CLI wall 55.897 s, rc=0
+physical rewrite: 18.519 s
+tag-index resolve: 1,000,000 rows, 63 RPCs, 12.845 s
+primary relocation: 1,000,000 rows, 128 RPCs
+metadata publish: 9.934 s
+```
+
+Post-COMPACT checks passed exactly:
+
+```text
+count/min/max/distinct = 1000000/1/1000000/1000000
+tag_1_type='UPD1M' = 1000000
+tag_1_para=3.1400 = 1000000
+combined tag predicate = 1000000
+```
+
+The experiment also exposed a recovery precondition. The isolated recovery
+directory had a pointer to a missing checkpoint body; the retained pre-clean
+backup restored service metadata but not the later 16M target visibility,
+while the physical files remained on disk. A 32G Retina heap then failed during
+recovered write-buffer initialization with `OutOfMemoryError`; a single 64G
+isolated Retina started and served the E2E arm. This is a recovery/infrastructure
+finding, not a throughput result. All main-runtime processes were unchanged.
+
+The optimization decision is unchanged: UPDATE is already in the
+lower-hundreds-of-thousands range on the supported tag route; INSERT remains
+the gap to the million-row target. Next experiments should target grouped
+primary-index/RocksDB write cost or task/source execution, with every INSERT
+table explicitly declaring its primary key and path root before accepting a
+number.
