@@ -2508,6 +2508,45 @@ Final decision: **reject** both the synchronized and lock-free cross-CF
 single-WriteBatch variants. Keep the source tree and isolated runtime on the
 original per-vnode grouped implementation.
 
+## RocksDB WAL upper-bound probe (2026-11-22, rejected as an optimization)
+
+The active isolated runtime was copied to two fresh, explicit `pk='id'`
+68-column probe tables. Both used the same materialized one-million-row source
+and the fixed 32-writer session. The normal configuration kept
+`index.rocksdb.disable.wal=false`; a second Retina restart used only the
+temporary setting `index.rocksdb.disable.wal=true`. This was an upper-bound
+measurement, not a proposed default, because disabling WAL would weaken the
+INSERT crash-recovery contract.
+
+The SQL wall results were:
+
+```text
+WAL enabled:  first arm 4.440 s, warm arm 2.816 s (~355K rows/s)
+WAL disabled: first arm 6.117 s, warm arm 2.721 s (~367K rows/s)
+```
+
+The warm difference is only about 3% and is much smaller than the observed
+run-to-run source/task and index-initialization variation. Therefore WAL is not
+the dominant cause of the current INSERT gap. The candidate configuration was
+not retained: `pixels.properties` was restored to
+`index.rocksdb.disable.wal=false`, and Retina was restarted on the original
+grouped-primary classpath.
+
+This probe also fixed an important durability-test procedure. The probe arms
+were intentionally not followed by checkpoint publication before the restart.
+After recovery from `recovery_cds20_360092.bin`, the existing validation target
+returned exactly to its checkpoint state
+`15,000,000/20,100,001/42,100,000/15,000,000`, and both new probe tables had
+zero visible rows. This is expected replay-to-checkpoint behavior, not
+evidence of a WAL regression or data loss from a committed checkpoint. Future
+performance arms that need a post-restart durability assertion must publish a
+checkpoint first; pre-checkpoint performance-only arms must not be reported as
+durability tests.
+
+Decision: **reject disabling WAL** as a production optimization and keep WAL
+enabled. Continue investigation in the server-side grouped primary write and
+source/task scheduling paths.
+
 ## Fixed-source writer-count sweep below 32 (2026-11-22)
 
 The grouped p4 runtime was kept unchanged while the Trino session writer count
