@@ -2039,6 +2039,48 @@ tag-capable table after deploying the same-timestamp checkpoint fix. It does
 not change the INSERT throughput baseline, and it does not claim that the
 manual READY handshake can be omitted in a production lifecycle.
 
+## RunLenIntEncoder early-DELTA probe (2026-11-24, rejected)
+
+The fixed-source INSERT JFR showed `RunLenIntEncoder.determineEncoding()` as
+the leading Trino-side sampled method. The candidate moved ZigZag and
+percentile computation after the DELTA checks, so fixed-delta and monotonic
+runs could return without work that their selected encoding did not use. It
+did not change the wire format, tag columns, primary-index route, or recovery
+semantics. The candidate compiled successfully with the isolated JDK 11/23
+builds and was deployed only to the isolated Trino plugin. The original core
+jar was kept as a byte-for-byte rollback copy.
+
+The new materialized source
+`bench68_v2.e2e_alloc_source_20261124` contained exactly one million rows
+(`id=100001..1100000`, distinct IDs) and was not modified during the arms.
+The destination `bench68_v2.e2e_alloc_target_20261124` declared `pk='id'`,
+used one table-root path, and every successful arm used 32 fixed Trino
+writers with writer scaling disabled. All checks were exact and no duplicate
+IDs were observed:
+
+```text
+candidate after connector restart: 7.054 s, IDs 22100001..23100000
+candidate warm arm:               4.754 s, about 210.3K rows/s
+candidate check after 3M rows:    3000000/20100001/25100000/3000000
+
+original after connector restart: 9.289 s, 1M rows
+original warm arm:                5.920 s, about 168.9K rows/s
+original warm arms without restart: 5.366 s and 4.512 s,
+                                    about 186.4K and 221.6K rows/s
+original check after 7M rows:     5000000/20100001/29100000/5000000
+```
+
+The candidate JFR reduced the sampled `determineEncoding()` share to 15.7%
+and sampled `percentileBits()` only four times. However, the comparable
+original warm control still reached 4.512 s and its JFR retained 23.5%
+`determineEncoding()` samples. The candidate's 4.754 s result therefore falls
+inside the original run-to-run range and does not establish an E2E gain. The
+candidate was rejected, its source was restored, and the isolated runtime
+was restored to the original core SHA (`a1d514475f8467b9b10d153d14ff6b2df206cba9124f4af3bd2cf30ff2d4876d`).
+The hotspot remains a valid follow-up target, but a future change must reduce
+the complete writer/finishing path rather than only the local percentile
+work.
+
 ## Main-index buffer `putIfAbsent` probe (2026-11-22)
 
 The Retina JFR also showed `MainIndexBuffer.insert` together with
