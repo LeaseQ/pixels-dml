@@ -2408,3 +2408,24 @@ consistent with the route metric: the visible application frames were
 recording did not show a new dominant blocking subsystem or justify a code
 change; the current UPDATE implementation and tag-before-COMPACT semantics
 remain unchanged.
+
+### Grouped flush-parallelism sweep (2026-11-22)
+
+With the corrected grouped-primary property, the fixed-source 1M-row arm was
+repeated at `pixels.insert.index.flush.parallelism=2`. The first post-restart
+arm took 9.522 s and the same-configuration warm arm took 4.357 s
+(approximately 230K rows/s). The warm p2 result is below the p4 warm result of
+3.610 s (approximately 277K rows/s), while p8 was 3.859 s (approximately
+259K rows/s). The three-point sweep therefore has a clear local optimum at
+p4 for this 32-writer, 68-column fixture:
+
+```text
+grouped flush parallelism 2: 4.357 s warm
+grouped flush parallelism 4: 3.610 s warm
+grouped flush parallelism 8: 3.859 s warm
+```
+
+Decision: reject p2 and p8 as the next optimization direction and restore the
+isolated runtime to grouped p4. The remaining INSERT gap is not explained by
+this client-side flush fan-out knob; future work should measure or reduce the
+server-side grouped RocksDB/main-index path and source/task scheduling.
