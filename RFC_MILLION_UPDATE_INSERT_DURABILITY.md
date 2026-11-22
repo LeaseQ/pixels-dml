@@ -3680,3 +3680,24 @@ the improvement comes from overlapping independent bucket RPCs, not from
 weakening correctness or reducing the number of index updates. The result is
 therefore retained as a stable opt-in optimization, but the default remains
 serial pending an 8M-scale run and index-service saturation/failure testing.
+
+The relocation path was also exercised at the 8M-row scale in candidate27:
+
+```text
+tag snapshot:       0 rows
+physical rewrite:   8,000,000 rows, one output, 22.475 s
+primary resolve:    8,000,000 rows, 489 RPCs, 103.445 s (summed RPC time)
+relocation:         8,000,000 rows, 512 RPCs
+publish:            28.648 s
+compact CLI:        51 s
+```
+
+The readback retained `8,000,000` rows, `8,000,000` distinct primary keys,
+and the pre-existing physical `U47` rows. This is relocation-scale evidence,
+not an 8M UPDATE/tag-visibility result: the attempted UPDATE used a
+non-existent sparse ID interval and correctly affected zero rows. A follow-up
+candidate copied from the already-compacted candidate22 source also returned
+zero for an existing interval, showing that this table-to-table fixture does
+not preserve a writable primary-index state for a subsequent tag UPDATE. It
+is excluded from UPDATE throughput conclusions. The valid tag-aware E2E
+evidence remains candidate22 at 8M and candidates25/26 at 2M.
