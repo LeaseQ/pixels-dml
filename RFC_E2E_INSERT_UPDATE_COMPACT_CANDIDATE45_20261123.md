@@ -190,6 +190,45 @@ allocation is not the dominant stable end-to-end lever. The next probe should
 stay at the query/source scheduling and Exchange/task-finishing layer, with
 the existing sink and grouped-RPC metrics retained for attribution.
 
+## Query operator split and 64-writer recheck (candidate52/53)
+
+The restored connector was used for a fresh 32-writer baseline (candidate52).
+The query API supplied an operator-level split in addition to the connector
+metrics:
+
+```text
+candidate52: CLI wall 9.563 s, Trino elapsed 7.59 s, correct 1M-row range
+TableScanOperator:    getOutputWall=8.60 s, CPU=2.13 s, 1,000,000 rows
+TableWriterOperator:  addInputWall=27.66 s, CPU=13.26 s, finishWall=56.82 s
+stage-1 Exchange:      getOutputWall=4.09 s, blockedWall=46.11 s
+metadata publish:      0.387 s
+```
+
+The operator times are sums across drivers, not end-to-end wall time. They
+nevertheless identify the active shape: page-sink/table-writer processing and
+Exchange backpressure dominate the query-level work; metadata publication is
+small. This also explains why cold and warm runs vary sharply even when the
+SQL is identical.
+
+To test whether more writer pipelines relieve that pressure, candidate53 used
+the next legal Trino writer count, 64, with the daemon back at 32 grouped
+threads:
+
+```text
+candidate53: CLI wall 7.021 s, Trino elapsed 5.06 s, 142,429 rows/s
+correctness: count=1,000,000, distinct_id=1,000,000,
+             min_id=7,000,000,001, max_id=7,001,000,000
+```
+
+This did not beat the accepted 32-writer result of 193,386 rows/s. Combined
+with the earlier 16/32 comparison and the rejected 64-daemon-thread test,
+writer-count expansion is not accepted as the next optimization. Future INSERT
+work should target the page-sink conversion/encoding and Exchange scheduling
+with stage-level evidence, rather than increasing concurrency again.
+
+The isolated runtime remains on the restored old connector, 32 daemon grouped
+threads, and p16 UPDATE resolver settings.
+
 ## Remote artifacts
 
 ```text
@@ -211,4 +250,8 @@ logs/insert-candidate50-indexed-32writers-pk-encoding-20261123.log
 logs/insert-candidate51-indexed-32writers-pk-encoding-20261123.log
 logs/console-pk-byte-encoding-20261123.log
 logs/console-restore-old-connector-20261123.log
+logs/insert-candidate52-indexed-32writers-baseline-20261123.log
+logs/insert-candidate53-indexed-64writers-baseline-20261123.log
+logs/query-candidate52-summary-20261123.txt
+logs/query-candidate52-operators-20261123.txt
 ```
