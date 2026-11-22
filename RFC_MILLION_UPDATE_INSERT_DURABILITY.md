@@ -2867,3 +2867,11 @@ restarted and marked READY. Decision: **reject** this simple flush-thread
 increase; the next RocksDB experiment needs to distinguish native write
 queueing from background flush/compaction work rather than raising both
 implicitly.
+
+The RocksDB `LOG` files for the four flush4 tables provide a negative
+diagnostic result: write-stall counters were zero, estimated pending
+compaction bytes were zero, and cumulative compaction work was approximately
+zero during these fresh INSERTs. The runtime is now restored to
+`max.background.flushes=2`, LZ4, WAL enabled, with the original daemon and
+connector processes active. This makes the next investigation a grouped
+native-write scheduling/lock profile, not another background-flush knob.
