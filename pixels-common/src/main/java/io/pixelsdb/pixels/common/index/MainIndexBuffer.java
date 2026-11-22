@@ -125,9 +125,11 @@ public class MainIndexBuffer implements Closeable
         }
         else
         {
-            if (!fileBuffer.containsKey(rowId))
+            // HashMap.putIfAbsent performs the lookup and insertion in one pass.
+            // INSERT publishes unique row ids, so avoid the containsKey + put pair
+            // on the hot path while preserving the duplicate-rejection contract.
+            if (fileBuffer.putIfAbsent(rowId, location) == null)
             {
-                fileBuffer.put(rowId, location);
                 if (this.populateCache)
                 {
                     this.indexCache.admit(rowId, location);
