@@ -2723,6 +2723,32 @@ future work should reduce grouped protobuf entry/object overhead or improve
 the per-vnode RocksDB write path, with a same-process control captured in the
 same run.
 
+### Server-side array bucketing follow-up (2026-11-22, rejected)
+
+To isolate the small `HashMap.getNode` signal from the JFR, the grouped daemon
+path was changed only in the isolated runtime to use a fixed 128-slot array of
+bucket lists. RPC shape, SHA-256 bucket assignment, RocksDB `WriteBatch`, WAL,
+and the 32-thread executor were unchanged. This was intended as a low-risk
+allocation/indexing probe, not a semantic change.
+
+On the same fixed source and 32-writer session, the candidate completed three
+1M-row arms with exact checks after each arm:
+`3,000,000/100,001/1,100,000/1,000,000`. SQL wall times were:
+
+```text
+array bucketing: cold 5.013 s; warm 3.617 s, 3.625 s, 3.075 s
+immediate original control: cold 7.217 s; warm 3.980 s, 3.520 s, 3.418 s
+```
+
+The isolated service metric covered four arms/4M rows for both comparable
+tables: the array candidate summed about 83.2 s of `primary_ms`, while the
+original control summed about 69.8 s. The one 3.075 s arm is therefore treated
+as run-to-run variance, not a reproducible improvement. The overlay was
+removed and the original daemon jar restored. Decision: **reject** array
+bucketing as a standalone optimization; the next probe must address the
+RocksDB write/flush path or the grouped request lifecycle rather than the
+container used for re-bucketing.
+
 ## Fixed-source writer-count sweep below 32 (2026-11-22)
 
 The grouped p4 runtime was kept unchanged while the Trino session writer count
