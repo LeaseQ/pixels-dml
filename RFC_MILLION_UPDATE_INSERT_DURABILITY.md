@@ -2329,3 +2329,82 @@ isolated runtime remains on the original implementation. Decision: **reject**
 this micro-optimization. The next main-index work should target measured
 SQLite flush/lock behavior or a larger end-to-end bottleneck, not individual
 HashMap lookup count.
+
+## Correct grouped-primary property, p8 rejection, and fresh tag UPDATE JFR (2026-11-22)
+
+The isolated Trino process had previously been started with
+`-Dpixels.index.grouped.primary.write=true`. That is a daemon property, not the
+connector switch. The connector reads
+`pixels.insert.index.grouped.primary.write` from
+`PixelsInsertIndexWriter.GROUPED_PRIMARY_WRITE_PROPERTY`. The old process
+therefore still issued 128 primary-index RPCs per file. This was corrected only
+in the isolated runtime; no production default was changed.
+
+### Grouped-primary E2E A/B
+
+The fixed materialized source
+`bench68_v2.e2e_alloc_source_20261124` remained exactly one million rows, and
+the destination declared `pk='id'` with one table-root path. Every arm used 32
+Trino writers through:
+
+```text
+task_scale_writers_enabled=false,task_min_writer_count=32
+```
+
+The prior non-grouped warm arm completed in 4.978 s (about 201K rows/s) and
+logged `primary_rpc_count=128` per file. With the corrected connector property
+and `pixels.insert.index.flush.parallelism=4`, the first arm completed in
+6.141 s after the isolated Trino restart, then a same-configuration warm arm
+completed in 3.610 s (about 277K rows/s). The warm grouped arm logged 32 files,
+32 primary RPCs, one RPC per file, and the target check remained exact at
+11,000,000 rows with distinct primary keys. In the first corrected arm, the
+32 grouped writes summed to about 22.2 s of primary-put wall intervals while
+the final main-index flushes summed to about 1.22 s. This confirms that RPC
+count was reduced, but the grouped request does not automatically remove the
+server-side index work or its contention.
+
+The follow-up arm used `pixels.insert.index.flush.parallelism=8`. The first
+attempt was invalid because a hand-written restart command omitted the existing
+`--add-opens=java.base/java.nio=ALL-UNNAMED` runtime requirement; it failed
+before reading a source row and the target was unchanged. After restoring the
+complete command, the cold arm took 9.134 s and the warm arm took 3.859 s
+(about 259K rows/s). The corrected warm result is below the p4 warm result, so
+parallelism 8 is rejected. The isolated runtime was restored to p4 with the
+correct connector property, grouped max entries 200,000, and daemon grouped
+threads 32.
+
+Decision: retain grouped-primary as an experimental, explicitly configured
+route because the one-RPC-per-file behavior is real and correctness passed,
+but do not make it a default optimization claim. The current fixed-source
+INSERT acceptance point remains the best repeatable warm result rather than a
+million-row result. Further gains must come from reducing grouped server-side
+RocksDB/main-index work or source/task overhead, not just reducing RPC count or
+raising client flush parallelism.
+
+### Fresh supported 1M-row UPDATE and Retina JFR
+
+On the same 13-million-row target, three disjoint one-million-row exact-key
+updates changed two tag columns per row. All three returned exactly 1,000,000
+updated rows. The first two stable arms were:
+
+```text
+SQL wall 1.997 s  = 501K rows/s
+SQL wall 1.308 s  = 763K rows/s
+```
+
+For both arms, the route log reported `executor=MPP`,
+`exact_eligible=true`, one primary-key domain, and `rpc_count=1`; no merge
+fallback metric appeared. The faster arm's connector metric was
+`encoding_ms=51.792`, `request_build_ms=206.024`, `rpc_ms=879.939`, and
+`total_ms=1137.827`, with a roughly 10 MB request. This keeps the supported
+tagging UPDATE route above the minimum target and near the stretch target on a
+warm exact-key run.
+
+A short JFR around a further 1M-row UPDATE wrote
+`runtime/jfr/update-e2e-1m-20261124.jfr` (3.9 MB). Its Java samples were
+consistent with the route metric: the visible application frames were
+`IndexServiceImpl.appendSharedTagIndexEntries`, `PixelsTagIndex.appendBatch`,
+`PixelsTagIndexCodec.encode`, and `PixelsTagIndex.estimateValueBytes`. The
+recording did not show a new dominant blocking subsystem or justify a code
+change; the current UPDATE implementation and tag-before-COMPACT semantics
+remain unchanged.
