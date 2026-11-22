@@ -3398,3 +3398,48 @@ The 32,768-key arm also lost to the 65,536-key point. The matrix therefore
 rejects both new batch sizes and restores the isolated runtime to
 `batch_size=65536, parallelism=16`; the default source behavior remains
 serialized (`parallelism=1`).
+
+## Parallel tag-snapshot resolution and physical rewrite profile (2026-11-23)
+
+The compaction path had the same serialized shape as the original UPDATE
+resolver: tag-index snapshot keys were resolved in sequential 16,384-key RPCs.
+The CLI now supports the opt-in property:
+
+```text
+-Dpixels.compact.primary-resolve-parallelism=N
+```
+
+The default remains `1`. On candidate11, which had no remaining ordered input
+after its accepted compact, a 4M-row snapshot-only comparison reduced the
+tag-resolution phase from 50.563 s and 245 RPCs to 7.138 s with `N=8`. This is
+not a physical rewrite throughput result, but it confirms that the independent
+snapshot RPCs overlap safely and preserve the ordered response contract.
+
+A real physical-rewrite validation was then run on candidate10, which still
+had two 1M-row ordered files. One 1M-row range was updated to `U35/35.0000`;
+the new CLI compacted the table with `N=8` and passed the final readback:
+
+```text
+total=2000000
+tag_1_type='U35'=1000000
+tag_1_para=35.0000=1000000
+updated-range U35=1000000
+```
+
+The phase metrics were:
+
+```text
+tag snapshot:       1,000,000 rows, 62 RPCs, 2.159 s
+physical rewrite:   32.955 s
+  primary resolve:  2,000,000 rows, 124 RPCs, 24.608 s
+  non-resolve work: 8.347 s
+relocation:         2,000,000 rows, 128 RPCs
+publish:            18.002 s
+total CLI:          about 51 s
+```
+
+The candidate is accepted as an opt-in compaction optimization for the
+snapshot phase, but the larger remaining bottleneck is the primary resolution
+performed while rewriting source rows. Further compaction work should target
+that 124-RPC path; writer-count tuning is not the next lever. The code was
+compiled on cds20 and was used only by the isolated CLI jar.
