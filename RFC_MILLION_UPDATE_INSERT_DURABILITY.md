@@ -3629,8 +3629,8 @@ shows that the old bad-layout p8 failure must not be generalized to all p8
 runs. It is not yet a controlled p4-vs-p8 benchmark: candidate23 was produced
 by a single 2M-row table-to-table INSERT and therefore had a different ordered
 file layout from the earlier p4 fixtures. The p8 result is retained as an
-opt-in candidate, but no default is changed until a matched-layout repeat and
-an 8M-scale run confirm a stable wall-clock benefit.
+opt-in candidate pending the matched-layout repeat and the later 8M writable
+tag-aware validation recorded below.
 
 A matched-layout repeat (candidate24, the same 2M source table shape with a new
 root) produced nearly identical results:
@@ -3679,7 +3679,7 @@ range (`U50` and `U51`, respectively). The relocation RPC count remained 128;
 the improvement comes from overlapping independent bucket RPCs, not from
 weakening correctness or reducing the number of index updates. The result is
 therefore retained as a stable opt-in optimization, but the default remains
-serial pending an 8M-scale run and index-service saturation/failure testing.
+serial pending index-service saturation and failure-injection testing.
 
 The relocation path was also exercised at the 8M-row scale in candidate27:
 
@@ -3701,3 +3701,42 @@ zero for an existing interval, showing that this table-to-table fixture does
 not preserve a writable primary-index state for a subsequent tag UPDATE. It
 is excluded from UPDATE throughput conclusions. The valid tag-aware E2E
 evidence remains candidate22 at 8M and candidates25/26 at 2M.
+
+### 8M writable tag-aware p8/p8 E2E (2026-11-23)
+
+Candidate29 closes the scale-validation gap with a writable fixture. It was
+constructed from the clean 1M candidate9 source using eight direct INSERTs;
+each subsequent INSERT added a `1,000,000,000` primary-key offset. This is
+important: copying from an already-compacted source does not preserve the
+writable primary-index state required for a subsequent UPDATE. Candidate29
+then updated the existing second ID segment
+(`8000000001--8001000000`) to `U53/53.0000`; the UPDATE itself returned
+exactly 1,000,000 rows.
+
+COMPACT used both opt-in settings at p8:
+
+```text
+tag snapshot:       1,000,000 rows, 62 RPCs,   4.284 s
+physical rewrite:   8,000,000 rows, one output, 25.156 s
+primary resolve:    8,000,000 rows, 496 RPCs, 105.360 s (summed RPC time)
+relocation:         8,000,000 rows, 512 RPCs
+publish:            one output, 30.691 s
+compact CLI:        55 s
+```
+
+The final Trino readback passed:
+
+```text
+total=8000000
+distinct_id=8000000
+tag_1_type='U53'=1000000
+tag_1_para min/max=9.0000/53.0000
+updated-range U53=1000000
+```
+
+This is the first complete 8M writable tag-aware E2E for the p8 resolver plus
+p8 bucket-relocation pipeline. It validates correctness and scale, while the
+summed primary-resolution time and publish phase remain the dominant costs.
+The defaults remain unchanged; controlled index-service saturation and
+failure-injection testing are still required before considering a default
+parallel setting.
