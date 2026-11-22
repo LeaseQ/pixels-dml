@@ -152,6 +152,44 @@ daemon pool alone is insufficient. The next useful step is to hold the runtime
 warm and instrument the Trino page-sink/source encoding and grouped-primary
 request scheduling stages, then test only the stage shown to dominate.
 
+## Follow-up: fixed-width primary-key encoding probe (candidate50/51, rejected)
+
+The indexed INSERT path encoded every fixed-width primary-key cell through
+`ByteBuffer.allocate(...).put...().array()`. A local candidate replaced only
+that vector-to-byte conversion with equivalent big-endian byte-array writes and
+added signed `BIGINT` boundary coverage. The focused `pixels-core` test passed
+(5 tests, 0 failures), and the candidate connector built and loaded in the
+isolated Trino.
+
+The candidate was tested on the same materialized 1M-row source and explicit
+`pk='id'` table metadata. Both arms passed the exact count/distinct/range check:
+
+```text
+candidate50, first run: 9.192 s CLI wall, 108.8K rows/s
+  Trino elapsed: 7.17 s
+  sink sums across 32 writers: write_ms=12.800 s, index_ms=16.398 s
+
+candidate51, second run: 6.173 s CLI wall, 162.0K rows/s
+  Trino elapsed: 4.19 s
+  sink sums across 32 writers: write_ms=1.314 s, index_ms=2.248 s
+```
+
+The second arm did not beat the accepted 32-writer result of 193.4K rows/s,
+and the first arm showed a large cold-start tail. The change therefore does
+not establish a stable end-to-end improvement; both the local worktree and the
+isolated runtime were restored to the previous implementation. This probe is
+rejected, not committed as code.
+
+During the same follow-up, a planned 24-writer arm was rejected by Trino 466
+before reading a source row: `task_max_writer_count must be a power of 2: 24`.
+It produced no data and must not be compared with historical 24-writer
+measurements from a different runtime/configuration.
+
+The evidence further narrows the INSERT direction: fixed-width primary-key
+allocation is not the dominant stable end-to-end lever. The next probe should
+stay at the query/source scheduling and Exchange/task-finishing layer, with
+the existing sink and grouped-RPC metrics retained for attribution.
+
 ## Remote artifacts
 
 ```text
@@ -166,4 +204,11 @@ logs/insert-candidate46-indexed-32writers-grouped64-20261123.log
 logs/insert-candidate47-indexed-32writers-grouped64-20261123.log
 logs/retina-grouped64-mark-ready-19990-20261123.log
 logs/retina-grouped32-restore-mark-ready-20261123.log
+logs/test-pk-byte-encoding-20261123.log
+logs/install-pk-byte-encoding-20261123.log
+logs/build-connector-pk-byte-encoding-20261123.log
+logs/insert-candidate50-indexed-32writers-pk-encoding-20261123.log
+logs/insert-candidate51-indexed-32writers-pk-encoding-20261123.log
+logs/console-pk-byte-encoding-20261123.log
+logs/console-restore-old-connector-20261123.log
 ```
