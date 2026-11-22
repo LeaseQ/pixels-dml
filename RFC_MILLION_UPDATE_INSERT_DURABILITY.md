@@ -2078,3 +2078,81 @@ final exact check after all accepted appends was
 `tag_1_type='PIA'` on 8,000,000 rows and `tag_2_type IS NULL` on 8,010,000
 rows. No correctness regression was observed; the result is a negative
 throughput finding, not a change to the INSERT baseline.
+
+## Table-scoped 2M INSERT -> UPDATE -> COMPACT and checkpoint-watermark probe (2026-11-22)
+
+After enabling the already-existing opt-in `index.rocksdb.table.scoped=true`
+on the isolated Retina, a fixed 68-column target
+`bench68_v2.table_scoped_e2e_target_20261122` was populated from the
+materialized one-million-row source in two arms. The final pre-compaction
+INSERT check was exact:
+
+```text
+count/min/max/distinct = 2000000/100001/3100000/2000000
+tag_1_type='PIA'       = 2000000
+tag_2_type IS NULL     = 2000000
+```
+
+The second arm then ran the supported two-column tagging UPDATE for one
+million keys. SQL wall time was 2.045 s, approximately 489K rows/s. As
+required by the versioned tag protocol, the pre-COMPACT read still showed the
+old materialized tags. Tag-aware `COMPACT -c 8` completed in 98 s, including
+physical rewrite 78.2 s, tag resolve 26.7 s, and publish 20.5 s. Post-COMPACT
+checks passed exactly: 2M rows, unique IDs, 1M rows with
+`tag_1_type='SCOPED'`, 1M rows with `tag_1_para=3.1400`, and the other 1M
+rows retained `PIA`.
+
+The first restart gate failed for a reason separate from the UPDATE or
+table-scoped RocksDB implementation. The checkpoint published before the
+compact file was visible to recovery, so the restarted fixed jar reported
+`baselineFiles=197, retired=2` and the target read zero rows. This is retained
+as a negative durability sample; it is not counted as a successful E2E result.
+
+The checkpoint investigation found that the isolated transaction service
+returned `safeTrue=0` but `safeFalse=300670`. The writer high watermark had
+advanced, while the read-only low watermark remained at zero. A read-only
+`beginTrans` call also failed in this runtime, whereas a normal begin/commit
+advanced the writer watermark to 300671. Therefore the 300-second checkpoint
+cycle could not safely publish a newer checkpoint when it included running
+queries, even though `/v1/query` showed no active Trino query.
+
+### Opt-in watermark experiment
+
+The code now has an explicit opt-in property:
+
+```properties
+retina.gc.include.running.queries=true
+```
+
+The default remains `true`. When an isolated test has independently proved
+that no long-running readers are present, setting it to `false` makes GC use
+the writer-safe watermark. This is a diagnostic/durability switch, not a
+production-default change: ignoring a real running reader would be unsafe.
+
+With the property set to `false` and the GC interval temporarily set to 10 s,
+an isolated opt-in jar published checkpoints at `checkpointAppliedTs=300671`
+and `300675`. The opt-in jar SHA256 was
+`72b15257ab5e3d0c1b26e7a3985493eb5203ad81fdd510333c7b39d91a799686`. A new table
+`bench68_v2.table_scoped_optin_checkpoint_20261122` then ran 100K INSERT,
+10K tagging UPDATE, and tag-aware COMPACT. The pre-restart materialized check
+was exact:
+
+```text
+count/min/max/distinct = 100000/100001/200000/100000
+tag_1_type='OPTIN'     = 10000
+tag_1_para=8.8800      = 10000
+```
+
+After the opt-in Retina was restarted and marked READY, the same exact check
+passed. The prior stale-checkpoint table remained at zero, demonstrating that
+the result is specifically attributable to publishing a newer checkpoint and
+not to a query-cache artifact. The runtime was then restored to the original
+fixed jar and original configuration (`retina.gc.interval=300`, default
+`includeRunningQueries=true`, and table-scoped mode unset).
+
+Decision: retain the property and the evidence, but do not enable it by
+default or claim the 2M table-scoped arm restart-durable under the current
+low-watermark behavior. The next durable fix should make the transaction
+service advance the read-only low watermark for completed autocommit work, or
+provide a lifecycle-safe checkpoint trigger; then rerun the full 2M gate with
+the conservative `includeRunningQueries=true` setting.

@@ -936,7 +936,17 @@ public class RetinaResourceManager
         long timestamp = 0;
         try
         {
-            timestamp = TransService.Instance().getSafeVisibilityFoldingTimestamp(true);
+            // Keep the production default conservative: a checkpoint must not
+            // fold away versions that a running reader can still observe. An
+            // isolated deployment may explicitly disable this guard after it
+            // has established that no long-running readers are present; this
+            // is useful for environments whose read-only watermark is not
+            // advanced by the connector's autocommit path.
+            String includeRunningQueriesProperty = ConfigFactory.Instance()
+                    .getProperty("retina.gc.include.running.queries");
+            boolean includeRunningQueries = includeRunningQueriesProperty == null
+                    || Boolean.parseBoolean(includeRunningQueriesProperty);
+            timestamp = TransService.Instance().getSafeVisibilityFoldingTimestamp(includeRunningQueries);
         } catch (TransException e)
         {
             logger.error("Error while getting safe visibility folding timestamp", e);
