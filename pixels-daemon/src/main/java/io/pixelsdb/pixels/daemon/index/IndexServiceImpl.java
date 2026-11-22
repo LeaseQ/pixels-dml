@@ -1249,6 +1249,9 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
         IndexProto.ResolvePrimaryEntriesResponse.Builder builder =
                 IndexProto.ResolvePrimaryEntriesResponse.newBuilder();
         long start = System.nanoTime();
+        long bucketBuildNanos = 0L;
+        long singlePointLookupNanos = 0L;
+        long locationResponseNanos = 0L;
         int resolvedCount = 0;
         try
         {
@@ -1256,6 +1259,7 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             MainIndex mainIndex = MainIndexFactory.Instance().getMainIndex(request.getTableId());
             Map<Integer, SinglePointIndex> singlePointIndexes = new HashMap<>();
             Map<Integer, List<IndexProto.IndexKey>> keysByBucket = new HashMap<>();
+            long bucketBuildStart = System.nanoTime();
             for (IndexProto.IndexKey key : request.getIndexKeysList())
             {
                 if (request.getIgnoreMissing())
@@ -1276,9 +1280,11 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                     });
                 }
             }
+            bucketBuildNanos = System.nanoTime() - bucketBuildStart;
             Map<IndexProto.IndexKey, Long> resolvedRowIds = new HashMap<>();
             if (request.getIgnoreMissing())
             {
+                long singlePointStart = System.nanoTime();
                 for (Map.Entry<Integer, List<IndexProto.IndexKey>> bucket : keysByBucket.entrySet())
                 {
                     List<Long> rowIds = singlePointIndexes.get(bucket.getKey()).getUniqueRowIds(bucket.getValue());
@@ -1287,7 +1293,9 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                         resolvedRowIds.put(bucket.getValue().get(i), rowIds.get(i));
                     }
                 }
+                singlePointLookupNanos = System.nanoTime() - singlePointStart;
             }
+            long locationResponseStart = System.nanoTime();
             for (IndexProto.IndexKey key : request.getIndexKeysList())
             {
                 long rowId;
@@ -1336,6 +1344,7 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                         .build());
                 resolvedCount++;
             }
+            locationResponseNanos = System.nanoTime() - locationResponseStart;
             if (!failed)
             {
                 builder.setErrorCode(ErrorCode.SUCCESS);
@@ -1349,8 +1358,10 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
         finally
         {
             logger.info("[PIXELS_PRIMARY_RESOLVE_METRIC] tableId={}, indexId={}, keys={}, resolved={}, " +
-                            "serviceMs={}", request.getTableId(), request.getIndexId(),
-                    request.getIndexKeysCount(), resolvedCount, (System.nanoTime() - start) / 1_000_000.0);
+                            "bucketMs={}, singlePointMs={}, locationResponseMs={}, serviceMs={}",
+                    request.getTableId(), request.getIndexId(), request.getIndexKeysCount(), resolvedCount,
+                    bucketBuildNanos / 1_000_000.0, singlePointLookupNanos / 1_000_000.0,
+                    locationResponseNanos / 1_000_000.0, (System.nanoTime() - start) / 1_000_000.0);
         }
         responseObserver.onNext(builder.build());
         responseObserver.onCompleted();
