@@ -1331,4 +1331,40 @@ checkpoint gate therefore behaved as designed. The next performance direction
 remains grouped primary-write/flush scheduling and RocksDB write-shape
 experiments, not another small key-encoding or map-reuse micro-optimization.
 
+### Trino writer-count / RPC-shape probe (2026-11-24)
+
+The next probe kept the stable default runtime and changed only the Trino
+session writer count. This tests whether the 32-writer route creates too many
+small grouped RPCs. The runs were deliberately made in one stable daemon
+lifetime, so they are a warm-shape exploration rather than a clean cold-start
+A/B acceptance test:
+
+| Writers | Query | RPCs per writer | Elapsed | Approx. rows/s |
+|---:|---|---:|---:|---:|
+| 1 | `20261123_202129_00051_k85c5` | 5 | 18.139s | 55.1K |
+| 8 | `20261123_202213_00052_k85c5` | 1 | 12.114s | 82.5K |
+| 16 | `20261123_202257_00053_k85c5` | 1 | 8.392s | 119.2K |
+| 24 | `20261123_202341_00054_k85c5` | 1 | 8.084s | 123.7K |
+| 32 | `20261123_202416_00055_k85c5` | 1 | 8.139s | 122.9K |
+
+The one-writer arm reduced the Retina grouped-primary work to a few seconds,
+but its upstream scan lost too much parallelism. Increasing to 16--32 writers
+restored scan parallelism while keeping one roughly 40--100K-entry grouped RPC
+per writer; 24 writers was the fastest observed arm in this warm sequence.
+This is a useful route-level optimization direction, but it is not yet a
+production default: writer count is workload- and cluster-dependent, and the
+measurements need a repeated matched cold/warm matrix before being promoted.
+
+All five arms passed the recovery gate. Checkpoint
+`recovery_cds20_650006.bin` contained the complete file-id sets for q51--q55:
+`105269` (1/1), `105270..105277` (8/8), `105278..105293` (16/16),
+`105294..105317` (24/24), and `105318..105349` (32/32). Stable readback after
+the gate was exact:
+
+```text
+count=36,000,000
+min_id=4,000,000,001 max_id=51,001,000,000 distinct_id=36,000,000
+tag_1_type IS NULL=0 tag_1_type IS NOT NULL=36,000,000
+```
+
 The candidate remains default-off.
