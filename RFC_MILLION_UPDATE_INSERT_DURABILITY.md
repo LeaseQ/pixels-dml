@@ -4014,9 +4014,9 @@ Commit `2fc7677` therefore changes
 unlimited behavior, so operators retain an explicit escape hatch. The change
 is a connector default only; it does not alter UPDATE semantics, tag layout,
 checkpoint format, or the Retina GC configuration. The isolated validation
-runtime remains on an explicit cap-24 argument while the new default is built
-and exercised separately, so this commit should not be read as production
-deployment evidence yet.
+runtime used an explicit cap-24 argument when this commit was prepared; the
+following section records the subsequent no-property default-value E2E check.
+This commit should not be read as production deployment evidence by itself.
 
 ## Code-default cap-24 E2E check (2026-11-24)
 
@@ -4066,3 +4066,28 @@ max(id)=67,001,000,000
 Increasing writer count on this single-node fixture is therefore rejected. The
 result supports the current diagnosis that the dominant cost is the Trino
 data/exchange and page conversion path, not the final metadata publish RPC.
+
+## Sustained 3M-row INSERT and queryStats evidence (2026-11-24)
+
+To reduce sensitivity to a single 1M-row timing, one statement appended three
+disjoint 1M-row source copies with the accepted 24-writer settings. It took
+10.391 s for 3,000,000 rows, or approximately 289K rows/s. The exact target
+check passed:
+
+```text
+count=10,100,000
+distinct(id)=10,100,000
+min(id)=60,000,000,001
+max(id)=80,001,000,000
+tag_1_type='U111'=10,100,000
+tag_1_para min=max=111.0000
+```
+
+For the preceding 1M default-value arm, Trino queryStats reported 290 MB of
+physical input, 437 MB of internal network input, 595 MB of stage output, and
+3.12 s of Stage 1 `ExchangeOperator` wall time (3.07 s CPU) inside a 4.062 s
+query. The connector publish metric was 195 ms. This is the strongest current
+evidence that the single-node ceiling is in the Trino page/exchange and data
+conversion path, rather than in Retina metadata publication. A transient
+thread-list sample was not used as evidence because it did not provide a
+reliable interval CPU measurement.
