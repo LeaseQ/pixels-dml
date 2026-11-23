@@ -4159,6 +4159,54 @@ epoch `1dc618b2-432c-4f48-a4e9-c7af198c5f22`. The latest published checkpoint
 body was `recovery_cds20_670120.bin`; this is a live-state check, not a new
 post-restart readback gate.
 
+## Direct indexed versus no-index INSERT path (2026-11-24)
+
+The preceding Exchange/PageSink evidence was complemented by a clean direct
+path comparison on the same 68-column, 1M-row materialized source. The
+indexed arm used the ordinary table-to-table `INSERT ... SELECT` route with
+the primary-key index and the tag columns intact. A no-index table was used
+only as a diagnostic upper bound; it is not an acceptable implementation
+because it removes the primary-index and tag-aware update contract.
+
+The fresh indexed direct arm (`20261123_231238_00043_mb5ng`) took 5.136 s for
+1,000,000 rows (~195K rows/s). QueryStats showed approximately 4.10 s of
+Stage 1 `ExchangeOperator` output wall time and 10.79 s of summed
+`TableWriterOperator` add-input wall time. The per-writer connector metrics
+reported one grouped primary RPC each; the grouped service metrics showed
+`primary_ms` around 0.83--2.20 s for 30--56K-entry requests, while the main
+index portion was only tens of milliseconds.
+
+The no-index diagnostic arm (`20261123_231342_00046_mb5ng`) took 2.403 s
+(~416K rows/s) with the same source shape and 24 fragments. Its sink metrics
+reported `index_ms=0`, and its publish metric was 126 ms. This isolates the
+primary-index write path as a large cost component, but it does not imply that
+the index can be removed from the production route.
+
+A clean indexed warm append was then run against
+`validationfresh.e2e68_page_direct_20261124` using 24 writers,
+`task_concurrency=64`, and writer scaling disabled. Query
+`20261123_232333_00055_mb5ng` inserted a disjoint 1,000,000-row range in
+4.188 s (~239K rows/s). The final table check was exact:
+
+```text
+count=2,000,000
+distinct(id)=2,000,000
+min(id)=10,000,000,001
+max(id)=410,001,000,000
+tag_1_type='U111'=2,000,000
+tag_1_para min=max=111.0000
+```
+
+The append's publish metric was 103 ms; representative per-writer primary
+put wall times reached 1.24 s, with main-index flushes generally below 50 ms.
+This clean warm control confirms that the earlier indexed/no-index gap is not
+only first-table initialization. The immediate optimization target is now
+the grouped primary-index/RocksDB write schedule and its interaction with the
+24 concurrent Trino writers. The diagnostic `direct2` table is excluded from
+correctness baselines because a repeated harness submission left duplicate
+physical rows; its isolated query timing remains usable only as a performance
+probe for the disjoint range that it inserted.
+
 ## Multi-source split probe and fixture correction (2026-11-24)
 
 The large candidate-85 table was not a usable range-slice source: although it
