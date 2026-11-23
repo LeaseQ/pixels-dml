@@ -586,3 +586,65 @@ end-to-end and had primary times of 1093.259, 678.972, 672.867, 654.083, and
 the 12.112s observation is runtime variance rather than a demonstrated batch
 size win. The feature code was removed and the isolated runtime restored to the
 baseline daemon without the flag.
+
+## Follow-up: clean root-layout tag-aware E2E (candidate82/83)
+
+The first compact attempts on candidates79--81 exposed a test-fixture error:
+their `paths` property explicitly named generated `v-0-ordered` and
+`v-0-compact` directories. The connector then derived another layout level,
+so COMPACT could not find metadata for the original directory. These runs are
+rejected as path-fixture failures, not engine-performance evidence. The
+standard fixture is one table-root URI plus `pk='id'` and `pk_scheme='rocksdb'`;
+the connector derives the ordered and compact layouts.
+
+Candidate83 was created with that standard root layout and used the existing
+1M-row source table. It completed the full tag-aware route:
+
+```text
+INSERT:  1,000,000 rows, CLI wall=15.546 s (64.3K rows/s)
+UPDATE:  1,000,000 rows, CLI wall=3.854 s (259.5K rows/s)
+COMPACT: CLI wall=45.365 s
+```
+
+The COMPACT log provides the missing stage evidence:
+
+```text
+tag snapshot:        1,000,000 rows, 62 RPC,  8.457 s
+physical rewrite:    1 output,             14.899 s
+  non-resolve worker time:                  7.026 s
+primary relocation:  1,000,000 rows, 128 RPC
+publish:             1 output,              8.503 s
+```
+
+Immediate post-COMPACT validation passed:
+
+```text
+count=1,000,000
+tag_1_type='U83' AND tag_1_para=83.0000: 1,000,000
+tag_2_type='AAA' AND tag_2_para=3.1400: 1,000,000
+tag_1_type='AAA' AND tag_1_para=3.1400: 0
+id range: 4,000,000,001..4,001,000,000
+```
+
+The evidence confirms that a standard root-layout table can materialize a
+1M-row tag-aware update in one compact file. It does not establish a new
+INSERT optimization; the INSERT number is below the best earlier fresh-run
+range and remains workload/runtime sensitive.
+
+### Reproduced post-COMPACT UPDATE visibility issue
+
+On candidate82, after the first successful U82 COMPACT, a second exact 1M-row
+UPDATE to U83 returned `UPDATE: 1,000,000 rows` in 3.987s. A following COMPACT
+resolved 1M rows but reported zero physical outputs and the table still read
+U82. This is recorded as a correctness/durability follow-up, not accepted as
+a performance result. Before pursuing post-COMPACT throughput, isolate why a
+second update is acknowledged but is neither materialized nor visible through
+the normal read path.
+
+Remote evidence:
+
+```text
+/home/pixels/validation-million-update/runtime/logs/
+  compact-candidate83-first-20261123.log
+  compact-candidate82-second-20261123.log
+```
