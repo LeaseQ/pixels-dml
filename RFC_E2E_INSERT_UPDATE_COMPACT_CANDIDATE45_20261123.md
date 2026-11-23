@@ -986,3 +986,41 @@ U122 / 122.0000 / 1,000,000
 This closes the current isolated E2E loop: table-to-table INSERT evidence,
 exact million-row UPDATE at the best resolver setting, tag-aware COMPACT, and
 compact-only readback of the newest tag value.
+
+## Addendum: append-only main-index batch fast path rejected (2026-11-24)
+
+The INSERT-side JFR and per-file metrics showed that grouped primary writes
+still call `MainIndexBuffer.insert` once per row. That method scans all existing
+file buffers to remove a relocated row id, which is necessary for UPDATE and
+COMPACT but appears unnecessary for a fresh INSERT whose row ids are strictly
+new. An opt-in daemon property,
+`pixels.index.grouped.primary.append-only-main-index`, was added for a
+batch-level path that validates unique row ids and a monotonic in-memory
+high-water mark, then falls back to the relocation-safe path otherwise. The
+default remained disabled. The focused `MainIndexBuffer` regression test passed
+for both the append case and the relocation fallback, and the Java modules
+compiled separately on cds20 (the aggregate build was blocked only by the
+machine's missing `cmake` for `pixels-retina`).
+
+The first post-restart attempts on new tables were invalid benchmark arms: the
+Retina recovery handshake had not initialized the writer buffer when the table
+was created, so the INSERT logged `index_ms=0` and subsequent reads hit the
+pre-existing `nodeBuffers=null` recovery failure. Those arms are excluded.
+Using the existing valid indexed target after manually restoring its writer
+buffer produced a real grouped-primary comparison:
+
+```text
+candidate cold/recovery append: 1M rows, 14.911 s, about 67.1K rows/s
+candidate next warm append:      1M rows,  5.133 s, about 194.8K rows/s
+post-check: 4,000,000 rows / 4,000,000 distinct ids
+           min=4,000,000,001 max=7,001,000,000
+```
+
+The cold arm is dominated by RocksDB recovery and is not comparable. The warm
+arm is correct and the daemon metric confirms the fast-path experiment was
+active, but it does not establish a stable gain over the existing 145K-row/s
+fresh baseline or the earlier 277--355K-row/s warm range. The primary stage and
+runtime state also varied substantially after the restart. The candidate is
+therefore rejected as a throughput change; its code and test are reverted, and
+the result is retained here so the same `MainIndexBuffer` hypothesis is not
+repeated without a clean matched runtime.
