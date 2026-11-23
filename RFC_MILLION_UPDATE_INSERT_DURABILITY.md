@@ -3824,3 +3824,26 @@ explanation for the lower rate. The accepted current INSERT point is therefore
 roughly 188--192K rows/s on this repeatable fresh-target run; the next useful
 work remains primary-index request scheduling/flush, not more writer-count or
 PageSink micro-tuning.
+
+## Grouped flush max-concurrency sweep (2026-11-24)
+
+The service metrics showed 24 writer RPCs entering a grouped-primary path with
+the connector cap at 16. On the same fresh target, source, 24-writer session,
+and tag-aware primary-index route, the isolated Trino property was swept across
+16, 24, and 32. Each arm appended a disjoint 1M-row range and passed the final
+distinct-primary-key check.
+
+```text
+max-concurrency=16, warm repeat: 5.314 s  (~188K rows/s)
+max-concurrency=24, warm arm:    4.181 s  (~239K rows/s)
+max-concurrency=32, warm arm:    4.749 s  (~210K rows/s)
+```
+
+The cap-24 arm reduced the Trino finishing interval to about 1.82 s and had a
+shorter primary-put tail than the cap-16 control. Raising the cap to 32
+increased the warm timeline again, so 24 is retained as the isolated-runtime
+candidate and 32 is rejected as a saturation point. This is an opt-in runtime
+configuration result, not yet a production-default change; failure-injection,
+checkpoint/restart, and a longer multi-table run are still required before
+changing the default. The result moves the repeatable INSERT point from about
+188K to about 239K rows/s, but does not yet reach the 300K+ goal.
