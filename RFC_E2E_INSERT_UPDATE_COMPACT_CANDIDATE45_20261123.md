@@ -945,3 +945,31 @@ actual RocksDB key stream must both be part of the proof. Future resolver work
 should first add explicit hit/miss and ordering instrumentation, then compare
 against the existing per-key seek path on the same exact batch before changing
 the default path.
+
+## Addendum: Trino primary-key resolver parallelism ablation (2026-11-24)
+
+After reverting the unsafe RocksDB iterator candidate, the stable daemon path
+was measured with the same fresh table, exact ID range, shared tag UPDATE, and
+1,000,000-row result. The Trino resolver batch size and parallelism were
+changed only through JVM properties; every run returned all 1,000,000 rows.
+
+| Batch size | Parallelism | Run | Resolve ms | Total server ms | Approx. total rows/s |
+|---:|---:|---|---:|---:|---:|
+| 16,384 | 32 | U119 | 3,444.988 | 4,478.424 | 0.223M |
+| 16,384 | 64 | U120 | 1,148.830 | 1,979.625 | 0.505M |
+| 16,384 | 128 | U121 | 1,236.576 | 1,896.186 | 0.527M |
+| 32,768 | 64 | U122 | 1,257.943 | 1,980.829 | 0.505M |
+
+The 64-way setting is the practical choice for this machine: it cuts resolver
+time by about 67% versus 32-way and reaches the lower end of the project's
+throughput target while preserving exact million-row correctness. The 128-way
+run did not improve resolver time and its small total-time difference is not
+large enough to treat as a stable gain. Doubling the batch size also did not
+help. The isolated Trino runtime was left at batch size 16,384 and parallelism
+64.
+
+This is a configuration-level throughput result, not yet a source-default
+change. It should be repeated on the intended deployment shape and checked
+against concurrent workload interference before making 64 the packaged
+default. COMPACT remains a separate cost center; the earlier fresh two-cycle
+materialization evidence remains the correctness baseline.
