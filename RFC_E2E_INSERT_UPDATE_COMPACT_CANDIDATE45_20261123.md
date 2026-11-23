@@ -641,6 +641,15 @@ a performance result. Before pursuing post-COMPACT throughput, isolate why a
 second update is acknowledged but is neither materialized nor visible through
 the normal read path.
 
+The issue is not limited to rewriting the same tag columns. On the already
+compacted candidate83 table, a full-range UPDATE of the previously untouched
+`tag_2_type/tag_2_para` to `B/84.0000` returned 1M rows in 3.680s, but the
+immediate read still showed the old `AAA/3.1400` values. A following COMPACT
+again reported `outputs=0`, and the final read remained unchanged. This makes
+the current diagnosis stronger: any UPDATE after COMPACT is acknowledged but
+is not visible or materialized in this runtime, independent of the tag column
+being updated.
+
 Remote evidence:
 
 ```text
