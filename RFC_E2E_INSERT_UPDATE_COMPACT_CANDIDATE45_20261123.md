@@ -1435,3 +1435,31 @@ the production default or as evidence of reaching the hundreds-of-thousands
 target. The next meaningful optimization should reduce writer scheduling and
 per-writer conversion/write overhead, then repeat a matched cold-start matrix;
 more small semaphore values alone are unlikely to reach the target.
+
+As a follow-up scheduling probe, the 24-writer arm was run with session
+`task_concurrency=32` and then `task_concurrency=64`, both with cap 16:
+
+| Arm | Query | QueryMonitor elapsed | Client elapsed | Approx. client rows/s |
+|---|---|---:|---:|---:|
+| 24 writers, task concurrency 32 | `20261123_205503_00002_sgai3` | 7.428s | 9.490s | 105.4K |
+| 24 writers, task concurrency 64 | `20261123_205541_00003_sgai3` | 7.372s | 9.421s | 106.1K |
+
+The difference is within normal run-to-run variation; increasing task
+concurrency beyond 32 did not unlock another throughput tier. After the
+probe, the live table was read back before and after a Retina restart from the
+current recovery checkpoint (`recovery_cds20_670007.bin`). Both readbacks were
+identical:
+
+```text
+count=45,000,000
+min_id=4,000,000,001 max_id=59,001,000,000 distinct_id=44,000,000
+tag_1_type IS NULL=0 tag_1_type IS NOT NULL=45,000,000
+```
+
+The aggregate has one historical duplicate 1M-row block in offset48B, so its
+distinct count is intentionally not used as a clean-table correctness claim.
+The newly added offset50B--55B blocks were independently checked after the
+restart; each had `count=1,000,000`, `distinct_id=1,000,000`, and zero null
+values in `tag_1_type`. Thus the new cap/scheduling measurements have a
+checkpoint-and-restart proof, while the older offset48B duplicate remains a
+known historical test-data contamination to exclude from final acceptance.
