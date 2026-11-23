@@ -537,3 +537,26 @@ Remote evidence:
   daemon-write-timing-retina-20261123.log
   daemon-waloff-retina-20261123.log
 ```
+
+## Follow-up: cross-bucket single WriteBatch (candidate74)
+
+The stage split suggested one higher-leverage experiment: the grouped route
+partitioned each 200,000-entry request into bucket lists and called
+`rocksDB.write()` once per bucket. Candidate74 added an opt-in daemon flag that
+assembled all bucket entries into one RocksDB `WriteBatch`, retaining the same
+column families and key encoding. This was tested only on the isolated runtime.
+
+```text
+candidate74: 1M INSERT, CLI wall=14.367 s
+correctness: count=1,000,000, distinct_id=1,000,000,
+             min_id=4,000,000,001, max_id=4,001,000,000
+grouped primary_ms by 200K request:
+  1330.890, 779.782, 794.041, 822.479, 856.267 ms
+```
+
+The same-runtime baseline candidate72 was 14.123s, with primary request times
+of 1018.233, 577.323, 586.225, 621.538, and 623.028ms. The single-batch route
+was slower in every request despite reducing the number of RocksDB write calls;
+the larger batch's construction and single-commit cost outweighed that saving.
+Correctness passed, but the candidate is rejected and the runtime was restored
+to the baseline daemon with the feature flag absent.
