@@ -3929,3 +3929,34 @@ count, and `U111/111.0000` tag values. This is accepted as a checkpoint-backed
 tag-aware INSERT durability proof. The larger heap and 10-second interval are
 isolated validation settings; neither is promoted as a production default
 without a resource-budget and GC-backlog analysis.
+
+## Durable-runtime INSERT recheck after Retina recovery (2026-11-24)
+
+After the checkpoint-backed 100K recovery proof, the isolated runtime was
+left on the 64 GiB Retina configuration, GC interval 10 seconds, connector
+grouped-primary cap 24, and a fixed 24-writer Trino session. Three additional
+disjoint 1M-row table-to-table INSERTs were run into the same indexed target.
+The Trino timelines were:
+
+```text
+arm 1: 3.790 s  (~264K rows/s)
+arm 2: 3.111 s  (~321K rows/s)
+arm 3: 3.397 s  (~294K rows/s)
+```
+
+The target check after the three arms passed exactly:
+
+```text
+count=3,100,000
+min(id)=60,000,000,001
+max(id)=63,001,000,000
+distinct(id)=3,100,000
+```
+
+The Retina process stayed alive and the background GC advanced the published
+checkpoint through `recovery_cds20_670088.bin`. These runs establish a current
+lower-300K INSERT performance band on the recovered, checkpoint-capable
+runtime, rather than a single isolated peak. They are performance evidence;
+only the preceding 100K arm has a post-restart readback in this section, so a
+full 3.1M restart readback is still a separate durability gate. The 64 GiB
+heap and 10-second interval remain isolated validation settings.
