@@ -1368,3 +1368,32 @@ tag_1_type IS NULL=0 tag_1_type IS NOT NULL=36,000,000
 ```
 
 The candidate remains default-off.
+
+### Cold-start writer-shape follow-up (2026-11-24)
+
+To separate warm-cache effects from writer-shape effects, two additional
+restart-first probes were run with the stable default daemon and the same
+tag-bearing table:
+
+| Arm | Query | QueryMonitor elapsed | Approx. rows/s | Primary observation |
+|---|---|---:|---:|---|
+| 24 writers | `20261123_203025_00058_k85c5` | 7.349s | 136.1K | grouped-primary tail about 1.05s |
+| 32 writers | `20261123_203330_00059_k85c5` | 21.104s | 47.4K | grouped-primary tail about 11.9s; main-index tail about 2.45s |
+
+The 24-writer arm was recovered from the preceding checkpoint and its 24 file
+IDs were present in the next checkpoint body. The 32-writer arm completed its
+SQL query, but the checkpoint body observed afterward contained only 20 of its
+32 file IDs (`108169..108200`), so it is excluded from durability acceptance.
+The immediate performance result is still useful: at this table scale,
+submitting 32 concurrent grouped RPCs can overload the Retina/RocksDB write
+path, while 24 writers avoid that queueing in this cold run. This is stronger
+evidence for an adaptive writer/backpressure policy than for a fixed global
+writer count; the two arms were successive checkpoint states rather than a
+perfect same-checkpoint A/B.
+
+The result also explains why the earlier warm 24/32 measurements around
+123K rows/s were insufficient: the cold 32-writer arm can regress sharply when
+the grouped primary executor and RocksDB write queues are saturated. The next
+implementation experiment should cap or adapt concurrent grouped primary RPCs
+at the connector/daemon boundary, then repeat the same-checkpoint durability
+matrix.
