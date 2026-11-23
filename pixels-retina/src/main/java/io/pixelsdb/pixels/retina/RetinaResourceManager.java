@@ -940,7 +940,17 @@ public class RetinaResourceManager
      */
     private void runGC()
     {
-        processRetiredFiles();
+        // Retired-file cleanup is opportunistic. A transient metadata/RPC
+        // outage must not terminate the scheduled GC task before the memory
+        // GC and recovery-checkpoint phases get a chance to run again.
+        try
+        {
+            processRetiredFiles();
+        }
+        catch (Exception e)
+        {
+            logger.warn("Retired-file cleanup failed; continuing GC cycle", e);
+        }
 
         long timestamp = 0;
         try

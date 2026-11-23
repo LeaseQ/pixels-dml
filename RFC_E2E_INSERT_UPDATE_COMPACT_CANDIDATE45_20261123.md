@@ -1172,15 +1172,15 @@ body contains every file id from that INSERT, then restart and verify the
 readback. The 33B gate above is a stable-full-daemon harness proof, not a
 candidate-specific proof.
 
-### Candidate recovery attempt stopped before the durability gate
+### Full-stack candidate recovery attempt stopped before the durability gate
 
-I then switched the isolated runtime to the opt-in new-main-index candidate in
-order to run the same checkpoint-gated proof with a candidate INSERT. The
-candidate coordinator and worker started, but the candidate retina never
-reached READY. Recovery did finish applying `recovery_cds20_520002.bin`, but
-the runtime reported 1,344 temporary-ingest visibility entries and then
-repeatedly failed while `initializeRecoveredResources` constructed
-`FileWriterManager`/`PixelsWriteBuffer` instances:
+I first switched the isolated runtime to the opt-in new-main-index candidate
+for an all-role restart. The candidate coordinator and worker started, but the
+candidate retina never reached READY. Recovery did finish applying
+`recovery_cds20_520002.bin`, but the runtime reported 1,344 temporary-ingest
+visibility entries and then repeatedly failed while
+`initializeRecoveredResources` constructed `FileWriterManager`/
+`PixelsWriteBuffer` instances:
 
 ```text
 Recovery complete: checkpointAppliedTs=520002, ... warns=1344
@@ -1190,23 +1190,71 @@ java.lang.OutOfMemoryError: Java heap space
 ```
 
 The failure reproduced with candidate retina heaps of 1G, 2G, and 8G. No
-candidate INSERT was issued and no candidate durability result is claimed.
-The candidate processes were stopped, and the stable full daemon was restored.
-After the restart, the stable runtime reached READY and the recovery readback
-remained exact:
+candidate INSERT was issued in this all-role attempt. This is a startup blocker
+for putting the candidate jar on retina, not evidence that the new-main-index
+write path lost rows. The candidate retina was stopped and the stable full
+retina was restored with a larger temporary heap.
+
+### Candidate index-only overlay: checkpointed durability proof
+
+To isolate the candidate code from the existing multi-table retina startup
+pressure, the next probe put the candidate overlay only on coordinator/worker
+and kept the stable full jar on retina. The same table then accepted two
+exploratory INSERTs. The first one was intentionally left as a negative
+durability control:
 
 ```text
-count=24,000,000
-min_id=4,000,000,001
-max_id=37,001,000,000
-distinct_id=24,000,000
-tag_1_type IS NULL=0
-tag_1_type IS NOT NULL=24,000,000
+candidate offset34B: query 20261123_191211_00030_k85c5
+client elapsed: 18.179 s (~55.0K rows/s)
+file ids: 92525..92556 (32 files)
 ```
 
-This is a recovery-startup blocker for the candidate experiment, not evidence
-that the new-main-index write path lost rows. Before any candidate durability
-claim, the temporary-ingest buildup and startup resource allocation need to be
-isolated (or the candidate must be tested from a clean runtime/checkpoint).
-The candidate remains default-off; only the stable 33B INSERT is backed by the
-checkpointed recovery proof above.
+It was immediately visible, but the checkpoint scheduler had stopped after a
+transient metadata connection refusal during the coordinator switch. On the
+next restart, recovery applied checkpoint 520002 and retired those 32 files,
+as expected because they were not in that checkpoint. This reproduces the
+checkpoint boundary without treating `FINISHED` as durability.
+
+The scheduler was restarted cleanly, then a second candidate INSERT was run:
+
+```text
+candidate offset35B: query 20261123_192143_00032_k85c5
+client elapsed: 16.141 s (~62.0K rows/s)
+file ids: 93901..93932 (32 files)
+checkpoint: recovery_cds20_560003.bin
+checkpointAppliedTs: 560003
+checkpoint file-id membership: 32/32
+```
+
+The runtime was then restarted on the stable full daemon jar from checkpoint
+560003. The post-restart readback was exact and retained offset35B while the
+uncheckpointed offset34B was absent:
+
+```text
+count=25,000,000
+min_id=4,000,000,001
+max_id=39,001,000,000
+distinct_id=25,000,000
+tag_1_type IS NULL=0
+tag_1_type IS NOT NULL=25,000,000
+```
+
+This is now a candidate-specific checkpointed recovery proof for the
+index-only overlay. It also confirms that the accepted candidate path has not
+changed tag correctness. Its measured INSERT throughput remains far below the
+hundreds-of-thousands-to-million target.
+
+### GC scheduler robustness correction
+
+The transient connection refusal exposed that `runGC()` called
+`processRetiredFiles()` outside its protective cycle-level `try/catch`. A
+single metadata RPC exception could therefore terminate the scheduled GC task
+before the next recovery checkpoint. The source now treats retired-file
+cleanup as opportunistic and continues to the checkpoint phase when cleanup
+fails. This is a reliability fix for the validation/runtime path, not a
+throughput claim; it must pass the retina module build and focused tests before
+deployment.
+
+The candidate remains default-off. The next performance direction remains
+grouped primary-write/flush scheduling rather than another small key-encoding
+or map-reuse micro-optimization.
