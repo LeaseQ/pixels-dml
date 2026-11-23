@@ -57,6 +57,63 @@ logs/console-packed-primary-20261123.log
 logs/console-baseline-primary-20261123.log
 ```
 
+## Follow-up: JFR bottleneck probe and MainIndexBuffer reserve (candidate60-66)
+
+The first JFR probe was attached to Trino and the daemon worker. It showed the
+worker mostly idle in epoll; the IndexService is hosted by the Retina process,
+so the probe was corrected and repeated against Trino plus Retina.
+
+The corrected candidate61 recording covered the INSERT time window and passed
+the exact 1M-row check at 6.754 s. Retina execution samples were concentrated
+in the existing protobuf and index path: `PrimaryIndexEntry`/request parsing,
+`IndexServiceImpl.putPrimaryIndexEntries`, `SqliteMainIndex.putEntries`, and
+`MainIndexBuffer.insert`. Native samples also included 32
+`RocksDB.write0` calls. Allocation samples included SQLite main-index writes,
+`MainIndexBuffer.insert`, `RocksDBIndex.putPrimaryEntriesInternal`, and
+`RocksDBIndex.toKeyBuffer`. This confirms that the bottleneck is multi-stage;
+the wire representation alone is not a sufficient explanation.
+
+As a low-risk follow-up, candidate62-64 added a reserve operation for a new
+same-file INSERT batch so the main-index row map would not grow from the
+default HashMap capacity. All candidates passed the exact check:
+
+```text
+candidate62: 10.984 s (91.0K rows/s)
+candidate63:  6.284 s (159.1K rows/s)
+candidate64:  6.401 s (156.2K rows/s)
+```
+
+After restoring the old jar, the same two-run warm/cold comparison was:
+
+```text
+candidate65: 10.705 s (93.4K rows/s)
+candidate66:  6.531 s (153.1K rows/s)
+```
+
+The warm difference is only about 3% and is smaller than the observed
+cold-start/runtime spread. The internal `primary_put_wall` and main-index
+flush metrics likewise do not show a stable improvement. The reserve change
+is therefore rejected and the isolated runtime is restored to the old jar and
+connector baseline.
+
+Remote artifacts:
+
+```text
+logs/insert-candidate60-jfr-baseline-20261123.log
+logs/insert-candidate61-jfr-retina-baseline-20261123.log
+logs/insert-candidate62-mainindex-reserve-20261123.log
+logs/insert-candidate63-mainindex-reserve-repeat-20261123.log
+logs/insert-candidate64-mainindex-reserve-repeat2-20261123.log
+logs/insert-candidate65-old-baseline-repeat-20261123.log
+logs/insert-candidate66-old-baseline-hot-20261123.log
+logs/jfr-retina-candidate61.jfr
+logs/jfr-trino-candidate61.jfr
+```
+
+The next code-level optimization must target a direct protobuf-to-index or
+bulk main-index path with correctness and WAL ordering preserved; another
+small container-capacity tweak is not justified by this evidence.
+
 The main runtime was not touched. The target used `pk='id'`,
 `pk_scheme='rocksdb'`, the grouped primary-index route, and the no-copy
 compaction CLI from `8dcf2467`.
