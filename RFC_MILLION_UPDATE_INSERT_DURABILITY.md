@@ -4083,6 +4083,11 @@ tag_1_type='U111'=10,100,000
 tag_1_para min=max=111.0000
 ```
 
+After the arm, the isolated Retina published
+`recovery_cds20_670099.bin`; both the 64 GiB Retina process and the default-
+value Trino process remained alive. This records checkpoint progress only, not
+a new post-restart durability gate for the full 10.1M-row target.
+
 For the preceding 1M default-value arm, Trino queryStats reported 290 MB of
 physical input, 437 MB of internal network input, 595 MB of stage output, and
 3.12 s of Stage 1 `ExchangeOperator` wall time (3.07 s CPU) inside a 4.062 s
