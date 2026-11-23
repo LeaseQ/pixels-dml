@@ -399,3 +399,57 @@ logs/build-sink-stage-instrumentation-20261123.log
 logs/insert-candidate54-indexed-32writers-sink-stages-20261123.log
 logs/insert-candidate55-indexed-32writers-grouped-false-20261123.log
 ```
+
+## Follow-up: direct packed grouped-primary write (candidate67/68/69)
+
+The earlier packed-wire probe was rejected because the daemon decoded the
+payload back into the full protobuf entry list before entering the grouped
+RocksDB path. This follow-up kept the wire format opt-in, but added a direct
+`PackedPrimaryIndexEntries` representation and a `SinglePointIndex` hook so the
+RocksDB write can consume key/row coordinates without reconstructing protobuf
+entries. Canonical entries are still materialized once for the SQLite main
+index, and the cache is updated after a successful RocksDB write when enabled.
+The default route remains unchanged unless
+`-Dpixels.index.grouped.primary.write.packed=true` is set.
+
+Candidate67 initially failed before data validation because the remote Maven
+repository mixed a stale `pixels-index-main-sqlite` artifact (calling the
+rejected `MainIndexBuffer.reserve(long,int)` API) with the current common jar.
+The source had no such call. Reinstalling `pixels-index-main-sqlite` before
+building daemon removed the ABI mismatch; the rebuilt fat jar was checked with
+`javap` before redeployment.
+
+The fixed candidate completed two full 1M-row INSERTs on the isolated runtime:
+
+```text
+candidate68: CLI wall=16.605 s, Trino timeline=14.728 s
+            primary_put_ms=5086.714, primary_put_wall_ms=5810.691
+            correctness: count=1,000,000, distinct_id=1,000,000,
+                         min_id=7,000,000,001, max_id=7,001,000,000
+
+candidate69: CLI wall=13.049 s, Trino timeline=11.218 s
+            primary_put_ms=4517.940, primary_put_wall_ms=5466.075
+            correctness: count=1,000,000, distinct_id=1,000,000,
+                         min_id=7,000,000,001, max_id=7,001,000,000
+```
+
+The daemon grouped metric reported `packed=true` for all five 200,000-entry
+requests in both runs. Candidate69's five `primary_ms` values were
+663.949, 615.971, 589.177, 622.049, and 654.809 ms; the direct route is
+therefore active and correct. It did not establish a stable improvement over
+the existing warm baseline (roughly 6--7 s for this workload); the observed
+end-to-end throughput was only about 60--77 K rows/s. The candidate is rejected
+as a production optimization for now. The isolated runtime was restored to the
+baseline daemon/connector, with the packed logs and rollback artifacts kept on
+cds20 for later profiling.
+
+Additional evidence:
+
+```text
+/home/pixels/validation-million-update/runtime/e2e-fresh-20261122/
+  pixels-home/logs/direct-packed-fixed-retina.log
+  trino-data/var/log/server.log
+/home/pixels/validation-million-update/runtime/
+  connector-direct-packed-fixed-20261123/
+  daemon-full-before-direct-packed-20261123.jar
+```
