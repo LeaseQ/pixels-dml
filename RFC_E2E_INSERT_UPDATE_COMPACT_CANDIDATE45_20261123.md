@@ -560,3 +560,29 @@ was slower in every request despite reducing the number of RocksDB write calls;
 the larger batch's construction and single-commit cost outweighed that saving.
 Correctness passed, but the candidate is rejected and the runtime was restored
 to the baseline daemon with the feature flag absent.
+
+## Follow-up: bounded cross-bucket batch-size matrix (candidate75--79)
+
+Because candidate74 used one batch for all buckets, the next probe tested a
+bounded merge size. The opt-in flag merged 2, 4, or 8 vnode lists per
+`WriteBatch`; WAL, key encoding, grouped writer count, and the SQL generator
+were otherwise unchanged. Each run passed the exact 1M-row count/distinct/range
+check:
+
+```text
+candidate75, 2 buckets/batch: 13.586 s
+candidate76, 2 buckets/batch: 12.112 s
+candidate77, 4 buckets/batch: 13.250 s
+candidate78, 8 buckets/batch: 12.810 s
+candidate79, baseline control: 12.855 s
+```
+
+The daemon primary metrics explain why the apparent candidate76 result is not
+accepted. Its five primary times were 781.100, 718.953, 742.526, 788.498, and
+785.756ms, while the paired baseline control was 1009.076, 642.998, 606.985,
+606.276, and 653.514ms. Candidate78 was effectively tied with the baseline
+end-to-end and had primary times of 1093.259, 678.972, 672.867, 654.083, and
+680.988ms. There is no stable reduction in the primary stage across the matrix;
+the 12.112s observation is runtime variance rather than a demonstrated batch
+size win. The feature code was removed and the isolated runtime restored to the
+baseline daemon without the flag.
