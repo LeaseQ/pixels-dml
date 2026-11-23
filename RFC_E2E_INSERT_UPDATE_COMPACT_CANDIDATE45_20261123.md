@@ -1024,3 +1024,48 @@ runtime state also varied substantially after the restart. The candidate is
 therefore rejected as a throughput change; its code and test are reverted, and
 the result is retained here so the same `MainIndexBuffer` hypothesis is not
 repeated without a clean matched runtime.
+
+## Addendum: RocksDB pipelined-write probe rejected (2026-11-24)
+
+RocksDB's `enable_pipelined_write` overlaps WAL and memtable work for
+concurrent writers, so it was tested as a benchmark-only opt-in while keeping
+WAL enabled. The candidate added a default-off Pixels property and wired it to
+`DBOptions.setEnablePipelinedWrite`; the focused `pixels-common` and
+`pixels-index-rocksdb` build succeeded on cds20. Because the full daemon shade
+produced an incompatible dependency set, the E2E deployment used the stable
+daemon full jar plus the candidate RocksDB module as a classpath overlay. This
+kept the experiment isolated from packaging effects.
+
+The comparison used the same fresh indexed target, exact 1,000,000-row source
+range, 32 Trino writers, grouped primary writes, and tag-bearing data. The
+first arm after each runtime restart is recorded but not used as the warm
+comparison:
+
+| Arm | Query | Pipeline | Elapsed | Approx. rows/s |
+|---|---|---:|---:|---:|
+| candidate first | `20261123_173746_00001_k85c5` | on | 20.127s | 49.7K |
+| candidate warm repeat | `20261123_173828_00002_k85c5` | on | 7.110s | 140.6K |
+| stable control first | `20261123_174119_00003_k85c5` | off | 18.265s | 54.8K |
+| stable control warm repeat | `20261123_174155_00004_k85c5` | off | 7.355s | 136.0K |
+
+The warm difference is only about 3.6% and is not stable evidence of a
+throughput gain. The per-file index metrics show the same order of magnitude
+for `primary_put_ms` in the candidate and control warm arms; the large first
+arm costs are recovery/cache effects, not a pipeline-specific improvement.
+The final E2E readback after both candidate and control arms was:
+
+```text
+count=10,000,000
+min_id=4,000,000,001
+max_id=17,001,000,000
+distinct_id=10,000,000
+tag_1_type IS NULL=0
+tag_1_type IS NOT NULL=10,000,000
+```
+
+All four INSERTs returned exactly 1,000,000 rows and the tag-bearing data was
+read back correctly. The candidate is nevertheless rejected: it does not
+provide a reproducible improvement over the matched warm control, and neither
+the source default nor the runtime default is changed. The candidate source
+and property were reverted after the probe; the isolated runtime was restored
+to the stable full jar with pipelined writes disabled.
