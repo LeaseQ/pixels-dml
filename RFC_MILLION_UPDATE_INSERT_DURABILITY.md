@@ -4158,3 +4158,31 @@ tag values, and the isolated Retina status remained `READY` at checkpoint
 epoch `1dc618b2-432c-4f48-a4e9-c7af198c5f22`. The latest published checkpoint
 body was `recovery_cds20_670120.bin`; this is a live-state check, not a new
 post-restart readback gate.
+
+## Multi-source split probe and fixture correction (2026-11-24)
+
+The large candidate-85 table was not a usable range-slice source: although it
+contained 45M rows, its IDs had gaps and the intended 1M range returned zero
+rows. A clean indexed target, `e2e68_page_multisource_20261124`, was then
+created and fed by four 250K slices from the same validated candidate-86
+source using `UNION ALL`. The 1M-row result was exact:
+
+```text
+count=1,000,000
+distinct(id)=1,000,000
+tag_1_type='U111'=1,000,000
+tag_1_para min=max=111.0000
+```
+
+However, the statement took 10.386 s (~96K rows/s), with most of the cost in
+planning/finishing rather than useful scan parallelism. This is rejected as an
+INSERT optimization; adding logical source branches is not equivalent to
+adding efficient physical workers.
+
+For completeness, an earlier performance-only union used candidate80--83 and
+appended 1M rows to the long-running `e2e68_page_fresh2_20261124` target. Those
+historical sources carried different tag values, so the target now contains
+`U111` (25.35M), `AAA` (500K), and `U82` (250K). That arm is not part of the
+tag-preserving benchmark baseline. The accepted tag-preserving checkpoint
+state remains the 25.1M-row state immediately before this probe, and the clean
+multi-source target above is used for any follow-up split experiments.
