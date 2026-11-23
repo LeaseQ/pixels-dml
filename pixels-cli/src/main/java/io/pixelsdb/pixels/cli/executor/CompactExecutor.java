@@ -214,7 +214,14 @@ public class CompactExecutor implements CommandExecutor
         Iterator<Status> statusIterator = statuses.iterator();
         while (statusIterator.hasNext())
         {
-            if (metadataService.getFileType(statusIterator.next().getPath()) != File.Type.REGULAR)
+            Status status = statusIterator.next();
+            // A table-root URI is a supported layout form.  LocalFS returns
+            // the root directory itself from listStatus(root), but directory
+            // URIs are not registered as metadata files.  Filter them before
+            // asking MetadataService for a file type.
+            if (status.isDirectory() || !status.getName().endsWith(".pxl") ||
+                    orderStorage.isDirectory(status.getPath()) ||
+                    metadataService.getFileType(status.getPath()) != File.Type.REGULAR)
             {
                 statusIterator.remove();
             }

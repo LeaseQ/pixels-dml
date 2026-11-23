@@ -860,3 +860,58 @@ primary-key resolution plus physical rewrite/publish. The earlier warm
 internal exact-route measurements remain the appropriate throughput evidence;
 these U110/U111 runs primarily validate repeated materialization and recovery
 state, not a million-rows/s breakthrough.
+
+## Addendum: fresh table-root two-cycle validation and COMPACT directory fix (2026-11-23)
+
+To remove the remaining long-lived-table ambiguity, a new empty table was
+created on the isolated runtime:
+
+```text
+validationfresh.e2e68_fresh_candidate84_20261123
+68 columns, 1,000,000 rows, id=4000000001..4001000000
+paths = one table-root URI
+pk = id
+pk_scheme = rocksdb
+```
+
+The first COMPACT attempt found a root-layout compatibility bug: local storage
+returned a table-root/directory status, but `CompactExecutor` called
+`MetadataService.getFileType` before filtering it. The resulting error was
+`path metadata not found for directory URI .../e2e68_fresh_candidate84_20261123`.
+The fix filters directory and non-Pixels-file statuses before the metadata
+lookup. It preserves explicit ordered/compact layout behavior and makes the
+documented single-root layout usable by tag-aware COMPACT.
+
+The fixed CLI was rebuilt on cds20 and the complete flow was rerun:
+
+```text
+INSERT INTO candidate84 SELECT * FROM candidate83:
+  client wall=20.132s, 49.7K rows/s
+  index metric: rows=1,000,000, primary_put_wall_ms=6251.138,
+    primary_rpc_count=5
+
+UPDATE U112:
+  exact MPP route, server total_ms=1730.534,
+  primary_key_resolve_ms=790.238, about 0.58M rows/s
+COMPACT U112:
+  physical_rewrite=20.378s, resolve_ms=12.950s,
+  publish_ms=9.515s, one output, total CLI about 29s
+compact-only readback: U112 / 112.0000 / 1,000,000
+
+UPDATE U113 after the first COMPACT:
+  exact MPP route, server total_ms=1487.972,
+  primary_key_resolve_ms=645.212, about 0.67M rows/s
+COMPACT U113:
+  physical_rewrite=19.475s, resolve_ms=12.826s,
+  publish_ms=9.772s, one output, total CLI about 29s
+compact-only readback: U113 / 113.0000 / 1,000,000
+```
+
+This is the cleanest current correctness evidence: a fresh primary-indexed
+table, table-to-table INSERT, exact tag-aware UPDATE, materialization, a
+second post-COMPACT UPDATE, a second materialization, and compact-only
+readback. It does not meet the throughput objective. The current UPDATE
+resolver is batched at the RPC boundary, but the daemon still performs one
+RocksDB iterator seek per key inside each bucket. COMPACT's 12.8--13.0s
+primary-key/tag-resolution stage remains the next high-value optimization
+target; any resolver change must preserve the two-cycle evidence above.
