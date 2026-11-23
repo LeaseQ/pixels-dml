@@ -3998,3 +3998,22 @@ The target remained correct after the arm:
 294--321K rows/s, so lowering task concurrency is rejected as an optimization.
 The 64 setting remains the isolated benchmark configuration; this arm is
 performance evidence and was not used as a separate restart gate.
+
+## Promote grouped-RPC cap 24 as the code default (2026-11-24)
+
+The cap-24 behavior was initially opt-in with a default of zero (unlimited).
+The isolated evidence now covers both sides of the decision: the cap moved
+the repeatable INSERT path from roughly 188K rows/s to a lower-300K band, and
+the complete 3.1M-row result passed checkpoint/restart recovery. The matched
+32-writer and task-concurrency probes were rejected, while the explicit
+property remains available for rollback and diagnostics.
+
+Commit `2fc7677` therefore changes
+`DEFAULT_PRIMARY_FLUSH_MAX_CONCURRENCY` from `0` to `24`. Setting
+`-Dpixels.insert.index.flush.max-concurrency=0` still restores the historical
+unlimited behavior, so operators retain an explicit escape hatch. The change
+is a connector default only; it does not alter UPDATE semantics, tag layout,
+checkpoint format, or the Retina GC configuration. The isolated validation
+runtime remains on an explicit cap-24 argument while the new default is built
+and exercised separately, so this commit should not be read as production
+deployment evidence yet.
