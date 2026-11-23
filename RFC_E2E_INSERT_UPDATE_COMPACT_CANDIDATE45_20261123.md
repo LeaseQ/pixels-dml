@@ -915,3 +915,25 @@ resolver is batched at the RPC boundary, but the daemon still performs one
 RocksDB iterator seek per key inside each bucket. COMPACT's 12.8--13.0s
 primary-key/tag-resolution stage remains the next high-value optimization
 target; any resolver change must preserve the two-cycle evidence above.
+
+## Addendum: sequential RocksDB primary-batch candidate (2026-11-23)
+
+The next resolver hypothesis is narrower than changing RPC batching: when a
+compaction batch arrives in physical primary-key order and all keys share the
+same timestamp, the RocksDB index can reuse one iterator and advance with
+`next()` instead of issuing one `seek()` per key. Unsorted or mixed-timestamp
+batches automatically retain the existing seek implementation.
+
+The candidate was implemented in `RocksDBIndex.getUniqueRowIdsInternal` and
+the targeted RocksDB regression suite passed. It was not accepted as a
+throughput result in this addendum: deploying a daemon jar assembled from the
+remote source tree caused the isolated Retina to remain in RECOVERING until
+the normal `get status -> markReady(recoveryEpoch)` handshake was issued, and
+the existing Trino process retained an unavailable connector channel during
+the restart. The runtime was restored to the pre-experiment daemon backup;
+no U114 write or compact measurement was taken under the candidate jar.
+
+The code is therefore pushed as an explicitly unvalidated performance
+candidate, not as a claimed improvement. The next run should use a full,
+matching daemon build and record both the sequential-path hit count and the
+two-cycle compact-only correctness tuple before comparing resolve time.
