@@ -3760,3 +3760,35 @@ The final readback was correct (`total=2000000`, `distinct_id=2000000`, and
 matched p8 runs at approximately 6.7 s and the total CLI time did not improve.
 The p16 arm is rejected as a saturation point; p8 remains the highest
 validated opt-in relocation setting, and the default stays serial.
+
+## PageSink column-loop probe (2026-11-24, rejected)
+
+The INSERT JFR had shown `PixelsPageSink.appendValue` as a visible Trino-side
+hot method. An isolated connector overlay replaced the per-cell category
+dispatch in `appendColumnValues` with one category switch per column and
+specialized primitive/string/decimal loops. The wire format, null handling,
+RLE handling, tag columns, and primary-index route were unchanged. The change
+compiled on cds20 and was measured only in the isolated runtime; it was not
+committed or pushed.
+
+The comparison used the same 68-column indexed target
+`validationfresh.e2e68_fresh_candidate85_20261124`, the same materialized
+1M-row source, fixed `task_min_writer_count=32`, disabled writer scaling, and
+`task_concurrency=64`. Each arm appended a disjoint 1M-row ID range. Trino
+server timelines were:
+
+```text
+original PageSink, post-restart: 9.258 s
+original PageSink, warm:          5.617 s  (~178K rows/s)
+column-loop candidate, post-restart: 8.918 s
+column-loop candidate, warm:         6.229 s  (~161K rows/s)
+```
+
+The candidate did not improve the measured end-to-end path. Its grouped
+primary-put and main-index metrics were comparable to the control, while the
+sink/write and finishing intervals were higher in the warm arm. The probe is
+therefore rejected and the isolated Trino was restored byte-for-byte to the
+original connector jar. The remaining INSERT bottleneck is service-side
+primary-index scheduling/flush and Trino finishing, not the local per-cell
+category dispatch alone. The next probe should instrument or reduce that
+queueing path without changing tag-aware semantics.
