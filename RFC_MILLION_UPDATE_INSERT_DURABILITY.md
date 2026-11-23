@@ -4207,6 +4207,40 @@ correctness baselines because a repeated harness submission left duplicate
 physical rows; its isolated query timing remains usable only as a performance
 probe for the disjoint range that it inserted.
 
+## Matched client-writer sweep on the clean indexed target (2026-11-24)
+
+To test whether the 24-writer setting was merely an arbitrary local optimum,
+the clean `e2e68_page_direct_20261124` target was extended with two disjoint
+1M-row ranges. The source, schema, grouped primary route, `task_concurrency=64`,
+and writer-scaling setting were held constant; only the fixed writer count
+changed. Every arm preserved the primary-key and tag-aware route.
+
+```text
+8 writers:  5.443 s  (~184K rows/s)
+16 writers: 4.800 s  (~208K rows/s)
+24 writers: 4.188 s  (~239K rows/s, preceding clean control)
+```
+
+The 8-writer arm produced 8 fragments and a primary-put tail of about 2.62 s;
+the 16-writer arm produced 16 fragments and a tail of about 1.49 s. The
+corresponding main-index publish work stayed below 110 ms. The final target
+check after all four disjoint arms was exact:
+
+```text
+count=4,000,000
+distinct(id)=4,000,000
+min(id)=10,000,000,001
+max(id)=610,001,000,000
+tag_1_type='U111'=4,000,000
+tag_1_para min=max=111.0000
+```
+
+This rules out under-parallelized client fan-out as the immediate cause of the
+INSERT ceiling: increasing from 8 to 24 writers improves throughput, but the
+24-writer arm still remains below 300K rows/s and the primary-index tail is
+the limiting stage. Further gains require changing the grouped RocksDB write
+shape or its native scheduling, not another small writer-count adjustment.
+
 ## Multi-source split probe and fixture correction (2026-11-24)
 
 The large candidate-85 table was not a usable range-slice source: although it
