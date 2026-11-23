@@ -966,9 +966,17 @@ public class RetinaResourceManager
             boolean includeRunningQueries = includeRunningQueriesProperty == null
                     || Boolean.parseBoolean(includeRunningQueriesProperty);
             timestamp = TransService.Instance().getSafeVisibilityFoldingTimestamp(includeRunningQueries);
-        } catch (TransException e)
+        }
+        catch (TransException e)
         {
             logger.error("Error while getting safe visibility folding timestamp", e);
+            return;
+        }
+        catch (Exception e)
+        {
+            // gRPC/transport failures may surface as unchecked exceptions.
+            // Do not let one metadata outage cancel the scheduled GC task.
+            logger.warn("Safe visibility timestamp unavailable; continuing next GC cycle", e);
             return;
         }
 

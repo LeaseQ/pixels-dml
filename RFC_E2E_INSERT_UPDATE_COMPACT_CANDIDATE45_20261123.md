@@ -1246,14 +1246,40 @@ hundreds-of-thousands-to-million target.
 
 ### GC scheduler robustness correction
 
-The transient connection refusal exposed that `runGC()` called
-`processRetiredFiles()` outside its protective cycle-level `try/catch`. A
-single metadata RPC exception could therefore terminate the scheduled GC task
-before the next recovery checkpoint. The source now treats retired-file
-cleanup as opportunistic and continues to the checkpoint phase when cleanup
-fails. This is a reliability fix for the validation/runtime path, not a
-throughput claim; it must pass the retina module build and focused tests before
-deployment.
+The transient connection refusal exposed two uncaught scheduler failure modes:
+`runGC()` called `processRetiredFiles()` outside its protective cycle-level
+`try/catch`, and the safe-watermark RPC could surface an unchecked transport
+exception. The source now treats retired-file cleanup and safe-watermark
+availability as recoverable per-cycle failures, so one metadata outage cannot
+terminate the scheduled GC task before a later recovery checkpoint.
+
+The Java portion of the retina module compiled successfully with
+`mvn -pl pixels-retina -am -DskipTests compiler:compile`, and the jar goal
+completed successfully. The full package remains blocked only by the build
+host lacking `cmake` for the unrelated native retina step. The rebuilt jar was
+deployed as an isolated `overlay-gc-fix` retina jar.
+
+The deployed overlay was tested with a controlled coordinator outage. Retina
+logged repeated
+`Safe visibility timestamp unavailable; continuing next GC cycle` warnings,
+then continued after coordinator recovery. A stable 1M-row INSERT at offset
+37B completed as query `20261123_194503_00037_k85c5`; its 32 files
+`98125..98156` were all present in `recovery_cds20_590001.bin` (`32/32`).
+After restarting the overlay retina from that checkpoint, the final readback
+was exact:
+
+```text
+count=26,000,000
+min_id=4,000,000,001
+max_id=41,001,000,000
+distinct_id=26,000,000
+tag_1_type IS NULL=0
+tag_1_type IS NOT NULL=26,000,000
+```
+
+The preceding offset36B INSERT was not checkpointed and was absent after that
+restart, which is the expected durability boundary. This is a reliability
+validation result, not a throughput claim.
 
 The candidate remains default-off. The next performance direction remains
 grouped primary-write/flush scheduling rather than another small key-encoding
