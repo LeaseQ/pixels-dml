@@ -1130,3 +1130,34 @@ The isolated cds20 runtime was restored to the stable full daemon jar without
 the new-main-index property. Next work should focus on the remaining grouped
 primary write and file-buffer/flush scheduling costs; UPDATE and COMPACT must
 continue to use the relocation-safe path.
+
+## Correction: recovery-time durability audit (2026-11-24)
+
+The 18,000,000-row readback above was an immediate readback while the same
+daemon lifetime was still serving the table. It must not be treated as a
+recovery durability proof. During the subsequent exploratory probe, the
+runtime was restarted several times and the table was read back again using
+the stable full daemon jar. The range audit showed that the two second-round
+stable-control arms were no longer visible:
+
+```text
+offset 14B, 15B, 16B, 17B, 22B, 23B: 1,000,000 rows each
+offset 24B, 25B:                         0 rows each
+offset 26B through 32B:                  1,000,000 rows each
+post-recovery total:                     23,000,000 rows
+distinct ids:                            23,000,000
+min_id=4,000,000,001 max_id=36,001,000,000
+tag_1_type IS NULL=0
+```
+
+The missing arms are query `20261123_181230_00014_k85c5` and query
+`20261123_181258_00015_k85c5`. Both had `PIXELS_INSERT_PUBLISH_METRIC` and
+returned `FINISHED`; they were also present in the immediate 18M readback.
+The evidence therefore identifies a recovery/publication durability problem
+in this isolated benchmark runtime, but does not attribute the loss to the
+new-main-index candidate: both missing arms used the stable control path. The
+candidate arms in this probe remained visible after the later stable recovery,
+but a clean, independent durability run is still required before treating
+the full INSERT E2E as production-grade evidence. The candidate remains
+default-off; the throughput result should be read as a live-run signal, not a
+durability claim.
