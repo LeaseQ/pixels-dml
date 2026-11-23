@@ -1397,3 +1397,41 @@ the grouped primary executor and RocksDB write queues are saturated. The next
 implementation experiment should cap or adapt concurrent grouped primary RPCs
 at the connector/daemon boundary, then repeat the same-checkpoint durability
 matrix.
+
+### Connector-side grouped-RPC cap probe (2026-11-24)
+
+The paired `pixels-trino-dml` change in commit `28b7fd6` adds an opt-in JVM
+property, `pixels.insert.index.flush.max-concurrency`. It uses one semaphore
+around grouped primary-index RPCs in the Trino connector; `0` remains the
+default and means unlimited, so existing deployments do not change behavior.
+The deployed connector was compiled on cds20 with JDK 23, inserted into an
+isolated connector-plugin jar after preserving a timestamped backup, and the
+Trino process was restarted with `PIXELS_HOME`/`PIXELS_CONFIG` explicitly set.
+
+The same tag-bearing table and one-million-row source range were used. Fresh
+offsets were used for every arm, and the query session disabled writer scaling
+so the requested writer count was held constant:
+
+| Arm | Query | Cap | Writers | Client elapsed | QueryMonitor elapsed | Approx. client rows/s |
+|---|---|---:|---:|---:|---:|---:|
+| connector cap | `20261123_205048_00000_ek6fn` | 24 | 32 | 18.370s | 16.122s | 54.4K |
+| connector cap | `20261123_205137_00001_ek6fn` | 24 | 24 | 9.785s | 7.729s | 102.2K |
+| connector cap | `20261123_205240_00000_sgai3` | 16 | 32 | 15.719s | 13.601s | 63.6K |
+| connector cap | `20261123_205324_00001_sgai3` | 16 | 28 | 10.063s | 7.997s | 99.4K |
+
+The cap removed the catastrophic 11--14s primary-RPC waits from the prior
+32-writer run: with cap 24, per-file primary RPCs were roughly 0.4--2.5s;
+with cap 16, roughly 0.25--1.5s. Lowering the cap from 24 to 16 improved the
+32-writer arm, but did not recover the 24-writer result. The 32-writer cap16
+timeline still spent about 5.9s in scheduling, while the 28-writer cap16 arm
+spent 2.8s scheduling and 2.2s finishing. This shows that connector-side
+backpressure is a useful guardrail, but writer-count/split scheduling remains
+the dominant route-level issue once the Retina queue is protected.
+
+The best current measured route is therefore still 24 writers (about 102K
+client rows/s in this post-restart probe; the earlier cold 24-writer result was
+136.1K). The cap is retained as an opt-in diagnostic/guardrail, not promoted as
+the production default or as evidence of reaching the hundreds-of-thousands
+target. The next meaningful optimization should reduce writer scheduling and
+per-writer conversion/write overhead, then repeat a matched cold-start matrix;
+more small semaphore values alone are unlikely to reach the target.
