@@ -4152,3 +4152,9 @@ These settings are rejected as default benchmark settings. The current
 single-node INSERT conclusion remains a lower-240K-to-lower-300K rows/s band;
 the occasional 300K+ arm is a peak observation, not yet a reproducible
 million-row/s result.
+
+After these probes the target contained 25.1M rows with exact uniqueness and
+tag values, and the isolated Retina status remained `READY` at checkpoint
+epoch `1dc618b2-432c-4f48-a4e9-c7af198c5f22`. The latest published checkpoint
+body was `recovery_cds20_670120.bin`; this is a live-state check, not a new
+post-restart readback gate.
