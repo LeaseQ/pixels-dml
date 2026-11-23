@@ -3847,3 +3847,43 @@ configuration result, not yet a production-default change; failure-injection,
 checkpoint/restart, and a longer multi-table run are still required before
 changing the default. The result moves the repeatable INSERT point from about
 188K to about 239K rows/s, but does not yet reach the 300K+ goal.
+
+## Fresh-target recheck after Trino lease cleanup (2026-11-24)
+
+The first writer-shape follow-up after the cap sweep was contaminated by two
+CLI clients that did not close their Trino sessions. Their transactions
+(`trans_id=670068` and `670070`) remained under the offload detector lease,
+which blocked subsequent work and eventually caused a generic query failure.
+This was a harness/service-state issue, not a data correctness result. The
+isolated Trino process was restarted with the same
+`flush-cap24-trino.args`; no Retina or table data was reset.
+
+A second independent indexed target,
+`validationfresh.e2e68_page_fresh2_20261124`, was then used with the same
+68-column materialized source, 24 fixed writers, writer scaling disabled,
+`task_concurrency=64`, and connector cap 24. The three disjoint one-million-
+row INSERTs produced these Trino timelines:
+
+```text
+first arm (cold): 6.888 s  (~145K rows/s)
+warm arm 1:       3.872 s  (~258K rows/s)
+warm arm 2:       4.223 s  (~237K rows/s)
+```
+
+The final check passed exactly:
+
+```text
+count=3,000,000
+min(id)=10,000,000,001
+max(id)=12,001,000,000
+distinct(id)=3,000,000
+```
+
+This confirms that the cap-24 path can repeatedly return to the lower
+240--260K rows/s range after a clean Trino session, but it does not establish
+a stable 300K+ result. It also shows that the apparent degradation on the
+11M-row target cannot be attributed to target row count alone: residual
+transaction leases and service state materially affect the measured timeline.
+Future performance arms must record and clean active query/lease state before
+comparing numbers. The result remains an isolated opt-in configuration and
+does not justify changing the production default.
