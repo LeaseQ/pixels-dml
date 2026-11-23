@@ -3981,3 +3981,20 @@ fixture: the approximately 300K rows/s performance band and the complete
 3.1M-row tag-aware result survive a Retina restart. The runtime remains an
 isolated validation setup because its 64 GiB heap and shortened GC interval
 still require production resource-budget review.
+
+## Trino task-concurrency control (2026-11-24)
+
+With the same recovered Retina, connector grouped-primary cap 24, fixed
+24-writer session, 68-column source, and indexed target, one additional 1M
+row append used `task_concurrency=32` instead of the accepted 64:
+
+```text
+task_concurrency=32: 3.656 s  (~274K rows/s)
+```
+
+The target remained correct after the arm:
+`count=4,100,000`, `distinct(id)=4,100,000`, with IDs spanning
+`60000000001..64001000000`. The matched `task_concurrency=64` arms were
+294--321K rows/s, so lowering task concurrency is rejected as an optimization.
+The 64 setting remains the isolated benchmark configuration; this arm is
+performance evidence and was not used as a separate restart gate.
