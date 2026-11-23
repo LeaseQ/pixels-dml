@@ -99,10 +99,17 @@ public class MainIndexBuffer implements Closeable
     }
 
     /**
-     * Insert a main index entry into this buffer if it does not exist in this buffer.
+     * Insert or replace a main-index entry in this buffer.
+     *
+     * <p>A compaction relocates an existing row id to a new file.  Keeping the
+     * old row id in a different per-file buffer makes lookup order decide which
+     * location wins (and can return a retired file).  Remove the previous
+     * buffered location before installing the new one so relocation is
+     * authoritative even when the cache has not been populated.</p>
+     *
      * @param rowId the table row id of the entry
      * @param location the row location of the entry
-     * @return true of the index entry does not exist and is put successfully in this buffer
+     * @return true if the new location is buffered successfully
      */
     public boolean insert(long rowId, IndexProto.RowLocation location)
     {
@@ -115,27 +122,31 @@ public class MainIndexBuffer implements Closeable
             }
             // Issue #1115: use HashMap for better performance and do post-sorting in flush().
             fileBuffer = new HashMap<>();
-            fileBuffer.put(rowId, location);
-            if (this.populateCache)
-            {
-                this.indexCache.admit(rowId, location);
-            }
             this.indexBuffer.put(location.getFileId(), fileBuffer);
-            return true;
         }
-        else
+
+        for (Iterator<Map.Entry<Long, Map<Long, IndexProto.RowLocation>>> it =
+                this.indexBuffer.entrySet().iterator(); it.hasNext(); )
         {
-            if (!fileBuffer.containsKey(rowId))
+            Map.Entry<Long, Map<Long, IndexProto.RowLocation>> entry = it.next();
+            if (entry.getKey() != location.getFileId() && entry.getValue().remove(rowId) != null &&
+                    entry.getValue().isEmpty())
             {
-                fileBuffer.put(rowId, location);
-                if (this.populateCache)
-                {
-                    this.indexCache.admit(rowId, location);
-                }
-                return true;
+                it.remove();
             }
-            return false;
         }
+
+        fileBuffer.put(rowId, location);
+        // A lookup may have admitted an older persistent range into the cache.
+        // A point entry must win over that range, while avoiding population of
+        // every relocated row when cache population is disabled.
+        this.indexCache.evict(rowId);
+        this.indexCache.evictRangeContaining(rowId);
+        if (this.populateCache)
+        {
+            this.indexCache.admit(rowId, location);
+        }
+        return true;
     }
 
     protected IndexProto.RowLocation lookup(long fileId, long rowId) throws MainIndexException

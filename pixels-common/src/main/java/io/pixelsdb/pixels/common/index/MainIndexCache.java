@@ -159,6 +159,25 @@ public class MainIndexCache implements Closeable
     }
 
     /**
+     * Evict the cached range containing a row id.  A relocated row is inserted
+     * as a point entry, so an older range must not win after the point entry is
+     * removed or before it is admitted into the point cache.
+     */
+    public boolean evictRangeContaining(long rowId)
+    {
+        Object candidate = this.rangeCache.floor(rowId);
+        if (candidate instanceof RowIdRange)
+        {
+            RowIdRange range = (RowIdRange) candidate;
+            if (range.getRowIdStart() <= rowId && rowId < range.getRowIdEnd())
+            {
+                return this.rangeCache.remove(range);
+            }
+        }
+        return false;
+    }
+
+    /**
      * @param rowId the row id of the table
      * @return the row location of the row id, or null if not found
      */
