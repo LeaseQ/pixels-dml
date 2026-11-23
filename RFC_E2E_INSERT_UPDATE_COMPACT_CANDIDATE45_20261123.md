@@ -1131,33 +1131,82 @@ the new-main-index property. Next work should focus on the remaining grouped
 primary write and file-buffer/flush scheduling costs; UPDATE and COMPACT must
 continue to use the relocation-safe path.
 
-## Correction: recovery-time durability audit (2026-11-24)
+## Correction: recovery checkpoint gate and durability re-test (2026-11-24)
 
 The 18,000,000-row readback above was an immediate readback while the same
-daemon lifetime was still serving the table. It must not be treated as a
-recovery durability proof. During the subsequent exploratory probe, the
-runtime was restarted several times and the table was read back again using
-the stable full daemon jar. The range audit showed that the two second-round
-stable-control arms were no longer visible:
+daemon lifetime was still serving the table. It was not, by itself, a
+recovery durability proof. The two second-round stable-control arms
+(`20261123_181230_00014_k85c5` and `20261123_181258_00015_k85c5`) were later
+absent because their 64 file ids were not in the published recovery body at
+the time of restart. Recovery correctly retired files that were catalog
+`REGULAR` but not represented in the checkpoint; the subsequent GC cleanup
+removed those retired catalog rows. This is the expected checkpoint boundary,
+not random data loss and not evidence against the new-main-index path.
+
+The correct gate was then run on one new 1,000,000-row INSERT (query
+`20261123_185036_00027_k85c5`, offset 33B):
 
 ```text
-offset 14B, 15B, 16B, 17B, 22B, 23B: 1,000,000 rows each
-offset 24B, 25B:                         0 rows each
-offset 26B through 32B:                  1,000,000 rows each
-post-recovery total:                     23,000,000 rows
-distinct ids:                            23,000,000
-min_id=4,000,000,001 max_id=36,001,000,000
-tag_1_type IS NULL=0
+file ids from the INSERT: 88269..88300 (32 files)
+checkpoint: recovery_cds20_520002.bin
+checkpointAppliedTs: 520002
+checkpoint file-id membership: 32/32
 ```
 
-The missing arms are query `20261123_181230_00014_k85c5` and query
-`20261123_181258_00015_k85c5`. Both had `PIXELS_INSERT_PUBLISH_METRIC` and
-returned `FINISHED`; they were also present in the immediate 18M readback.
-The evidence therefore identifies a recovery/publication durability problem
-in this isolated benchmark runtime, but does not attribute the loss to the
-new-main-index candidate: both missing arms used the stable control path. The
-candidate arms in this probe remained visible after the later stable recovery,
-but a clean, independent durability run is still required before treating
-the full INSERT E2E as production-grade evidence. The candidate remains
-default-off; the throughput result should be read as a live-run signal, not a
-durability claim.
+The isolated runtime was restarted on the stable full daemon jar from that
+checkpoint and completed the normal recovery-epoch `markReady` handshake. The
+post-restart readback was exact:
+
+```text
+count=24,000,000
+min_id=4,000,000,001
+max_id=37,001,000,000
+distinct_id=24,000,000
+tag_1_type IS NULL=0
+tag_1_type IS NOT NULL=24,000,000
+```
+
+The validation procedure is therefore: after an INSERT, do not restart merely
+because Trino returned `FINISHED`; first observe a recovery checkpoint whose
+body contains every file id from that INSERT, then restart and verify the
+readback. The 33B gate above is a stable-full-daemon harness proof, not a
+candidate-specific proof.
+
+### Candidate recovery attempt stopped before the durability gate
+
+I then switched the isolated runtime to the opt-in new-main-index candidate in
+order to run the same checkpoint-gated proof with a candidate INSERT. The
+candidate coordinator and worker started, but the candidate retina never
+reached READY. Recovery did finish applying `recovery_cds20_520002.bin`, but
+the runtime reported 1,344 temporary-ingest visibility entries and then
+repeatedly failed while `initializeRecoveredResources` constructed
+`FileWriterManager`/`PixelsWriteBuffer` instances:
+
+```text
+Recovery complete: checkpointAppliedTs=520002, ... warns=1344
+java.lang.OutOfMemoryError: Java heap space
+  at io.pixelsdb.pixels.retina.FileWriterManager.<init>(FileWriterManager.java:134)
+  at io.pixelsdb.pixels.retina.PixelsWriteBuffer.<init>(PixelsWriteBuffer.java:182)
+```
+
+The failure reproduced with candidate retina heaps of 1G, 2G, and 8G. No
+candidate INSERT was issued and no candidate durability result is claimed.
+The candidate processes were stopped, and the stable full daemon was restored.
+After the restart, the stable runtime reached READY and the recovery readback
+remained exact:
+
+```text
+count=24,000,000
+min_id=4,000,000,001
+max_id=37,001,000,000
+distinct_id=24,000,000
+tag_1_type IS NULL=0
+tag_1_type IS NOT NULL=24,000,000
+```
+
+This is a recovery-startup blocker for the candidate experiment, not evidence
+that the new-main-index write path lost rows. Before any candidate durability
+claim, the temporary-ingest buildup and startup resource allocation need to be
+isolated (or the candidate must be tested from a clean runtime/checkpoint).
+The candidate remains default-off; only the stable 33B INSERT is backed by the
+checkpointed recovery proof above.
