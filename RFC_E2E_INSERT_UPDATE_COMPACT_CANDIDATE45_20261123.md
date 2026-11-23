@@ -1,6 +1,6 @@
 # RFC: Fresh INSERT -> UPDATE -> COMPACT E2E Evidence (2026-11-23)
 
-Status: validation evidence; no new production code change
+Status: validation evidence; amended with fixes and follow-up E2E results
 
 ## Scope
 
@@ -641,14 +641,12 @@ a performance result. Before pursuing post-COMPACT throughput, isolate why a
 second update is acknowledged but is neither materialized nor visible through
 the normal read path.
 
-The issue is not limited to rewriting the same tag columns. On the already
-compacted candidate83 table, a full-range UPDATE of the previously untouched
-`tag_2_type/tag_2_para` to `B/84.0000` returned 1M rows in 3.680s, but the
-immediate read still showed the old `AAA/3.1400` values. A following COMPACT
-again reported `outputs=0`, and the final read remained unchanged. This makes
-the current diagnosis stronger: any UPDATE after COMPACT is acknowledged but
-is not visible or materialized in this runtime, independent of the tag column
-being updated.
+Correction: the candidate83 runtime was configured with only
+`dml.tag.columns=tag_1_type,tag_1_para`; `tag_2_type/tag_2_para` were not
+tag-aware columns in that run. The earlier tag2 observation therefore cannot
+be used as evidence that a configured post-COMPACT UPDATE failed. The genuine
+candidate82 symptom was later traced to stale MainIndexBuffer locations after
+compaction; see the addendum below.
 
 Remote evidence:
 
@@ -657,3 +655,91 @@ Remote evidence:
   compact-candidate83-first-20261123.log
   compact-candidate82-second-20261123.log
 ```
+
+## Addendum: post-COMPACT relocation repair and full-table decimal fix (2026-11-23)
+
+### Root cause and daemon fix
+
+Direct index and physical-file probes on candidate83 showed that the tag index
+contained the new U84 tag and COMPACT reported relocation of 1,000,000 rows,
+but resolving an exact key still returned the retired source file id. The
+cause was an old per-file entry in `MainIndexBuffer`: inserting the new
+location did not remove the old row mapping, so lookup iteration could return
+the stale file first. Commit `d5ccc1cb` in `pixels-dml` makes relocation
+authoritative by evicting stale point/range cache entries and replacing the
+row mapping across file buffers. It also adds a `MainIndexBuffer` regression
+test and was pushed to the validation branch.
+
+The isolated daemon was rebuilt and restarted. A repair COMPACT repopulated the
+current compact-file mapping; resolving the first key then returned the new
+file id rather than the retired source id. This is an in-process E2E proof of
+the relocation fix. Persisted overlapping SQLite ranges after a daemon restart
+remain a separate durability follow-up and are not overclaimed here.
+
+### Full-table UPDATE route exposed a second correctness bug
+
+The next full-table UPDATE intentionally exercised the ordinary no-WHERE
+`ConnectorMergeSink` fallback, not the exact primary-key route:
+
+```text
+UPDATE ... SET tag_1_type='U85', tag_1_para=85.0000
+UPDATE: 1,000,000 rows
+wall: 33 s
+route: merge_fallback; rows=1,000,000; rpc_count=1
+```
+
+The following COMPACT correctly resolved and relocated 1M rows, but the numeric
+tag materialized as `850000.0000`. The cause was in `PixelsMergeSink`: Trino
+Decimal blocks store the unscaled integer (850000), and the fallback encoded
+that integer as SQL text before parsing it again, effectively applying the
+scale twice. Commit `34199d5` in `pixels-trino-dml` converts short and long
+Decimal blocks back to scale-aware SQL text and adds a regression test for
+`decimal(18,4)`.
+
+### Corrected full-table E2E after both fixes
+
+The connector jar containing `34199d5` was deployed only to the isolated
+Trino runtime. A second full-table UPDATE and tag-aware COMPACT were then run
+on the same 1M-row candidate83 table:
+
+```text
+UPDATE U86:       1,000,000 rows, wall=33 s
+pre-COMPACT read: U85 / 850000.0000 (the previous materialized state)
+COMPACT wall:     82 s
+tag snapshot:     2 entries, 1,000,000 rows, 62 RPC, 23.165 s
+physical rewrite: 1 output, worker wall=28.723 s
+primary resolve:  1,000,000 rows, 62 RPC, 21.642 s
+relocation:       1,000,000 rows, 128 RPC
+publish:          9.559 s
+```
+
+Final SQL verification passed exactly:
+
+```text
+count(*) = 1,000,000
+tag_1_type='U86' = 1,000,000
+tag_1_para=86.0000 = 1,000,000
+tag_1_para=860000.0000 = 0
+tag_1_type='U85' = 0
+tag_2_type='AAA' = 1,000,000
+min(tag_1_para) = max(tag_1_para) = 86.0000
+```
+
+An independent direct Pixels-file read of the newest compact file returned
+`tag_1_type=U86`, `tag_1_para=86.0000`, and `tag_2_type=AAA`, proving the
+result is physically materialized rather than a Trino metadata/cache artifact.
+
+### Runtime notes and interpretation
+
+After the daemon restart, Retina recovered its checkpoint in `RECOVERING` and
+required the existing single-node `get status -> markReady(recoveryEpoch)`
+handshake before transaction port 19989 opened. The isolated Trino process
+also had to be restarted with its intended 8191 HTTP port and Java 23 module
+opens. These are runtime lifecycle requirements, not UPDATE failures.
+
+This corrected run establishes a stable correctness path for a 1M-row
+full-table UPDATE followed by COMPACT. It does not yet establish target-level
+throughput: the measured UPDATE rate is about 30K rows/s for this merge
+fallback, while COMPACT is dominated by ~21.6s primary resolution plus physical
+rewrite/publish. The exact primary-key UPDATE route and the full-table merge
+fallback must remain separate benchmark rows.
