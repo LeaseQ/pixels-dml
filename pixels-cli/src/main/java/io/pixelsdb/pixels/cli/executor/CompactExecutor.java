@@ -200,8 +200,17 @@ public class CompactExecutor implements CommandExecutor
             primaryKeyTypes = java.util.Collections.emptyList();
         }
 
-        // Issue #998: compact need to exclude empty files
-        List<Status> statuses = orderStorage.listStatus(layout.getOrderedPathUris());
+        // Issue #998: compact need to exclude empty files.  A tag-aware UPDATE
+        // records the new values in the durable tag index and does not create an
+        // ordered data file.  After the first COMPACT, the current readable
+        // files therefore live under the compact paths.  Include those files
+        // when there are pending tag entries; otherwise a post-COMPACT UPDATE
+        // is acknowledged but can never be materialized by this command.
+        List<Status> statuses = new ArrayList<>(orderStorage.listStatus(layout.getOrderedPathUris()));
+        if (useTagCompactor && !tagEntries.isEmpty())
+        {
+            statuses.addAll(compactStorage.listStatus(layout.getCompactPathUris()));
+        }
         Iterator<Status> statusIterator = statuses.iterator();
         while (statusIterator.hasNext())
         {
