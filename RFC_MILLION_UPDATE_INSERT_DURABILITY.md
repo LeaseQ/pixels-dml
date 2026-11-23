@@ -3960,3 +3960,24 @@ runtime, rather than a single isolated peak. They are performance evidence;
 only the preceding 100K arm has a post-restart readback in this section, so a
 full 3.1M restart readback is still a separate durability gate. The 64 GiB
 heap and 10-second interval remain isolated validation settings.
+
+### Full 3.1M restart readback
+
+The latest checkpoint from the three performance arms was
+`recovery_cds20_670088.bin`. Retina was restarted from that exact body and
+completed the normal recovery-epoch handshake. The post-restart query passed:
+
+```text
+count=3,100,000
+distinct(id)=3,100,000
+min(id)=60,000,000,001
+max(id)=63,001,000,000
+tag_1_type='U111'=3,100,000
+tag_1_para min=max=111.0000
+```
+
+This closes the full-size checkpoint/restart gate for the current INSERT
+fixture: the approximately 300K rows/s performance band and the complete
+3.1M-row tag-aware result survive a Retina restart. The runtime remains an
+isolated validation setup because its 64 GiB heap and shortened GC interval
+still require production resource-budget review.
