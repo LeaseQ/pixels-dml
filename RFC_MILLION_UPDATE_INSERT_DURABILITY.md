@@ -4137,3 +4137,18 @@ tag_1_para min=max=111.0000
 The active validation jar was restored to the original cap-24-default SHA256
 `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4` after the
 probe. The next optimization target remains the Stage 1 Exchange/data path.
+
+## Writer scheduling probes (2026-11-24)
+
+Two additional session-level probes were run without changing the connector
+jar. Enabling Trino writer scaling with `task_min_writer_count=24` produced
+1M-row timelines of 3.351 s, 6.023 s, and 3.560 s. Matching the source's
+approximately 15 scan drivers with fixed `task_min_writer_count=15` produced
+3.135 s, 5.642 s, and 3.129 s. Every arm returned the expected inserted row
+count and unique ID range, but both probes contained multi-second long tails
+and did not beat the stable 24-writer band.
+
+These settings are rejected as default benchmark settings. The current
+single-node INSERT conclusion remains a lower-240K-to-lower-300K rows/s band;
+the occasional 300K+ arm is a peak observation, not yet a reproducible
+million-row/s result.
