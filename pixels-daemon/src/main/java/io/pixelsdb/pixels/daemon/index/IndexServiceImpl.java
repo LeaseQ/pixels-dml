@@ -38,6 +38,7 @@ import org.rocksdb.RocksDBException;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -1082,9 +1083,13 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             List<PixelsTagIndex.VersionedUpdate> updates = new ArrayList<>();
             for (IndexProto.SharedTagIndexUpdate sharedUpdate : request.getUpdatesList())
             {
-                List<byte[]> primaryKeys = sharedUpdate.getPrimaryKeysList().stream()
+                // Decode the shared key vector once and make it immutable before
+                // creating one VersionedUpdate per changed tag column.  List.copyOf
+                // then reuses this same list for each column instead of copying one
+                // million references per column again.
+                List<byte[]> primaryKeys = List.copyOf(sharedUpdate.getPrimaryKeysList().stream()
                         .map(com.google.protobuf.ByteString::toByteArray)
-                        .collect(Collectors.toList());
+                        .collect(Collectors.toList()));
                 // Shared UPDATE requests carry one key vector for multiple column
                 // assignments. Validate it once so PixelsTagIndex does not build
                 // the same per-column deduplication table repeatedly. Single-
@@ -1259,13 +1264,16 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
             MainIndex mainIndex = MainIndexFactory.Instance().getMainIndex(request.getTableId());
             Map<Integer, SinglePointIndex> singlePointIndexes = new HashMap<>();
             Map<Integer, List<IndexProto.IndexKey>> keysByBucket = new HashMap<>();
+            Map<Integer, List<Integer>> positionsByBucket = new HashMap<>();
             long bucketBuildStart = System.nanoTime();
-            for (IndexProto.IndexKey key : request.getIndexKeysList())
+            for (int keyPosition = 0; keyPosition < request.getIndexKeysCount(); keyPosition++)
             {
                 if (request.getIgnoreMissing())
                 {
+                    IndexProto.IndexKey key = request.getIndexKeys(keyPosition);
                     int bucketId = IndexUtils.getBucketIdFromByteBuffer(key.getKey());
                     keysByBucket.computeIfAbsent(bucketId, ignored -> new ArrayList<>()).add(key);
+                    positionsByBucket.computeIfAbsent(bucketId, ignored -> new ArrayList<>()).add(keyPosition);
                     singlePointIndexes.computeIfAbsent(bucketId, ignored -> {
                         try
                         {
@@ -1281,27 +1289,30 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                 }
             }
             bucketBuildNanos = System.nanoTime() - bucketBuildStart;
-            Map<IndexProto.IndexKey, Long> resolvedRowIds = new HashMap<>();
+            long[] resolvedRowIds = new long[request.getIndexKeysCount()];
+            Arrays.fill(resolvedRowIds, -1L);
             if (request.getIgnoreMissing())
             {
                 long singlePointStart = System.nanoTime();
                 for (Map.Entry<Integer, List<IndexProto.IndexKey>> bucket : keysByBucket.entrySet())
                 {
                     List<Long> rowIds = singlePointIndexes.get(bucket.getKey()).getUniqueRowIds(bucket.getValue());
+                    List<Integer> positions = positionsByBucket.get(bucket.getKey());
                     for (int i = 0; i < rowIds.size(); i++)
                     {
-                        resolvedRowIds.put(bucket.getValue().get(i), rowIds.get(i));
+                        resolvedRowIds[positions.get(i)] = rowIds.get(i);
                     }
                 }
                 singlePointLookupNanos = System.nanoTime() - singlePointStart;
             }
             long locationResponseStart = System.nanoTime();
-            for (IndexProto.IndexKey key : request.getIndexKeysList())
+            for (int keyPosition = 0; keyPosition < request.getIndexKeysCount(); keyPosition++)
             {
+                IndexProto.IndexKey key = request.getIndexKeys(keyPosition);
                 long rowId;
                 if (request.getIgnoreMissing())
                 {
-                    rowId = resolvedRowIds.getOrDefault(key, -1L);
+                    rowId = resolvedRowIds[keyPosition];
                 }
                 else
                 {

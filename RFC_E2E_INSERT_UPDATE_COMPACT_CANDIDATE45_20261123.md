@@ -743,3 +743,68 @@ throughput: the measured UPDATE rate is about 30K rows/s for this merge
 fallback, while COMPACT is dominated by ~21.6s primary resolution plus physical
 rewrite/publish. The exact primary-key UPDATE route and the full-table merge
 fallback must remain separate benchmark rows.
+
+## Addendum: exact UPDATE resolver and shared tag-write candidates (2026-11-23)
+
+The next exploration kept the exact primary-key route and the same 1M-row
+range (`4000000001..4001000000`) fixed. The Trino runtime used
+`pixels.update.primary-key-resolve-batch-size=16384` and
+`pixels.update.primary-key-resolve-parallelism=32`. Every successful probe
+updated two configured tag columns and returned exactly 1,000,000 rows.
+
+### Candidate changes
+
+The daemon resolver replaced the temporary `HashMap<IndexKey, Long>` used to
+re-associate resolved row IDs with request keys by a request-position array
+plus per-bucket positions. This preserves input order, missing-key behavior,
+and the wire protocol while removing protobuf-key hashing and Long boxing from
+the million-key response loop.
+
+The shared tag-write path then received two local optimizations:
+
+1. Decode the shared primary-key vector once and reuse the immutable list for
+   both changed tag columns.
+2. In `PixelsTagIndex.appendBatch`, reuse the incoming list when the previous
+   value is empty and the request has already proved the primary keys unique;
+   repeated versioned keys still take the old combine path.
+
+### Component evidence
+
+The daemon storage probe changed as follows on the same runtime:
+
+```text
+array resolver only:
+  locationResponseMs: mostly 4..30 (previous warm runs: commonly 100..140)
+shared-list candidate:
+  group_ms: 0.03..0.32 ms (previous: about 130..140 ms)
+  merge_ms: 151.6..341.2 ms (previous: about 340..535 ms)
+  rocks_write_ms: about 49..51 ms
+```
+
+The targeted RocksDB tag-index suite passed after the changes:
+
+```text
+Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
+BUILD SUCCESS
+```
+
+### E2E decision
+
+The exact-route E2E probes were successful and correct, but did not produce a
+stable target-level throughput increase. Warm internal totals included:
+
+```text
+U103  total=2.596s  primary_resolve=0.947s
+U104  total=1.809s  primary_resolve=0.724s
+U105  total=1.733s  primary_resolve=0.830s
+U107  total=2.161s  primary_resolve=0.830s
+U109  total=1.756s  primary_resolve=0.897s
+```
+
+The best stable-looking warm result remains in the same roughly 0.55--0.65M
+rows/s internal band, below the million-row/s objective. RPC and primary-key
+resolution dominate the remaining variance after the tag-write copies are
+removed. These changes are therefore retained as an experimental candidate
+and evidence, not presented as the target-throughput breakthrough; further
+blind batch tuning is paused pending a direction decision or a new resolver/
+RocksDB design hypothesis.

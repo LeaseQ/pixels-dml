@@ -298,10 +298,24 @@ public final class PixelsTagIndex implements Closeable
             for (VersionedUpdate update : updates)
             {
                 VersionedKey versionedKey = new VersionedKey(update.tag(), update.transactionTimestamp());
-                List<byte[]> primaryKeys = grouped.computeIfAbsent(versionedKey, ignored -> new ArrayList<>());
-                primaryKeys.addAll(update.primaryKeys());
-                knownUniqueGroups.put(versionedKey, update.primaryKeysKnownUnique());
-                primaryKeyCount += update.primaryKeys().size();
+                List<byte[]> incoming = update.primaryKeys();
+                List<byte[]> previous = grouped.putIfAbsent(versionedKey, incoming);
+                if (previous == null)
+                {
+                    knownUniqueGroups.put(versionedKey, update.primaryKeysKnownUnique());
+                }
+                else
+                {
+                    // Preserve the old merge semantics if multiple updates target
+                    // the same versioned tag key, while keeping the common shared-
+                    // UPDATE case zero-copy across changed columns.
+                    List<byte[]> combined = new ArrayList<>(previous.size() + incoming.size());
+                    combined.addAll(previous);
+                    combined.addAll(incoming);
+                    grouped.put(versionedKey, combined);
+                    knownUniqueGroups.put(versionedKey, false);
+                }
+                primaryKeyCount += incoming.size();
             }
         }
         else
@@ -345,7 +359,10 @@ public final class PixelsTagIndex implements Closeable
                 List<byte[]> incoming = grouped.get(versionedKey);
                 List<byte[]> merged = existing.isEmpty() &&
                         Boolean.TRUE.equals(knownUniqueGroups.get(versionedKey))
-                        ? new ArrayList<>(incoming)
+                        // The incoming list is immutable for connector requests and
+                        // no later path mutates it, so avoid another million-entry
+                        // reference copy on the common empty+unique fast path.
+                        ? incoming
                         : PixelsTagIndexCodec.append(existing, incoming);
                 if (merged.size() != existing.size())
                 {
