@@ -15,6 +15,48 @@ source: e2e68_fresh_candidate9_20261123
 target: e2e68_fresh_candidate45_20261123
 ```
 
+## Follow-up: packed grouped-primary wire probe (candidate57/58/59)
+
+The packed probe added an opt-in wire representation for grouped INSERT
+primary-index entries. It kept the existing grouped bucket partitioning,
+RocksDB WriteBatch/WAL path, MainIndex update, and response semantics; only
+the RPC payload representation changed. The isolated daemon was restarted
+with JDK 23, recovered checkpoint `recovery_cds20_60032.bin`, completed the
+existing `get status -> markReady(recoveryEpoch)` handshake, and the exact
+1M-row source table was reused for each fresh target.
+
+All three candidates passed the exact correctness check:
+
+```text
+count=1,000,000, distinct_id=1,000,000,
+min_id=7,000,000,001, max_id=7,001,000,000
+```
+
+The first packed run (candidate57) was slower at 10.645 s (93.9K rows/s).
+A same-runtime baseline (candidate58) took 9.233 s (108.3K rows/s), while a
+second packed run (candidate59) took 8.590 s (116.4K rows/s). The corresponding
+`primary_put_wall_ms` sums were 78.997 s, 55.581 s, and 42.188 s. The spread
+shows that the packed payload does not produce a stable end-to-end gain; the
+dominant variation remains in the grouped primary/RocksDB writer finish path,
+not in the wire bytes alone. Candidate59 is close to, but not materially
+better than, the accepted candidate56 baseline (8.627 s / 115.9K rows/s).
+
+The packed implementation is therefore rejected as a default optimization.
+The direct next optimization would need to avoid reconstructing a full
+`PrimaryIndexEntry` protobuf list after decoding, or change the RocksDB/index
+write path itself. That is a larger core-path change and needs a separate
+design/profiling pass; this probe does not justify merging it.
+
+Remote artifacts:
+
+```text
+logs/insert-candidate57-indexed-32writers-packed-primary-20261123.log
+logs/insert-candidate58-indexed-32writers-baseline-after-packed-20261123.log
+logs/insert-candidate59-indexed-32writers-packed-primary-after-baseline-20261123.log
+logs/console-packed-primary-20261123.log
+logs/console-baseline-primary-20261123.log
+```
+
 The main runtime was not touched. The target used `pk='id'`,
 `pk_scheme='rocksdb'`, the grouped primary-index route, and the no-copy
 compaction CLI from `8dcf2467`.
