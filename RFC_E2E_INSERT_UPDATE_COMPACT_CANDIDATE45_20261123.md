@@ -1069,3 +1069,64 @@ provide a reproducible improvement over the matched warm control, and neither
 the source default nor the runtime default is changed. The candidate source
 and property were reverted after the probe; the isolated runtime was restored
 to the stable full jar with pipelined writes disabled.
+
+## Addendum: INSERT-only new-row main-index path retained as opt-in (2026-11-24)
+
+This probe revisited the rejected append-only/high-water idea with a narrower
+contract. A fresh INSERT obtains row ids from `RowIdAllocator`, so its row ids
+cannot refer to an older buffered location. The candidate adds
+`MainIndexBuffer.insertNew()` and `MainIndex.putNewEntries()`. The SQLite main
+index implementation uses this path only when the daemon property
+`pixels.index.grouped.primary.write.new-main-index=true` is explicitly set.
+The normal `putEntries()`/`MainIndexBuffer.insert()` path remains unchanged for
+UPDATE and COMPACT, including relocation and cache invalidation behavior. The
+candidate does not change the default.
+
+The focused `TestMainIndexBuffer` test passed 2/2. The common module was
+installed, the SQLite main-index module was installed, and the daemon module
+was packaged successfully on cds20. Deployment used only these three module
+jars as a classpath overlay over the stable full daemon jar; the shaded daemon
+jar was not deployed.
+
+The E2E used the same indexed target table, the same 1,000,000-row source
+range, tag-bearing data, grouped primary writes, and 32 Trino writers. Each
+candidate/control pair was run after a fresh daemon restart; the first arm is
+the cold/recovery arm and the second is the warm arm:
+
+| Arm | Query | Elapsed | Approx. rows/s |
+|---|---|---:|---:|
+| candidate cold | `20261123_180355_00006_k85c5` | 16.78s | 59.6K |
+| candidate warm | `20261123_180421_00007_k85c5` | 4.88s | 204.9K |
+| stable control cold | `20261123_180654_00009_k85c5` | 18.13s | 55.2K |
+| stable control warm | `20261123_180715_00010_k85c5` | 6.05s | 165.3K |
+| candidate 2 cold | `20261123_181041_00012_k85c5` | 15.13s | 66.1K |
+| candidate 2 warm | `20261123_181106_00013_k85c5` | 6.05s | 165.3K |
+| stable control 2 cold | `20261123_181230_00014_k85c5` | 18.24s | 54.8K |
+| stable control 2 warm | `20261123_181258_00015_k85c5` | 6.45s | 155.0K |
+
+Across the two matched pairs, candidate mean elapsed time was 15.96s cold
+versus 18.19s for control (about 12.3% faster), and 5.47s warm versus 6.25s
+(about 12.6% faster). The gain is meaningful but not a target-level result:
+the INSERT path is still roughly 55--66K rows/s cold and 155--205K rows/s
+warm, far below the desired several hundred thousand to one million rows/s.
+The server metrics are consistent with the code hypothesis: candidate
+`main_flush_ms` was substantially lower in both pairs, while the grouped
+primary stage remained the dominant cost. The result therefore justifies
+retaining this small, default-off INSERT-only optimization for further work,
+not declaring the INSERT target solved.
+
+The final readback after all eight INSERT arms was:
+
+```text
+count=18,000,000
+min_id=4,000,000,001
+max_id=29,001,000,000
+distinct_id=18,000,000
+tag_1_type IS NULL=0
+tag_1_type IS NOT NULL=18,000,000
+```
+
+The isolated cds20 runtime was restored to the stable full daemon jar without
+the new-main-index property. Next work should focus on the remaining grouped
+primary write and file-buffer/flush scheduling costs; UPDATE and COMPACT must
+continue to use the relocation-safe path.

@@ -135,6 +135,16 @@ public interface MainIndex extends Closeable
     List<Boolean> putEntries(List<IndexProto.PrimaryIndexEntry> primaryEntries);
 
     /**
+     * Put entries whose row ids were freshly allocated for INSERT.  The
+     * default preserves the relocation-safe path for implementations that do
+     * not provide a specialized new-row implementation.
+     */
+    default List<Boolean> putNewEntries(List<IndexProto.PrimaryIndexEntry> primaryEntries)
+    {
+        return putEntries(primaryEntries);
+    }
+
+    /**
      * Delete a range of row ids from the main index. This method only has effect on the persistent storage
      * of the main index. {@link #flushCache(long fileId)} should be called before this method
      * delete the row ids from both cache and persistent storage.

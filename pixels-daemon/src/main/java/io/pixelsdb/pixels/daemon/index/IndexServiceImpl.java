@@ -57,6 +57,9 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
     private static final int TAG_INDEX_STREAM_PRIMARY_KEYS_PER_CHUNK = 8192;
     private static final int GROUPED_PRIMARY_WRITE_THREADS = Math.max(1,
             Integer.getInteger("pixels.index.grouped.primary.write.threads", 32));
+    /** Benchmark-only: use the new-row main-index contract for grouped INSERTs. */
+    private static final boolean GROUPED_PRIMARY_NEW_MAIN_INDEX = Boolean.getBoolean(
+            "pixels.index.grouped.primary.write.new-main-index");
     private static final Logger logger = LogManager.getLogger(IndexServiceImpl.class);
     private static final ExecutorService groupedPrimaryWriteExecutor = Executors.newFixedThreadPool(
             GROUPED_PRIMARY_WRITE_THREADS,
@@ -322,7 +325,10 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                 MainIndex mainIndex = MainIndexFactory.Instance().getMainIndex(tableId);
                 long mainIndexInitNanos = System.nanoTime() - mainIndexInitStartNanos;
                 long mainIndexStartNanos = System.nanoTime();
-                for (Boolean mainSuccess : mainIndex.putEntries(entries))
+                List<Boolean> mainResults = GROUPED_PRIMARY_NEW_MAIN_INDEX
+                        ? mainIndex.putNewEntries(entries)
+                        : mainIndex.putEntries(entries);
+                for (Boolean mainSuccess : mainResults)
                 {
                     if (!mainSuccess)
                     {

@@ -354,6 +354,25 @@ public class SqliteMainIndex implements MainIndex
     }
 
     @Override
+    public List<Boolean> putNewEntries(List<IndexProto.PrimaryIndexEntry> primaryEntries)
+    {
+        ImmutableList.Builder<Boolean> builder = ImmutableList.builder();
+        this.cacheRwLock.writeLock().lock();
+        try
+        {
+            for (IndexProto.PrimaryIndexEntry entry : primaryEntries)
+            {
+                builder.add(this.indexBuffer.insertNew(entry.getRowId(), entry.getRowLocation()));
+            }
+        }
+        finally
+        {
+            this.cacheRwLock.writeLock().unlock();
+        }
+        return builder.build();
+    }
+
+    @Override
     public boolean deleteRowIdRange(RowIdRange rowIdRange) throws MainIndexException
     {
         long rowIdStart = rowIdRange.getRowIdStart();

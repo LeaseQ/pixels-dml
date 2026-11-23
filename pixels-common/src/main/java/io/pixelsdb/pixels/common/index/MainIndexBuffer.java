@@ -149,6 +149,41 @@ public class MainIndexBuffer implements Closeable
         return true;
     }
 
+    /**
+     * Insert a row that is guaranteed to have been freshly allocated for this
+     * table.  INSERT obtains row ids from {@code RowIdAllocator}, so there is
+     * no existing buffered location to relocate and no persistent range cache
+     * entry to invalidate.  Keeping this contract separate is important:
+     * UPDATE and COMPACT must continue to use {@link #insert(long,
+     * IndexProto.RowLocation)}, which removes an older location from another
+     * file buffer.
+     *
+     * @param rowId a newly allocated table row id
+     * @param location the new row location
+     * @return true if the row was added; false if this file already contains it
+     */
+    public boolean insertNew(long rowId, IndexProto.RowLocation location)
+    {
+        Map<Long, IndexProto.RowLocation> fileBuffer = this.indexBuffer.get(location.getFileId());
+        if (fileBuffer == null)
+        {
+            if (this.indexBuffer.size() > CACHE_POP_ENABLE_THRESHOLD)
+            {
+                this.populateCache = true;
+            }
+            fileBuffer = new HashMap<>();
+            this.indexBuffer.put(location.getFileId(), fileBuffer);
+        }
+        if (fileBuffer.putIfAbsent(rowId, location) != null)
+        {
+            return false;
+        }
+        // Newly allocated row ids cannot overlap an older persistent range.
+        // Deliberately avoid per-row cache eviction/admission on this hot path;
+        // lookup still finds the entry in the active file buffer.
+        return true;
+    }
+
     protected IndexProto.RowLocation lookup(long fileId, long rowId) throws MainIndexException
     {
         Map<Long, IndexProto.RowLocation> fileBuffer = this.indexBuffer.get(fileId);
