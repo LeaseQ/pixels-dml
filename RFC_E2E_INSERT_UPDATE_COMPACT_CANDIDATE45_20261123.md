@@ -1195,13 +1195,16 @@ for putting the candidate jar on retina, not evidence that the new-main-index
 write path lost rows. The candidate retina was stopped and the stable full
 retina was restored with a larger temporary heap.
 
-### Candidate index-only overlay: checkpointed durability proof
+### Coordinator/worker-only overlay: control result, not candidate-retina evidence
 
-To isolate the candidate code from the existing multi-table retina startup
-pressure, the next probe put the candidate overlay only on coordinator/worker
-and kept the stable full jar on retina. The same table then accepted two
-exploratory INSERTs. The first one was intentionally left as a negative
-durability control:
+To isolate the startup pressure, the next probe put the candidate overlay only
+on coordinator/worker and kept the stable full jar on retina. This was a
+useful control for the coordinator/worker packaging, but it did **not** exercise
+the candidate `IndexServiceImpl`: `IndexServer` is created only in the Retina
+role (`DaemonMain`), so the primary-index writes still used the stable Retina
+implementation. The two exploratory INSERTs below therefore must not be called
+candidate-specific throughput or durability evidence. The first one was
+intentionally left as a negative durability control:
 
 ```text
 candidate offset34B: query 20261123_191211_00030_k85c5
@@ -1239,10 +1242,11 @@ tag_1_type IS NULL=0
 tag_1_type IS NOT NULL=25,000,000
 ```
 
-This is now a candidate-specific checkpointed recovery proof for the
-index-only overlay. It also confirms that the accepted candidate path has not
-changed tag correctness. Its measured INSERT throughput remains far below the
-hundreds-of-thousands-to-million target.
+This is a stable-Retina checkpoint-boundary/control proof, not a
+candidate-specific recovery proof. It is retained because it validates the
+checkpoint gate and tag readback, while avoiding the earlier overclaim about
+which role actually hosted the candidate index service. Its INSERT throughput
+remains far below the hundreds-of-thousands-to-million target.
 
 ### GC scheduler robustness correction
 
@@ -1281,6 +1285,50 @@ The preceding offset36B INSERT was not checkpointed and was absent after that
 restart, which is the expected durability boundary. This is a reliability
 validation result, not a throughput claim.
 
-The candidate remains default-off. The next performance direction remains
-grouped primary-write/flush scheduling rather than another small key-encoding
-or map-reuse micro-optimization.
+### Full candidate Retina performance probe: thread count and WAL (2026-11-24)
+
+After correcting the role placement above, the candidate daemon/index overlay
+was deployed on all three roles, including Retina, with the existing
+checkpoint/recovery harness. This is the first measurement in this document
+that exercises the candidate `IndexServiceImpl` on the actual index server.
+The table and 1,000,000-row source range were unchanged; all runs carried the
+same 30 tag columns and used 32 Trino writers.
+
+| Arm | Query | Retina grouped threads | WAL | Elapsed | Approx. rows/s |
+|---|---|---:|---:|---:|---:|
+| candidate real | `20261123_200026_00043_k85c5` | 32 | on | 17.602s | 56.8K |
+| candidate real | `20261123_200411_00044_k85c5` | 64 | on | 15.206s | 65.8K |
+| candidate probe | `20261123_200948_00045_k85c5` | 64 | off | 16.191s | 61.8K |
+
+The daemon metrics explain the result. The 32-thread run spent roughly
+9.4--9.8s in grouped primary/tag-index writes and only about 0.24--0.31s in
+the main index. At 64 threads, grouped primary time fell to roughly 5.9--6.1s,
+but the complete INSERT was still only 65.8K rows/s. Disabling WAL in the
+isolated benchmark configuration did not help (61.8K rows/s), so WAL is not
+the dominant limiter and remains enabled by default. The host has 40 physical
+cores/80 logical CPUs, but each grouped RPC exposes at most 32 vnode-bucket
+tasks; increasing beyond 64 is not a well-motivated next step without changing
+the write shape.
+
+The candidate remained opt-in and was not promoted as a target-level
+throughput fix. After the probes, the runtime was restored to the default WAL
+configuration, stable coordinator/worker jars, and the GC-fix Retina overlay.
+The recovery checkpoint `recovery_cds20_640001.bin` contained all 32 file IDs
+for each of q43/q44/q45 (`101069..101100`, `102469..102500`, and
+`103869..103900`). The final stable readback was exact:
+
+```text
+count=31,000,000
+min_id=4,000,000,001 max_id=46,001,000,000 distinct_id=31,000,000
+tag_1_type IS NULL=0 tag_1_type IS NOT NULL=31,000,000
+offset34B=0 offset35B=1,000,000 offset36B=0 offset37B=1,000,000
+offset38B=1,000,000 offset39B=1,000,000 offset40B=1,000,000
+offset41B=1,000,000 offset42B=1,000,000
+```
+
+The two absent blocks are the intentionally uncheckpointed controls; the
+checkpoint gate therefore behaved as designed. The next performance direction
+remains grouped primary-write/flush scheduling and RocksDB write-shape
+experiments, not another small key-encoding or map-reuse micro-optimization.
+
+The candidate remains default-off.
