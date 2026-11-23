@@ -973,3 +973,16 @@ change. It should be repeated on the intended deployment shape and checked
 against concurrent workload interference before making 64 the packaged
 default. COMPACT remains a separate cost center; the earlier fresh two-cycle
 materialization evidence remains the correctness baseline.
+
+The best configuration was then carried through COMPACT on the same table
+after U122. The final materialization recorded 62 tag-index resolve RPCs and
+`resolve_ms=24.697s`, `physical_rewrite=31.996s`, and `publish_ms=7.055s`
+(CLI wall about 39s). A compact-only query returned:
+
+```text
+U122 / 122.0000 / 1,000,000
+```
+
+This closes the current isolated E2E loop: table-to-table INSERT evidence,
+exact million-row UPDATE at the best resolver setting, tag-aware COMPACT, and
+compact-only readback of the newest tag value.
