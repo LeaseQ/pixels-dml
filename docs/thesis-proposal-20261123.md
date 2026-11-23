@@ -1,4 +1,4 @@
-# 毕业论文开题报告
+# 中国人民大学硕士学位论文开题报告（正文草稿）
 
 ## 课题名称
 
@@ -7,7 +7,9 @@
 英文题目：Incremental Updates and Deferred Materialization for Large-Scale Data Tagging in Columnar Storage Systems
 
 > 版本日期：2026-11-23。本稿依据项目原始会议、68 列测例规范、最新代码及实验记录整理，
-> 采用通用开题报告结构；学位类别、学校封面和答辩日期由正式模板确定。
+> 学校：中国人民大学；学位层次：硕士。本稿围绕选题依据、国内外研究现状与
+> 研究方案组织正文，补充研究基础、进度和参考文献。具体学院、学硕/专硕类别、
+> 封面、审核表、字数与排版要求尚未确认，不能视为已通过学院模板核验。
 > 工程证据固定到 `codex/million-update-validation`：
 > Pixels `15769b92d4ab699065685fb4935d6c0bc6750362`、
 > Trino Connector `34199d5ec6136c7a81301514e391fa49eadd025d`。
@@ -37,9 +39,94 @@
 
 **关键词：** 列式存储；数据打标；SQL 行级更新；增量索引；延迟物化；性能评测
 
-## 一、选题背景与研究意义
+## 一、选题依据：技术背景、问题来源与研究意义
 
-### 1.1 业务背景与问题来源
+### 1.1 列式存储及其更新问题
+
+数据库既可以按行组织数据，也可以按列组织数据。行式布局倾向于将一条记录的多个
+属性存放在一起；列式布局将相同属性的值集中组织，便于分析查询按需读取少数列，
+并利用相近的数据类型和值分布进行编码与压缩。以本课题的68列宽表为例，统计某个
+标签的分布通常只需要该标签列和过滤条件涉及的列，无须总是读取整行全部属性。
+这也是列式布局适合大规模扫描和聚合分析的重要原因。C-Store 对面向读取优化的
+列式数据库设计进行了系统探索。[文献1](https://dl.acm.org/doi/10.5555/1083592.1083658)
+
+读取优势不意味着行级修改没有代价。对于以不可变列式文件作为基础数据的系统，
+修改某一行的标签通常不能简单覆盖文件中的一个字节区间，还可能涉及压缩块、
+版本、索引和并发可见性。系统需要采用文件重写、额外增量记录或读时合并等方式
+表达修改。不同机制将成本分配到写入、读取和后台维护的不同阶段。
+
+因此，“列式存储”描述的是数据组织方式，不是一个具有统一 UPDATE 语义的产品
+类别。分析本课题前，需要区分文件格式、表格式、查询引擎与完整数据库系统。
+
+### 1.2 Pixels：本课题改造的列存基础
+
+Pixels 是面向数据湖与数据仓库的列式存储引擎，其核心包括列式文件格式、读写
+组件以及相关存储访问能力。Pixels 的研究工作关注云数据湖上的列存组织；其项目
+实现支持与 Trino 等查询引擎集成，并提供元数据、索引、缓存和数据同步等组件。
+[Pixels论文，文献2](https://doi.org/10.1109/ICDE53745.2022.00276)、
+[项目说明](https://github.com/LeaseQ/pixels-dml/blob/15769b92d4ab699065685fb4935d6c0bc6750362/README.md)
+
+本文区分两个语境：“Pixels 文件格式”指磁盘或对象存储中文件内部的数据组织；
+“Pixels 系统”指围绕格式构建的读写器、元数据、索引及服务组件。本课题涉及的是
+后者的更新与物化链路，不能仅以文件压缩率或扫描性能评价其 SQL 更新能力。
+
+与课题直接相关的组件及分工如下：
+
+| 组件 | 职责 | 本课题中的作用 |
+| --- | --- | --- |
+| Pixels Reader/Writer | 读取与生成列式文件 | INSERT生成文件；合并时读取旧值、输出新值 |
+| 元数据服务 | 维护表、布局、文件等信息 | 确定有效输入与合并后输出的发布状态 |
+| 主键索引与位置索引 | 解析主键到行标识、文件及行位置的关系 | 判断实际存在集合；合并后更新位置 |
+| Retina | 原有数据变更回放及可见性、恢复相关能力 | 提供内部对照，并参与当前文件可见性与恢复流程 |
+| 标签索引与标签感知Compaction | 本项目扩展的增量记录和物化路径 | 保存标签变更，在打标结束时写回列存文件 |
+
+选择 Pixels 的原因在于项目需求和已有工程基础，而不是预先认定它在所有负载下
+优于其他列存方案。已有存储布局和读取优化为研究提供平台，但标签更新、位置
+维护和恢复仍是需要专门论证的问题；原系统的读取成绩不能直接充当本课题的写入
+性能证据。
+
+### 1.3 Trino：SQL 执行层与 Connector 改造入口
+
+Trino 是分布式 SQL 查询引擎。Coordinator 负责语句分析、执行计划与任务协调，
+Worker 执行数据处理任务；Connector 将具体数据源映射到 Trino 的表、列及读写
+接口。它与 Pixels 的关系是执行引擎与存储系统的集成，而不是两种列式文件格式的
+关系。[Trino概念文档，文献3](https://trino.io/docs/current/overview/concepts.html)
+
+本项目使用 Trino 466 的 Pixels Connector。SQL 中的 INSERT 或 UPDATE 能否正确
+执行，既取决于 Trino 的执行机制，也取决于 Connector 是否实现相应接口及底层
+存储能否履行语义。当前 INSERT 由 Worker 通过 Pixels Writer 生成文件；UPDATE
+按支持条件选择精确主键处理或扫描后的 Merge Sink 路径，再将标签变更交给 Pixels。
+[Connector版本与集成说明](https://github.com/LeaseQ/pixels-trino-dml/blob/34199d5ec6136c7a81301514e391fa49eadd025d/README.md)
+
+这一分工决定了性能分析必须跨越 SQL 执行、Connector、RPC、索引与文件物化。
+例如，某次索引 RPC 很快，不代表查询调度、源数据读取、提交收尾都很快；标签
+请求成功，也不代表普通文件扫描立即读到新值。后文将据此定义各阶段计时边界。
+
+### 1.4 相关列式技术的层次与比较对象
+
+Parquet 和 ORC 是常见的列式文件格式。Parquet 提供面向分析数据的列式编码与
+压缩；ORC 以 stripe 等单元组织数据，并通过列级组织和索引辅助选择性读取。
+它们首先规定文件如何存储和读取数据，单独的文件格式并不等于一套 SQL 更新、
+事务提交和恢复协议。[Parquet文档，文献4](https://parquet.apache.org/docs/overview/)、
+[ORC文档，文献5](https://orc.apache.org/docs/)
+
+Iceberg、Hudi 和 Delta Lake 则在数据文件之上组织表状态及变更；ClickHouse 等
+完整数据库还包含执行与服务能力。因此，本课题不能把这些名称与 Trino、Pixels
+简单放入同一张“格式吞吐排名表”。对比需明确所在层次和被计量的工作。
+
+| 层次 | 代表对象 | 主要研究问题 | 在本课题中的比较方式 |
+| --- | --- | --- | --- |
+| 列式文件格式/存储布局 | Parquet、ORC、Pixels格式 | 编码、压缩、列裁剪、I/O与扫描 | 用于解释读写成本；不能单独代表完整UPDATE能力 |
+| 表格式与表管理机制 | Iceberg、Hudi、Delta Lake | 文件集合、版本、变更与提交 | 固定引擎、版本和可见语义后比较 |
+| SQL执行引擎 | Trino等 | 计划、调度、算子与Connector接口 | 尽量固定引擎，减少执行层差异 |
+| 完整列式数据库系统 | C-Store研究原型、ClickHouse等 | 存储、执行、更新与维护的综合设计 | 用于文献比较；实测时按整套系统评价 |
+| 嵌入式键值存储 | RocksDB | 键值读写、索引与持久化 | 作为标签索引实现组件及局部诊断对象 |
+
+表中分类用于说明比较边界，并不意味着 Pixels 只属于文件层；本项目恰好需要
+将其文件、索引、服务与 Trino 执行层连接起来。主要外部实验选择同版本 Trino
+上的 Iceberg，是为了尽量控制执行引擎变量，不是因为其内部机制与本方案相同。
+
+### 1.5 业务背景与问题来源
 
 本课题来源于数据打标项目的实际需求。业务首先导入包含主键、采集时间和业务维度
 的基础数据，再利用 SQL 为大量行设置标签，最后对打标结果进行查询和比对。原始
@@ -55,7 +142,7 @@
 文件可见性与恢复状态。宽松事务要求也不免除实际匹配行数正确、最终标签正确和
 已发布数据可恢复等基本要求。
 
-### 1.2 核心矛盾
+### 1.6 核心矛盾
 
 延迟物化能够降低打标阶段立即重写文件的频率，但并不自动降低整个流程成本。一次
 UPDATE 可能需要枚举候选键、解析实际存在集合、编码标签并写入索引；最终合并还
@@ -68,7 +155,7 @@ UPDATE 可能需要枚举候选键、解析实际存在集合、编码标签并�
 研究不将“少列、多轮、连续主键”预设为所有业务的共同特征，也不将百万行每秒
 视为行业统一标准。这些应分别作为工作负载变量和工程探索目标，通过实验检验。
 
-### 1.3 研究意义
+### 1.7 研究意义
 
 工程上，本课题使既有列存引擎能够承接标准 SQL 的数据导入和标签更新，减少业务
 使用专用接口的成本，并提高批量打标流程的可观测性与可复现性。
@@ -77,47 +164,80 @@ UPDATE 可能需要枚举候选键、解析实际存在集合、编码标签并�
 能够减少重复工作、何时索引与重写成本会抵消收益。研究价值体现为明确的语义契约、
 可解释的优化以及适用边界，不能仅以使用 RocksDB 或调整线程数作为创新结论。
 
-## 二、相关研究与技术现状
+## 二、国内外研究现状与文献述评
 
-### 2.1 列存系统中的增量更新与物化
+### 2.1 列式数据库与数据湖布局研究
+
+C-Store 将列式布局、读取优化和面向写入的处理纳入系统设计，说明列存更新需要
+在整体架构中考虑，而不是把行存接口直接附加在压缩文件之上。其设计为分析读写
+分工提供了基础，但不能直接回答本项目跨 Trino、索引服务和文件发布的协调问题。
+[文献1](https://dl.acm.org/doi/10.5555/1083592.1083658)
+
+Pixels 及相关数据湖研究关注列式布局和缓存。Jin等的工作讨论跨行组布局优化和
+面向分析访问的列缓存，体现了以实际访问模式改善I/O效率的思路。此类工作为
+本项目的数据读取与重写提供基础，但其主要研究问题并非标签更新的实际匹配语义、
+多轮物化和恢复，因而不能直接推导本课题的性能或正确性结论。
+[Pixels论文，文献2](https://doi.org/10.1109/ICDE53745.2022.00276)、
+[布局与缓存研究，文献6](https://doi.org/10.48786/edbt.2022.33)
+
+在完整数据库层面，ClickHouse 的官方资料讨论了面向分析场景的更新以及异步或
+读时处理等取舍。它说明列式系统并非普遍“不支持更新”，而是需要选择修改的表示
+和生效方式。比较时必须固定实际版本与更新机制，不能把某一种 mutation 路径的
+特点当作所有列式数据库更新方式的共同结论。
+[ClickHouse更新概述，文献7](https://clickhouse.com/docs/concepts/features/operations/update/overview)
+
+### 2.2 湖仓表格式中的增量更新与物化
 
 不可变列式文件上的行级变更，需要在文件组织之外表达修改。Delta Lake 通过事务
 日志管理云对象存储上的表状态，为分析数据提供事务化存储能力；这说明文件格式、
 表状态管理和执行引擎需要协同，单纯比较文件编码并不能评价完整更新机制。
-[Delta Lake 论文，文献1](https://dl.acm.org/doi/10.14778/3415478.3415560)
+[Delta Lake 论文，文献8](https://dl.acm.org/doi/10.14778/3415478.3415560)
 
 Apache Iceberg 的规范定义了按文件位置和按列值表达删除的机制；其实际使用方式
 受表格式版本及执行引擎能力约束。因此，课题的外部实验应比较固定版本的完整
 “引擎＋表格式”组合，而不能把所有格式能力都视为当前 Connector 已经支持。
-[Iceberg 规范，文献2](https://iceberg.apache.org/spec/)
+[Iceberg 规范，文献9](https://iceberg.apache.org/spec/)
 
 Apache Hudi 的 Merge-on-Read 将增量变更与基础文件分开保存，并可在查询时合并，
 随后通过 Compaction 形成新的基础文件。与之相比，本课题当前普通扫描依赖先完成
 标签物化。这一可见性差异必须在对照中披露，不能要求对方先做本来不需要的合并，
-再计算其完成时间。[Hudi 官方文档，文献3](https://hudi.apache.org/docs/table_types/)
+再计算其完成时间。[Hudi 官方文档，文献10](https://hudi.apache.org/docs/table_types/)
 
-### 2.2 键值索引与批量处理
+### 2.3 键值索引与批量处理
 
 RocksDB 为持久化键值索引提供工程基础，但使用它并不能保证系统端到端高吞吐。
 RocksDB 的长期工程经验表明，优化关注点会涉及写放大、空间、CPU 和资源管理等
 多个方面，性能瓶颈需要结合实际负载测量。本课题还引入了序列化、RPC、主键版本
 解析和位置索引协调，必须区分这些成本，避免将所有延迟归因于底层写入。
-[RocksDB 工程经验，文献4](https://www.usenix.org/conference/fast21/presentation/dong)
+[RocksDB 工程经验，文献11](https://www.usenix.org/conference/fast21/presentation/dong)
 
 拟研究的批量与并行处理也不是无条件增加并发：只有在可独立处理的请求之间建立
 有界并行，保持版本、顺序与错误传播契约，才可能将组件级收益转化为可用的 SQL
 性能改善。共享主键表示可以减少重复传输和复制，但其收益仍需在多列负载下验证。
 
-### 2.3 评测方法与本课题定位
+### 2.4 评测方法
 
 LST-Bench 提出将不同使用模式组合为工作负载，评估表格式与处理引擎共同作用下
 的表现。本课题借鉴这一思路，将导入、更新、查询可见和维护组织为完整实验流程，
 关注重复运行与不同负载组合，而不只报告单个 RPC 的最好值。
-[LST-Bench 论文，文献5](https://dl.acm.org/doi/10.1145/3639314)
+[LST-Bench 论文，文献12](https://dl.acm.org/doi/10.1145/3639314)
 
 Trino 的当前 Iceberg Connector 文档提供数据管理能力，可作为同引擎外部对照的
 候选依据；实验前仍须核验项目部署的 Trino 466 及其具体配置，不能将当前文档直接
-当作旧版本的能力证明。[Trino 官方文档，文献6](https://trino.io/docs/current/connector/iceberg)
+当作旧版本的能力证明。[Trino 官方文档，文献13](https://trino.io/docs/current/connector/iceberg)
+
+### 2.5 研究现状述评与本课题切入点
+
+上述研究分别覆盖列式数据布局、表级变更管理、键值索引和综合评测。它们共同
+表明，优化分析型更新需要同时考虑数据表示、可见性和维护成本。现有方法为本
+课题提供了设计参照，但不能由这些方法的一般有效性推断本项目实现已经具有优势。
+
+| 研究方向 | 已有工作的主要贡献 | 本课题需要进一步回答的问题 |
+| --- | --- | --- |
+| 列式布局与缓存 | 降低读取数据量并改善I/O效率 | 打标带来的标签记录、主键解析和重写成本如何分配？ |
+| 湖仓增量与表状态管理 | 在文件上层表达变更、版本及可见性 | 在允许延后查询的条件下，集中物化能否降低完整周期成本？ |
+| 键值索引与批量处理 | 支撑持久化索引并优化局部读写 | 多列共享、版本查询及跨服务调用会产生多少额外代价？ |
+| 综合工作负载评测 | 联合评价引擎、表格式和维护行为 | 如何构造具有相同最终结果的打标对照并解释收益边界？ |
 
 本课题的定位不是提出一种全面替代现有湖仓格式的方案，而是在 Pixels 上验证一种
 面向延后查询打标任务的更新组织方式。需要回答其相对于原有路径和外部方案的收益、
@@ -421,7 +541,7 @@ SQL 性能和重启验证不互相替代，已尝试但无稳定收益的优化�
 
 ## 十、预期成果与论文结构
 
-预期交付：毕业论文、可构建的代码版本、数据生成与验证工具、固定配置及运行包
+预期交付：硕士学位论文、可构建的代码版本、数据生成与验证工具、固定配置及运行包
 清单、原始实验记录、对照/消融图表和已知限制说明。最大规模、吞吐与恢复能力
 均以实际完成的验证为准。
 
@@ -431,28 +551,46 @@ SQL 性能和重启验证不互相替代，已尝试但无稳定收益的优化�
 
 ## 十一、参考文献
 
-1. Armbrust M, Das T, Paranjpye S, et al. Delta Lake: High-Performance ACID Table
+1. Stonebraker M, Abadi D J, Batkin A, et al. C-Store: A Column-oriented DBMS[C].
+   Proceedings of the 31st International Conference on Very Large Data Bases, 2005: 553–564.
+   [论文](https://dl.acm.org/doi/10.5555/1083592.1083658).
+2. Bian H, Ailamaki A. Pixels: An Efficient Column Store for Cloud Data Lakes[C].
+   2022 IEEE 38th International Conference on Data Engineering, 2022.
+   [DOI: 10.1109/ICDE53745.2022.00276](https://doi.org/10.1109/ICDE53745.2022.00276).
+3. Trino. Trino Concepts[EB/OL]. 访问日期：2026-11-23.
+   [官方概念文档](https://trino.io/docs/current/overview/concepts.html).
+4. Apache Parquet. Overview[EB/OL]. 访问日期：2026-11-23.
+   [官方文档](https://parquet.apache.org/docs/overview/).
+5. Apache ORC. Background[EB/OL]. 访问日期：2026-11-23.
+   [官方文档](https://orc.apache.org/docs/).
+6. Jin G, Bian H, Chen Y, Du X. Columnar Storage Optimization and Caching for
+   Data Lakes[C]. Proceedings of the 25th International Conference on Extending
+   Database Technology, 2022.
+   [DOI: 10.48786/edbt.2022.33](https://doi.org/10.48786/edbt.2022.33).
+7. ClickHouse. Updates in ClickHouse[EB/OL]. 访问日期：2026-11-23.
+   [官方文档](https://clickhouse.com/docs/concepts/features/operations/update/overview).
+8. Armbrust M, Das T, Paranjpye S, et al. Delta Lake: High-Performance ACID Table
    Storage over Cloud Object Stores[J]. Proceedings of the VLDB Endowment, 2020,
    13(12): 3411–3424. [DOI: 10.14778/3415478.3415560](https://dl.acm.org/doi/10.14778/3415478.3415560).
-2. Apache Iceberg. Apache Iceberg Table Spec[EB/OL]. 访问日期：2026-11-23.
+9. Apache Iceberg. Apache Iceberg Table Spec[EB/OL]. 访问日期：2026-11-23.
    [规范](https://iceberg.apache.org/spec/). 实验须固定表格式及引擎版本。
-3. Apache Hudi. Table & Query Types[EB/OL]. 访问日期：2026-11-23.
-   [文档](https://hudi.apache.org/docs/table_types/).
-4. Dong S, Kryczka A, Jin Y, Stumm M. Evolution of Development Priorities in
-   Key-value Stores Serving Large-scale Applications: The RocksDB Experience[C].
-   19th USENIX Conference on File and Storage Technologies, 2021: 33–49.
-   [论文与会议资料](https://www.usenix.org/conference/fast21/presentation/dong).
-5. Camacho-Rodríguez J, Agrawal A, Gruenheid A, et al. LST-Bench: Benchmarking
-   Log-Structured Tables in the Cloud[J]. Proceedings of the ACM on Management
-   of Data, 2024, 2(1). [DOI: 10.1145/3639314](https://dl.acm.org/doi/10.1145/3639314).
-6. Trino. Iceberg Connector[EB/OL]. 访问日期：2026-11-23.
-   [当前文档](https://trino.io/docs/current/connector/iceberg).
-   仅用于机制与基线选型，Trino 466 能力须另行核验。
+10. Apache Hudi. Table & Query Types[EB/OL]. 访问日期：2026-11-23.
+    [文档](https://hudi.apache.org/docs/table_types/).
+11. Dong S, Kryczka A, Jin Y, Stumm M. Evolution of Development Priorities in
+    Key-value Stores Serving Large-scale Applications: The RocksDB Experience[C].
+    19th USENIX Conference on File and Storage Technologies, 2021: 33–49.
+    [论文与会议资料](https://www.usenix.org/conference/fast21/presentation/dong).
+12. Camacho-Rodríguez J, Agrawal A, Gruenheid A, et al. LST-Bench: Benchmarking
+    Log-Structured Tables in the Cloud[J]. Proceedings of the ACM on Management
+    of Data, 2024, 2(1). [DOI: 10.1145/3639314](https://dl.acm.org/doi/10.1145/3639314).
+13. Trino. Iceberg Connector[EB/OL]. 访问日期：2026-11-23.
+    [当前文档](https://trino.io/docs/current/connector/iceberg).
+    仅用于机制与基线选型，Trino 466 能力须另行核验。
 
 正式提交时按学校参考文献样式统一排版。公开文献用于技术定位，不作为本项目
 已达到性能或正确性的证据。
 
-## 附录：工程证据索引
+## 附录A：工程证据索引
 
 以下为项目工程记录，与同行评议文献分开列示。原始会议由用户提供并已在本地存档；
 实验结论以具体配置、日志及完成范围为准。
@@ -466,3 +604,32 @@ SQL 性能和重启验证不互相替代，已尝试但无稳定收益的优化�
 近期关键提交：Pixels `a9bed1e8`（重复合并输入）、`d5ccc1cb`（主索引位置替换）、
 `15769b92`（解析数组与共享列表候选）；Trino `fa390c8`（解析并行化）、
 `34199d5`（fallback decimal scale）。候选代码存在不等于所有实验门槛已通过。
+
+## 附录B：开题编排依据与正式提交边界
+
+本稿的学校与学位层次依据作者确认，采用硕士开题正文的论证方式。格式核对结果如下：
+
+- 已查阅人大商学院公开的《商学院学术型研究生学位论文开题报告管理实施细则》
+  （2021年修订）。其中硕士部分明确审查选题依据、研究方案及国内外研究现状，
+  并区分开题报告书与申请/审核材料。该文件仅作为人大院系公开要求的参考，
+  不作为本课题所属学院的直接规定；其中博士字数要求不套用到本稿。
+  [官方细则](https://www.rmbs.ruc.edu.cn/jxxm/sb/sbgzzd/10073c5a004a4afdb4d380f300c90704.htm)
+- 检索到人大信息学院“开题报告模版”官方页面，位于同等学力栏目；当前无法读取
+  附件正文，且培养类别是否适用尚未确认。因此没有声称已采用该模板，也未据此
+  指定最低字数、字号或签字栏目。
+  [官方模板页面](http://info.ruc.edu.cn/rcpy/tdxl/xgxz5/d91e4b8c33fb43d3b9af19dbc7af6b42.htm)
+
+为便于后续迁移到学院表格，正文内容对应关系为：
+
+| 开题论证内容 | 本稿位置 |
+| --- | --- |
+| 选题依据、理论与实践意义 | 第一章，含列存基础、Pixels/Trino定位及业务问题 |
+| 国内外研究现状与主要参考文献 | 第二章及第十一章，按技术路线分析而非罗列产品 |
+| 研究内容、目标与拟解决问题 | 第三、四章 |
+| 研究方法、技术路线和可行性 | 第四、五、八章 |
+| 工作基础及预期贡献 | 第六、七章，区分已完成证据与拟研究内容 |
+| 研究计划、预期成果与论文大纲 | 第九、十章 |
+
+摘要、工程证据附录和本编排说明用于审阅便利，不声明为学校必填栏目。正式提交时
+需按所属学院及学位类型核对封面、审核表、章节合并、参考文献顺序和版式；本稿可以
+提供正文内容，但不代填导师意见、评审意见或签名。
