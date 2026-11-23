@@ -4017,3 +4017,30 @@ checkpoint format, or the Retina GC configuration. The isolated validation
 runtime remains on an explicit cap-24 argument while the new default is built
 and exercised separately, so this commit should not be read as production
 deployment evidence yet.
+
+## Code-default cap-24 E2E check (2026-11-24)
+
+The connector jar containing commit `2fc7677` was deployed to the isolated
+validation Trino, and the explicit
+`-Dpixels.insert.index.flush.max-concurrency` argument was removed from the
+Trino process. This makes the test exercise the Java source default of 24,
+rather than an explicitly configured cap. The grouped publish metric still
+reported `fragments=24`, confirming that the intended grouped path was used.
+
+The first 1M-row INSERT after the Trino restart took 8.863 s (~113K rows/s)
+and is classified as a cold-start result. The next disjoint 1M-row INSERT,
+with the same 24 writers and `task_concurrency=64`, took 4.062 s (~246K
+rows/s). The target check after both default-value arms passed:
+
+```text
+count=6,100,000
+distinct(id)=6,100,000
+min(id)=60,000,000,001
+max(id)=66,001,000,000
+```
+
+This confirms that the promoted default is active and preserves the exact
+tag-aware table-to-table INSERT result. Its steady-state result is within the
+previously observed lower-240K-to-lower-300K band, but it does not by itself
+raise the current INSERT ceiling to 1M rows/s. The 64 GiB Retina and shortened
+GC interval remain isolated validation settings.
