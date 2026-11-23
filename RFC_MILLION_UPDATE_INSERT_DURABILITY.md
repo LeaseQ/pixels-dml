@@ -3792,3 +3792,35 @@ original connector jar. The remaining INSERT bottleneck is service-side
 primary-index scheduling/flush and Trino finishing, not the local per-cell
 category dispatch alone. The next probe should instrument or reduce that
 queueing path without changing tag-aware semantics.
+
+## Fresh-target writer retest (2026-11-24)
+
+To separate target size from service scheduling, a new independent root was
+created as `validationfresh.e2e68_page_fresh_20261124` with the same 68-column
+schema and explicit `pk='id'`, `pk_scheme='rocksdb'` metadata. Four disjoint
+1M-row appends from the materialized source passed the exact final check:
+
+```text
+count=4,000,000
+min(id)=10,000,000,001
+max(id)=13,001,000,000
+distinct(id)=4,000,000
+```
+
+The first two arms used 32 writers and the next two used 24 writers. The
+server timelines were:
+
+```text
+32 writers, fresh target: 9.332 s (~107K rows/s)
+32 writers, warm repeat:  6.219 s (~161K rows/s)
+24 writers, warm arm:    5.201 s (~192K rows/s)
+24 writers, warm repeat:  5.314 s (~188K rows/s)
+```
+
+This confirms that 24 writers are currently better than 32 on this runtime,
+but the previously observed 315K rows/s point is not stable under the present
+service state. The fresh target also rules out the 49M-row target alone as the
+explanation for the lower rate. The accepted current INSERT point is therefore
+roughly 188--192K rows/s on this repeatable fresh-target run; the next useful
+work remains primary-index request scheduling/flush, not more writer-count or
+PageSink micro-tuning.
