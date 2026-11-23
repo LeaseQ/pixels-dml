@@ -808,3 +808,55 @@ removed. These changes are therefore retained as an experimental candidate
 and evidence, not presented as the target-throughput breakthrough; further
 blind batch tuning is paused pending a direction decision or a new resolver/
 RocksDB design hypothesis.
+
+## Addendum: consecutive post-COMPACT exact-route validation (2026-11-23)
+
+The remote branch was fast-forwarded to the documentation revisions
+`4d9f98f9`, `00a91827`, and `b2326014`. Those revisions move correctness,
+full-cycle accounting, and direct partial-update baselines ahead of further
+local tuning. The following runtime evidence was collected after that
+fast-forward and is recorded separately from the historical numbers above.
+
+The isolated candidate83 table was already in a compacted state. Two fresh
+full-table exact-route updates were executed consecutively, each followed by
+tag-aware COMPACT and a compact-only query (`ordered_path_enabled=false`,
+`compact_path_enabled=true`):
+
+```text
+U110 UPDATE: 1,000,000 rows, wall=5.001s
+U110 COMPACT: 1 output, total wall about 46s
+  tag snapshot: 2 entries, 1,000,000 rows, 62 RPC, resolve_ms=29.332s
+  physical rewrite: 37.018s
+  publish: 9.836s
+  compact-only result: U110 / 110.0000 / 1,000,000
+
+U111 UPDATE: 1,000,000 rows, wall=3.933s
+U111 COMPACT: 1 output, total wall about 45s
+  tag snapshot: 2 entries, 1,000,000 rows, 62 RPC, resolve_ms=30.250s
+  physical rewrite: 35.305s
+  publish: 9.905s
+  compact-only result: U111 / 111.0000 / 1,000,000
+```
+
+The row-level compaction metrics had non-zero update time in both runs
+(`667.9ms` for U110 and `415.5ms` for U111), and the compact-only query saw
+the newest values. This is evidence that the current relocation repair plus
+the current tag-aware compactor supports consecutive post-COMPACT exact-route
+cycles on the isolated runtime.
+
+An earlier U109 run in the same long-lived exploratory table produced a
+compact file that still read U86. Post-run metadata inspection showed the
+old input file as retired (`fileId=46807`) and the newly published file as
+regular (`fileId=54105`). Because this comparison was made after relocation
+and the run mixed interrupted/old CLI experiments, it is retained as a
+reproduction requiring a clean isolated cycle, not classified as a current
+code regression. U110 and U111 are the clean consecutive evidence; they do
+not erase the need for a future fresh-table two-cycle test.
+
+This correctness evidence does not change the throughput conclusion. The
+UPDATE SQL wall time is roughly 0.20--0.25M rows/s at the client level for
+these runs, while COMPACT remains roughly 45--46s and is dominated by
+primary-key resolution plus physical rewrite/publish. The earlier warm
+internal exact-route measurements remain the appropriate throughput evidence;
+these U110/U111 runs primarily validate repeated materialization and recovery
+state, not a million-rows/s breakthrough.
