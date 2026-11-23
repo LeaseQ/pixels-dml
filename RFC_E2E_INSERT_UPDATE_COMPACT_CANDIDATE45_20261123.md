@@ -453,3 +453,35 @@ Additional evidence:
   connector-direct-packed-fixed-20261123/
   daemon-full-before-direct-packed-20261123.jar
 ```
+
+## Follow-up: single-column primary-key encoding specialization (candidate70/71)
+
+The INSERT front-end also had a small allocation candidate in
+`PrimaryKeyBytes.fromColumnVectors`: for a one-column primary key it created a
+`byte[][]` and entered the general concatenation path even though the encoded
+part could be returned directly. The specialization was deliberately kept
+format-neutral and retained the existing invalid-ordinal and NULL checks.
+It passed the focused core test (`TestPrimaryKeyBytes`, 5/5) and the connector
+writer test (`PixelsInsertIndexWriterTest`, 5/5).
+
+An isolated-runtime A/B with the same daemon state did not support accepting
+the change:
+
+```text
+candidate70, specialization: CLI wall=17.874 s, Trino timeline=16.009 s,
+  primary_put_ms=6078.070, primary_put_wall_ms=6770.828
+  correctness: count=1,000,000, distinct_id=1,000,000,
+               min_id=7,000,000,001, max_id=7,001,000,000
+
+candidate71, baseline connector control: CLI wall=14.191 s,
+  Trino timeline=12.358 s, primary_put_ms=4969.905,
+  primary_put_wall_ms=5869.441
+  correctness: count=1,000,000, distinct_id=1,000,000,
+               min_id=7,000,000,001, max_id=7,001,000,000
+```
+
+The candidate is rejected: it showed no improvement and was slower in the
+paired run. This is not evidence that the encoding loop is universally
+expensive; it shows that removing one small allocation is below the noise and
+not the current end-to-end bottleneck. The code and remote source were restored
+to baseline; the runtime is currently using the baseline connector.
