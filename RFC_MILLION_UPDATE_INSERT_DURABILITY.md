@@ -3887,3 +3887,45 @@ transaction leases and service state materially affect the measured timeline.
 Future performance arms must record and clean active query/lease state before
 comparing numbers. The result remains an isolated opt-in configuration and
 does not justify changing the production default.
+
+## Checkpoint-backed recovery after GC heap failure (2026-11-24)
+
+The first post-sweep restart exposed an operational precondition that had not
+been satisfied by the performance harness: Retina was still in `RECOVERING`
+because the normal `get status -> markReady(recoveryEpoch)` handshake had not
+been completed. Calling `markReady` started the configured 10-second GC, but
+the 32 GiB Retina then exhausted its heap while `runGC()` processed the large
+backlog of historical retired files. The `retina-gc-thread` ended with Java
+heap OOM followed by a JVM `SIGSEGV`; no checkpoint body was deleted or
+overwritten. This arm is rejected as an infrastructure failure.
+
+The isolated service was recovered from the retained
+`recovery_cds20_670007.bin` using a separate `Xmx64G` configuration and a
+temporary 300-second GC interval. The recovery itself was exact, but the
+INSERTs made after checkpoint 670007 were correctly absent after restart:
+both `e2e68_page_fresh_20261124` and `e2e68_page_fresh2_20261124` read zero
+rows. Those post-checkpoint performance arms are therefore not durable
+results and are not used as evidence of data loss from a committed
+checkpoint.
+
+With the same 64 GiB heap and a temporary 10-second GC interval, the service
+then published `recovery_cds20_670077.bin` while remaining alive. A new
+100,000-row table-to-table INSERT into
+`e2e68_page_fresh2_20261124` was committed after that checkpoint, using IDs
+`60000000001..60000954000`. Its exact pre-restart check was:
+
+```text
+count=100000
+distinct(id)=100000
+tag_1_type='U111'=100000
+tag_1_para min=max=111.0000
+```
+
+The normal GC cycle then published `recovery_cds20_670080.bin`. Retina was
+stopped and restarted from that body with the 64 GiB configuration, and the
+normal recovery-epoch handshake completed (`RECOVERING -> READY`). The
+post-restart check returned exactly the same 100,000 rows, ID range, distinct
+count, and `U111/111.0000` tag values. This is accepted as a checkpoint-backed
+tag-aware INSERT durability proof. The larger heap and 10-second interval are
+isolated validation settings; neither is promoted as a production default
+without a resource-budget and GC-backlog analysis.
