@@ -485,3 +485,55 @@ paired run. This is not evidence that the encoding loop is universally
 expensive; it shows that removing one small allocation is below the noise and
 not the current end-to-end bottleneck. The code and remote source were restored
 to baseline; the runtime is currently using the baseline connector.
+
+## Follow-up: RocksDB primary-write stage split and WAL upper bound (candidate72/73)
+
+To separate Java-side batch construction from the synchronous RocksDB write,
+an isolated-only timing probe was added around `RocksDBIndex.putPrimaryEntriesInternal`.
+It measured `WriteBatch` construction and `rocksDB.write()` separately for each
+bucket, without changing the write format or ordering. The probe was enabled
+only on the fresh E2E runtime and removed before restoring the runtime.
+
+Candidate72 kept the normal durability setting (`index.rocksdb.disable.wal=false`):
+
+```text
+candidate72: 1M INSERT, CLI wall=14.123 s
+correctness: count=1,000,000, distinct_id=1,000,000,
+             min_id=4,000,000,001, max_id=4,001,000,000
+RocksDB timing across 132 bucket batches:
+  WriteBatch construction sum = 3,845.687 ms
+  rocksDB.write() sum         = 18,318.536 ms
+  construction share           = 17.35% of measured bucket time
+```
+
+Candidate73 disabled WAL only as a throughput upper-bound probe; it is not a
+durability candidate and was never left enabled:
+
+```text
+candidate73: 1M INSERT, CLI wall=13.172 s
+correctness: count=1,000,000, distinct_id=1,000,000,
+             min_id=4,000,000,001, max_id=4,001,000,000
+RocksDB timing across 132 bucket batches:
+  WriteBatch construction sum = 3,452.882 ms
+  rocksDB.write() sum         = 16,177.708 ms
+  construction share           = 17.59% of measured bucket time
+```
+
+The WAL-off control improved end-to-end wall time by about 6.7% and reduced
+the measured write sum by about 11.7%, confirming WAL/synchronous write cost as
+one real factor. It does not explain the full gap to the target, and disabling
+WAL violates the crash-recovery contract, so candidate73 is rejected. The
+dominant next direction is RocksDB write scheduling/WAL batching or the upstream
+request shape, not another small primary-key encoding specialization. The
+isolated runtime was restored to WAL enabled, the baseline daemon jar, and no
+timing property.
+
+Remote evidence:
+
+```text
+/home/pixels/validation-million-update/runtime/logs/
+  insert-candidate72-rocksdb-timing-20261123.log
+  insert-candidate73-waloff-20261123.log
+  daemon-write-timing-retina-20261123.log
+  daemon-waloff-retina-20261123.log
+```
