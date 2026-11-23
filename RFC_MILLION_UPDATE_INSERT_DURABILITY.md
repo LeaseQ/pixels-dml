@@ -4044,3 +4044,25 @@ tag-aware table-to-table INSERT result. Its steady-state result is within the
 previously observed lower-240K-to-lower-300K band, but it does not by itself
 raise the current INSERT ceiling to 1M rows/s. The 64 GiB Retina and shortened
 GC interval remain isolated validation settings.
+
+## Writer-count probe (2026-11-24)
+
+The code-default runtime then ran one disjoint 1M-row arm with
+`task_min_writer_count=48`, `task_concurrency=64`, and writer scaling disabled,
+compared with the accepted 24-writer setup. The 48-writer arm took 4.554 s
+(~220K rows/s), versus 4.062 s (~246K rows/s) for the preceding default-value
+24-writer arm. It also increased the grouped publish work from 24 fragments and
+195 ms total to 48 fragments and 734 ms total.
+
+The target remained exact after the probe:
+
+```text
+count=7,100,000
+distinct(id)=7,100,000
+min(id)=60,000,000,001
+max(id)=67,001,000,000
+```
+
+Increasing writer count on this single-node fixture is therefore rejected. The
+result supports the current diagnosis that the dominant cost is the Trino
+data/exchange and page conversion path, not the final metadata publish RPC.
