@@ -21,7 +21,6 @@ package io.pixelsdb.pixels.index.rocksdb;
 
 import com.google.common.collect.ImmutableList;
 import com.google.protobuf.ByteString;
-import com.google.protobuf.ByteString;
 import io.pixelsdb.pixels.common.exception.SinglePointIndexException;
 import io.pixelsdb.pixels.common.index.CachingSinglePointIndex;
 import io.pixelsdb.pixels.common.index.IndexOption;
@@ -146,10 +145,6 @@ public class RocksDBIndex extends CachingSinglePointIndex
         {
             return ImmutableList.of();
         }
-        if (isSortedForSequentialLookup(keys))
-        {
-            return getUniqueRowIdsSequential(keys);
-        }
         ReadOptions readOptions = RocksDBThreadResources.getReadOptions();
         readOptions.setPrefixSameAsStart(true)
                 .setTotalOrderSeek(false)
@@ -179,80 +174,6 @@ public class RocksDBIndex extends CachingSinglePointIndex
         catch (Exception e)
         {
             throw new SinglePointIndexException("Error reading a batch from RocksDB CF for tableId="
-                    + tableId + ", indexId=" + indexId, e);
-        }
-        return rowIds;
-    }
-
-    /**
-     * Compaction reads primary keys in physical order.  When that order is
-     * also the RocksDB key order, one iterator can satisfy the whole batch;
-     * repeated seek() calls otherwise dominate large primary-key resolves.
-     * Unsorted or mixed-timestamp requests retain the existing seek path.
-     */
-    private static boolean isSortedForSequentialLookup(List<IndexProto.IndexKey> keys)
-    {
-        IndexProto.IndexKey previous = keys.get(0);
-        for (int i = 1; i < keys.size(); i++)
-        {
-            IndexProto.IndexKey current = keys.get(i);
-            if (previous.getIndexId() != current.getIndexId() ||
-                    previous.getTimestamp() != current.getTimestamp() ||
-                    ByteString.unsignedLexicographicalComparator().compare(
-                            previous.getKey(), current.getKey()) > 0)
-            {
-                return false;
-            }
-            previous = current;
-        }
-        return true;
-    }
-
-    private List<Long> getUniqueRowIdsSequential(List<IndexProto.IndexKey> keys)
-            throws SinglePointIndexException
-    {
-        ReadOptions readOptions = RocksDBThreadResources.getReadOptions();
-        readOptions.setPrefixSameAsStart(true)
-                .setTotalOrderSeek(false)
-                .setVerifyChecksums(false);
-        List<Long> rowIds = new ArrayList<>(keys.size());
-        try (RocksIterator iterator = rocksDB.newIterator(columnFamilyHandle, readOptions))
-        {
-            boolean first = true;
-            for (IndexProto.IndexKey key : keys)
-            {
-                ByteBuffer keyBuffer = toKeyBuffer(key);
-                if (first)
-                {
-                    iterator.seek(keyBuffer);
-                    first = false;
-                }
-                else
-                {
-                    while (iterator.isValid() &&
-                            ByteBuffer.wrap(iterator.key()).compareTo(keyBuffer) < 0)
-                    {
-                        iterator.next();
-                    }
-                }
-                long rowId = -1L;
-                if (iterator.isValid())
-                {
-                    ByteBuffer keyFound = ByteBuffer.wrap(iterator.key());
-                    if (startsWith(keyFound, keyBuffer))
-                    {
-                        ByteBuffer valueBuffer = RocksDBThreadResources.getValueBuffer();
-                        iterator.value(valueBuffer);
-                        rowId = valueBuffer.getLong();
-                        rowId = rowId == TOMBSTONE_ROW_ID ? -1L : rowId;
-                    }
-                }
-                rowIds.add(rowId);
-            }
-        }
-        catch (Exception e)
-        {
-            throw new SinglePointIndexException("Error reading a sorted batch from RocksDB CF for tableId="
                     + tableId + ", indexId=" + indexId, e);
         }
         return rowIds;

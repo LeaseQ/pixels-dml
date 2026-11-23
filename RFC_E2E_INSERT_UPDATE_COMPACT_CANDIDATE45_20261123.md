@@ -916,24 +916,32 @@ RocksDB iterator seek per key inside each bucket. COMPACT's 12.8--13.0s
 primary-key/tag-resolution stage remains the next high-value optimization
 target; any resolver change must preserve the two-cycle evidence above.
 
-## Addendum: sequential RocksDB primary-batch candidate (2026-11-23)
+## Addendum: sequential RocksDB primary-batch candidate rejected (2026-11-23/24)
 
-The next resolver hypothesis is narrower than changing RPC batching: when a
-compaction batch arrives in physical primary-key order and all keys share the
-same timestamp, the RocksDB index can reuse one iterator and advance with
-`next()` instead of issuing one `seek()` per key. Unsorted or mixed-timestamp
-batches automatically retain the existing seek implementation.
+The resolver hypothesis was that a compaction batch arriving in physical
+primary-key order could reuse one RocksDB iterator and advance with `next()`
+instead of issuing one `seek()` per key. The targeted RocksDB regression suite
+passed, but the isolated E2E test rejected the optimization on both correctness
+and performance grounds.
 
-The candidate was implemented in `RocksDBIndex.getUniqueRowIdsInternal` and
-the targeted RocksDB regression suite passed. It was not accepted as a
-throughput result in this addendum: deploying a daemon jar assembled from the
-remote source tree caused the isolated Retina to remain in RECOVERING until
-the normal `get status -> markReady(recoveryEpoch)` handshake was issued, and
-the existing Trino process retained an unavailable connector channel during
-the restart. The runtime was restored to the pre-experiment daemon backup;
-no U114 write or compact measurement was taken under the candidate jar.
+First deployment, using the existing `prefixSameAsStart=true` read option,
+returned only 7,935 updated rows for a 1,000,000-row exact-range UPDATE
+(U114/U116), with daemon metrics showing many `keys=16384, resolved=128`
+batches. This was a correctness failure. The runtime was immediately restored
+to the stable daemon jar and a stable U117 UPDATE again affected exactly
+1,000,000 rows; its primary-key resolve time was 3,308.748 ms and total server
+time was 4,309.859 ms.
 
-The code is therefore pushed as an explicitly unvalidated performance
-candidate, not as a claimed improvement. The next run should use a full,
-matching daemon build and record both the sequential-path hit count and the
-two-cycle compact-only correctness tuple before comparing resolve time.
+A second, narrower candidate disabled prefix iteration and enabled RocksDB
+total-order seek. It did resolve all 1,000,000 keys (U118), but the primary-key
+resolve time increased to 7,162.933 ms and total server time to 8,122.219 ms.
+The result is therefore a correct but materially slower implementation, not a
+throughput improvement. The class-only runtime patch was rolled back to the
+stable daemon backup; no candidate code remains in the source branch.
+
+The lesson is that a request batch being bytewise sorted is insufficient to
+justify a shared iterator: the configured prefix/read-mode semantics and the
+actual RocksDB key stream must both be part of the proof. Future resolver work
+should first add explicit hit/miss and ordering instrumentation, then compare
+against the existing per-key seek path on the same exact batch before changing
+the default path.
