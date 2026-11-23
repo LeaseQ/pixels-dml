@@ -4096,3 +4096,44 @@ evidence that the single-node ceiling is in the Trino page/exchange and data
 conversion path, rather than in Retina metadata publication. A transient
 thread-list sample was not used as evidence because it did not provide a
 reliable interval CPU measurement.
+
+## Block-dispatch specialization probe (2026-11-24)
+
+`PixelsPageSink.appendColumnValues` originally called the per-cell
+`appendValue` type switch for every value. The connector branch was changed to
+dispatch once per Block and use a type-specialized loop, while preserving the
+existing RLE fast path and null, decimal, time, timestamp, and binary handling.
+The change compiled successfully against the JDK 23 Trino runtime. The
+repository's Maven Surefire configuration reported tests as skipped, so that
+result is not treated as a unit-test pass; the E2E checks below are the
+authoritative runtime checks for this probe.
+
+The temporary optimized jar was exercised with five disjoint 1M-row arms. The
+first arm after restart was cold at 9.154 s; the subsequent warm timelines were
+4.022 s, 3.502 s, 3.920 s, and 3.808 s. The target checks remained exact,
+including `U111/111.0000` tags. QueryStats for the 4.022 s arm showed
+`TableWriterOperator` CPU of 2.10 s and total query CPU of 8.67 s.
+
+For a same-runtime control, the original jar was restored and exercised with
+five disjoint arms. Its warm timelines were 4.738 s, 4.052 s, 3.280 s, and
+3.824 s. The control QueryStats showed `TableWriterOperator` CPU of 6.19--6.68
+s, while Stage 1 `ExchangeOperator` remained the critical wall-time path.
+The specialized loop therefore produces a substantial writer-CPU reduction,
+but the wall-time distributions overlap and do not establish a stable
+throughput increase toward 1M rows/s. It is retained as a CPU-efficiency
+optimization, not as the final throughput solution.
+
+The final control check passed:
+
+```text
+count=20,100,000
+distinct(id)=20,100,000
+min(id)=60,000,000,001
+max(id)=110,001,000,000
+tag_1_type='U111'=20,100,000
+tag_1_para min=max=111.0000
+```
+
+The active validation jar was restored to the original cap-24-default SHA256
+`4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4` after the
+probe. The next optimization target remains the Stage 1 Exchange/data path.
