@@ -7086,3 +7086,42 @@ reverted locally and neither is a default or production recommendation.
 Before the previous documentation push, the remote `PROGRESS.md` was fetched
 and checked at `a23b7582be5f43baa8ff20dea4706f71514e2c45`.  Before this
 correction push, the remote commit was `7c41e1c5`.
+
+## Rejected pure string decode cache (2026-11-25)
+
+The first attempt at this idea was excluded before comparison: the remote
+source tree still contained the previously rejected `StringColumnWriter`
+batching candidate, so its observed files were a mixed candidate and are not
+used as evidence.  The remote source was then restored to the stable writer
+and connector source, and a fresh pixels-core build changed only
+`StringStatsRecorder`.  With the opt-in property
+`pixels.stats.cache-string-decoding=true`, the recorder cached the last
+decoded byte value but retained the original per-row dictionary, pixel,
+statistics-count, and file-layout behavior.  Candidate pixels-core SHA was
+`c6d14ea0c7c48464c557b19911a748794ca3fb10151812d7a9b042145eec4222`.
+
+Candidate and control used separate newly created `pk='id'` targets with the
+same 68-column schema, two one-million-row appends, fixed 32 writers,
+`task_concurrency=64`, and `redistribute_writes=false`:
+
+```text
+decode-cache candidate  q=20261124_210331_00000_yd544  9.87 s
+decode-cache candidate  q=20261124_210343_00001_yd544  4.31 s
+stable control          q=20261124_210504_00000_a2waj  9.24 s
+stable control          q=20261124_210516_00001_a2waj  4.12 s
+```
+
+The candidate target passed the complete 2M-row gate: 2M rows, 2M distinct
+IDs, the expected contiguous range, and exact `U111`/`111.0000` values.  The
+control target passed the same gate.  The candidate was nevertheless slower
+in both cold and warm positions (about 4.6% slower warm), so the pure cache is
+rejected and its source was reverted.  The result means the UTF-8 decoder
+hotspot is real, but eliminating that narrow decode alone is not enough to
+move the E2E INSERT floor; the next candidate must address the larger block or
+Exchange allocation path without changing file semantics.
+
+The isolated runtime is stable again: 8191 PID `2041640`, `starting=false`,
+stable pixels-core SHA
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`, default
+args, and shared 8090 untouched.  Before this documentation push, the remote
+`PROGRESS.md` was fetched at `edce3e0d776d5d18d32258130feff970e05d8a3e`.
