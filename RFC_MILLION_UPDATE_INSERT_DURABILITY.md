@@ -5853,3 +5853,32 @@ handshake before any benchmark. The candidate daemon and grouped Trino
 settings were removed afterward; coordinator/worker now run without
 `new-main-index`, Trino has no experimental insert properties, and
 `/v1/info` reports `starting=false`.
+
+## Stable post-recovery control reproduces the visibility failure (2026-11-24)
+
+To distinguish the candidate from the recovery lifecycle, the runtime was
+restored to the stable daemon and stable Trino command line, with no
+`new-main-index`, grouped-primary, or flush-parallelism properties. A small
+10K control INSERT into the existing no-index diagnostic table
+`e2e68_noindex_probe_20261124` completed successfully:
+
+```text
+query=20261124_142227_00001_9k7rh
+rows=10000
+elapsed=4.835 s
+state=FINISHED
+```
+
+The immediate exact-range readback failed with the same class of error:
+
+```text
+PIXELS_BAD_DATA
+RGVisibility not found for fileId=155382, rgId=0
+```
+
+This reproduces the 1M candidate's visibility failure without the candidate
+daemon property and therefore invalidates both runs as throughput evidence.
+The current blocker is a post-recovery new-file visibility publication or
+lookup lifecycle defect. Until a fresh INSERT can pass
+`count/distinct/min/max/tag` readback after the normal recovery handshake,
+performance A/B results must not be compared or promoted.
