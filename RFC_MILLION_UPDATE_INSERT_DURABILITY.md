@@ -6102,3 +6102,53 @@ This recheck closes the prior artifact-mismatch uncertainty around
 `insertNew`, while leaving the main indexed INSERT gap focused on grouped
 RocksDB/service and Trino finishing/scheduling rather than the
 `MainIndexBuffer.insert` relocation scan alone.
+
+## Isolated endpoint correction, JFR, and writer-count A/B (2026-11-24)
+
+The validation host has two Trino processes. Port `8090` is the pre-existing
+shared `leaseq_dml` process; the isolated fresh validation process uses port
+`8191` and `node.environment=leaseq_validation_fresh`. A later diagnostic
+attempt initially sent a query to `8090`, so its 128-RPC metric and invisible
+readback are explicitly rejected. The shared process was not used for the
+accepted numbers below.
+
+On the fresh process at `8191`, the grouped route was re-run against unused
+primary-key ranges with the same 68-column source and exact tag predicate
+(`tag_1_type='U111'` and `tag_1_para=DECIMAL '111.0000'`). The `1005...` range
+completed in 4.749 s with 24 fragments and passed:
+
+```text
+count=1000000 distinct_id=1000000
+min=1005000000001 max=1005001000000 tag_check=1000000
+```
+
+The fresh Retina and Trino JFR recordings show that the daemon is not CPU
+saturated: most Retina native samples are in epoll wait, with a small number
+in `RocksDB.write0`; the Java samples include grouped dispatch and SQLite main
+index work, but no single hot method accounts for the statement wall time.
+This supports focusing on pipeline scheduling and finish coordination rather
+than adding more daemon threads.
+
+The next matched A/B varied only Trino writer count while retaining grouped
+primary writes, daemon grouped threads 32, and flush parallelism 4. Writer
+count 64 passed the exact gate but took 5.233 s (about 191.1K rows/s) and
+created 64 fragments. A fixed writer count of 32 completed in 4.025 s (about
+248.4K rows/s), created 32 fragments, and passed the exact gate. An independent
+repeat at the same setting completed in 4.023 s (about 248.6K rows/s) and also
+passed:
+
+```text
+count=1000000 distinct_id=1000000
+min=1007000000001 max=1007001000000 tag_check=1000000
+count=1000000 distinct_id=1000000
+min=1008000000001 max=1008001000000 tag_check=1000000
+```
+
+The 32-writer result is the current strict indexed INSERT best on this host.
+It is still an experimental session/runtime setting, not a production default:
+the remaining gap to one million rows/s is approximately 4x, and the query
+timeline still contains roughly two seconds of finishing. A requested 48
+writer arm was rejected by Trino because writer counts must be powers of two.
+The accepted indexed INSERT headline is therefore approximately `248.5K
+rows/s`; the no-primary-index `283.2K rows/s` and UPDATE `237.2K rows/s`
+results remain separate workload baselines.
