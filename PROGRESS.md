@@ -10,9 +10,9 @@
 32 writers下收益可复现，24 writers下基本持平。clean Trino crossover及预热交错
 复测也已完成；追加到两张目标各900万行的更长交错soak中，关闭redistribution的
 client wall time均值约3.990秒、开启约4.823秒，且内存采样未见增长异常。因此当前
-INSERT候选仍是固定32 writers加关闭redistribution；按Trino SQL elapsed约323K--508K
-行/秒，客户端wall（含CLI开销）约201K--260K行/秒，尚未达到百万行/秒，也尚未改变
-默认配置。
+INSERT候选仍是固定32 writers加关闭redistribution；当前观测到的Trino SQL elapsed
+吞吐约350K--508K行/秒，最近三次false样本约350K--400K行/秒，客户端wall（含CLI
+开销）约201K--260K行/秒，尚未达到百万行/秒，也尚未改变默认配置。
 
 ## 1. 已确认的目标与边界
 
@@ -43,7 +43,7 @@ INSERT候选仍是固定32 writers加关闭redistribution；按Trino SQL elapsed
 | 工作项 | 当前状态 | 已有证据 | 尚缺证据 |
 | --- | --- | --- | --- |
 | 运行包一致性 | 记录有修正与读回 | 混用Connector/common/core后出现方法缺失及可见性错误；整体重建部署后新表读回通过 | 后续每臂继续固定全套jar与实际端口；不能沿用混包运行的性能结论 |
-| INSERT | grouped对照完成；32-writer exchange候选有clean crossover和更长soak证据 | 带主键索引、grouped写入及完整标签门禁已完成；两目标各900万行后，false SQL elapsed均值约2.10s、true约2.96s（约476K/339K rows/s）；Retina单序列内存采样稳定 | 重复clean-run及默认化前的受控对照；8-writer臂因Retina OOM排除 |
+| INSERT | grouped对照完成；32-writer exchange候选有clean crossover和更长soak证据 | 带主键索引、grouped写入及完整标签门禁已完成；追加到12M/10M行后，false最新三臂约2.50--2.86s、true近邻对照2.94s；Retina单序列内存采样稳定 | 更长采样或组件级instrumentation；默认化前仍需受控对照；8-writer臂因Retina OOM排除 |
 | UPDATE | 代码默认值已改；记录有重复实测 | 主键解析由串行约8.27～10秒降至并行16下约1.39～1.45秒；新默认SQL elapsed 4.215秒，约23.7万行/秒 | 对应正常运行物化、最终标签与完整周期配对；并发负载表现尚不能推断 |
 | MainIndexBuffer反向映射 | 记录有测试与对照；INSERT优化未采纳 | 惰性版本记录3项测试通过；同32 fragments配对为稳定版5.759秒、候选6.446秒，未获收益，运行包已恢复稳定版本 | UPDATE/COMPACT收益及内存代价仍待证明；分支保留代码不等于默认部署采用 |
 | 原Retina对照 | 已识别语义缺口 | 现有测试“更新”为删除旧键并插入新键 | 保留主键、相同标签赋值及完成边界的对照适配；INSERT也需对齐输入准备及发布成本 |
@@ -154,6 +154,12 @@ rows/s），client wall均值为3.990/4.823秒，四臂均成功，
 前后RSS与G1已用堆仅小幅波动。该结果支持继续使用候选session profile，但没有把
 端到端吞吐提升宣称为百万行/秒。本次修订前检查的远端进度文件版本为
 `62d33b0fba8919469e961b3ea1251fca83bbbc90`。
+
+随后追加的三次false固定32-writer臂SQL elapsed为2.82/2.86/2.50秒，近邻true
+对照为2.94秒；false目标与true目标分别通过1200万、1000万行的distinct-ID和完整
+tag_1门禁。JFR仅得到4个Trino、2个Retina execution sample，主机没有perf命令，
+因此没有从这次CPU探针推出新的代码热点。本次提交前检查的远端进度文件版本为
+`c3c6e1a25c1511ed363f1e8f2d751315f6e9467d`。
 
 [runs]: https://github.com/LeaseQ/pixels-dml/blob/e5946aa2/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283

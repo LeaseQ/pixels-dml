@@ -6904,3 +6904,45 @@ or a controlled default-vs-session comparison with the same memory observation.
 
 Before this documentation push, the remote progress file was fetched and
 checked at `62d33b0fba8919469e961b3ea1251fca83bbbc90`.
+
+## Repeated warm follow-up and CPU-profiling probe (2026-11-25)
+
+The 9M-row extension was followed by three more false-route appends to the
+same indexed target, with offsets `10,000,000,000,000` and
+`11,000,000,000,000`. The fixed session remained `task_concurrency=64`, 32
+writers, writer scaling disabled, grouped primary writes, and
+`redistribute_writes=false`:
+
+```text
+q=20261124_195657_00016_bf3zx  offset= 9000000000000  SQL elapsed=2.82 s  ~=355K rows/s
+q=20261124_195854_00017_bf3zx  offset=10000000000000  SQL elapsed=2.86 s  ~=350K rows/s
+q=20261124_195859_00018_bf3zx  offset=11000000000000  SQL elapsed=2.50 s  ~=400K rows/s
+```
+
+The latest three false arms average about `2.73 s`, or approximately `367K
+rows/s`; this is lower than the earlier 9M-extension false mean of `2.10 s`.
+That earlier value remains a valid clean-process sample, but it is not a stable
+headline by itself. A matched nearby true-route append to the other target,
+`q=20261124_200053_00021_bf3zx`, took `2.94 s` (about `340K rows/s`). The
+comparison still favors the no-redistribution route, but the current honest
+observed SQL-throughput band is approximately `350K--508K rows/s`, with recent
+false samples around `350K--400K rows/s`; it is not a million-row/s result.
+
+The post-probe correctness gates were also extended: the false target reached
+`12,000,000` rows and `12,000,000` distinct IDs, while the true target reached
+`10,000,000` rows and `10,000,000` distinct IDs. Both retained the exact ID
+range and full `tag_1_type='U111'`/`tag_1_para=111.0000` counts.
+
+An exploratory CPU probe was run during the false route. Java Flight Recorder
+was attached to the current Trino coordinator and Retina processes for the
+sequence, and the recordings were stopped cleanly. The Trino recording had
+only four `jdk.ExecutionSample` events and the Retina recording had two, so it
+does not identify a trustworthy Java hotspot. `perf` is not installed on this
+host. The recordings therefore change no optimization decision and are not
+used as evidence for a code change. This confirms that the next bottleneck
+investigation needs either a longer sampling window or component-level
+instrumentation; the existing Trino operator metrics remain the stronger
+evidence for the scan/projection, writer, and exchange costs.
+
+Before this documentation push, the remote progress file was fetched and
+checked at `c3c6e1a25c1511ed363f1e8f2d751315f6e9467d`.
