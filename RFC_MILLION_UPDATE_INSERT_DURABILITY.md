@@ -4807,6 +4807,35 @@ work should target the measured Stage-1 exchange and writer/index scheduling,
 or a format-level decimal representation that reduces bytes before the
 writer, rather than another local serialization micro-optimization.
 
+## Rejected short-decimal RunLenInt encoding (2026-11-24)
+
+The source fixture was checked before changing the format: every tested tag
+column had one distinct value across the one-million-row source
+(`tag_1_para`, `tag_2_para`, `tag_30_para`, and their type columns). A
+candidate therefore reused Pixels' existing `RunLenIntEncoder` for short
+decimal columns at `EL2`, and added matching ordinary and selected read paths
+in `DecimalColumnReader`. Long decimals and non-decimal columns were not
+changed. Candidate `pixels-core` SHA was
+`0a79e6196282bdc5484fce22b90867b1b5face53dcf61109baaf6ce2dbf4554f`.
+
+Strict table-to-table arms used disjoint destination ranges
+`93,000,000,001..93,001,000,000` and
+`94,000,000,001..94,001,000,000`. The first query
+`20261124_055605_00004_ftiu2` took `9.180 s` (about `109K rows/s`); the warm
+query `20261124_055821_00012_ftiu2` took `5.785 s` (about `173K rows/s`).
+The 93B range passed a full exact check, including count, distinct and
+contiguous IDs, tag strings, and all representative decimal values, proving
+the new reader path could decode the candidate output. Nevertheless, the
+warm result was well below the stable `4.22 s` (about `237K rows/s).
+
+This rejects applying the generic integer RLE path to decimal columns for the
+current E2E workload. The constant values make compression attractive in
+principle, but the current encoder/decoder and end-to-end scheduling overhead
+outweigh the physical-size reduction. The candidate was removed from the
+working branch and the runtime was restored to stable `pixels-core` SHA
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`, with
+8191 served by PID `1479376`.
+
 ## Rejected native decimal block fast path (2026-11-24)
 
 The wide fixture contains three `decimal(38,2)` columns and thirty
