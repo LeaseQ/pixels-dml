@@ -5488,3 +5488,30 @@ scan efficiency, but the current E2E bottleneck is still the combined source
 scan, 68-column conversion, and table-writer path. The derived compact table is
 kept on cds20 as a diagnostic fixture, not as a replacement for the original
 main test source.
+
+## Tag-column constant-propagation diagnostic (2026-11-24)
+
+The fixture's 30 string tag columns and 30 decimal tag-parameter columns each
+have approximate distinct count 1 over the full 1M-row source. To quantify the
+cost without changing the target schema or dropping tag support, one diagnostic
+arm kept all 60 tag output columns but projected their known values as typed
+constants (`varchar(10) 'U111'` and `decimal(18,4) 111.0000`) instead of reading
+the corresponding source columns. This is semantically equivalent for this
+constructed fixture only; it is not a general table-to-table rewrite rule.
+
+The arm used destination IDs `308000000001..308001000000` and returned exact
+count, distinct-ID, contiguous-range, `U111`, and `111.0000` checks. QueryMonitor
+reported:
+
+```text
+qid 20261124_110514_00066_59q7y: 4.145 s, 241.3K rows/s
+```
+
+Compared with the normal projection, QueryInfo reported logical processed input
+falling from about 474 MB to 84 MB and total CPU from about 17.1 s to 6.2 s;
+physical output stayed about 291 MB. This isolates a real cost in reading and
+decoding the wide tag columns, while also showing that output encoding/writing
+remains a separate floor. The result is **diagnostic, not promoted**: the next
+valid candidate must preserve arbitrary tag values and prove its safety from
+storage metadata or a general low-cardinality representation, rather than
+hard-code this fixture's constants.
