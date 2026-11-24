@@ -5029,3 +5029,54 @@ handling are real hotspots, but this particular optimization does not address
 the dominant end-to-end scheduling cost reliably. Future work should use an
 explicit RLE/non-RLE fixture split and per-column conversion counters before
 attempting another materialization rewrite.
+
+## Primary-index key ByteString copy reduction (2026-11-24)
+
+The JFR profile identified `PixelsInsertIndexWriter.appendBatch` as a smaller,
+but repeated, allocation site in the INSERT path. For the current single-LONG
+primary key, `PrimaryKeyBytes.fromColumnVectors` already returns a newly
+allocated eight-byte array for each row. The old code passed that array to
+`ByteString.copyFrom`, which copied it a second time before placing it in the
+protobuf index entry.
+
+The candidate uses protobuf 3.25.5's
+`UnsafeByteOperations.unsafeWrap(byte[])` for this array. This is safe for this
+call site because the encoder owns the fresh array and does not mutate it after
+the `ByteString` is built; the immutable `ByteString` is then retained by the
+index entry. No key encoding, bucket selection, row-id allocation, RPC
+protocol, or abort behavior changes.
+
+Candidate connector SHA:
+`4346577b8220e07c91419db051014d9c49cf3df29938f0d505c0acbc8083a622`.
+The targeted `PixelsInsertIndexWriterTest` source compiled successfully, but
+the inherited Maven Surefire configuration still forces `Tests are skipped`.
+The candidate was therefore validated with the actual 8191 Trino E2E runtime.
+
+Fresh strict table-to-table INSERT arms used offsets 151B, 154B, and 156B,
+which map to target ID ranges 161B, 164B, and 166B. Each inserted exactly
+1,000,000 rows and passed count, contiguous min/max, distinct-ID, tag, and
+decimal checks:
+
+```text
+candidate 161B: 6.632 s ~= 150.8K rows/s
+candidate 164B: 8.230 s ~= 121.5K rows/s
+candidate 166B: 8.148 s ~= 122.7K rows/s
+candidate mean: 7.670 s ~= 130.4K effective rows/s
+```
+
+The stable connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`
+was measured on disjoint fresh controls at offsets 152B, 153B, and 155B:
+
+```text
+stable 162B: 8.661 s ~= 115.5K rows/s
+stable 163B: 7.320 s ~= 136.6K rows/s
+stable 165B: 9.206 s ~= 108.6K rows/s
+stable mean: 8.396 s ~= 119.1K effective rows/s
+```
+
+The three-arm mean is about 8.6% faster for the candidate, with all arms
+correct. This is a low-risk allocation reduction and is retained on the
+validation branch, but the sample is still small and absolute time remains
+variable. The 8191 runtime was restored to the stable connector SHA after the
+experiment; a later soak should verify the candidate under repeated INSERT and
+UPDATE traffic before making it the default deployment artifact.
