@@ -6810,8 +6810,45 @@ The corrected optimization conclusion is therefore narrower: use
 INSERT benchmark profile on this fixture.  It has repeatable warm SQL elapsed
 around `500K rows/s` and preserves the complete indexed/tagged route.  This is
 not yet a server or production default: the soak used a pre-created target and
-an ID-offset query, and a clean-process/client-wall soak plus operational
-memory guard is still required before promotion.
+an ID-offset query.  The clean-process crossover below is now complete, but an
+operational memory guard and a longer soak are still required before promotion.
 
 Before this correction push, the remote progress file was fetched and checked
 at `7385329130ee3386bf4adb852e4e17a53f0e4f0c`.
+
+## Clean-Trino crossover and warm confirmation (2026-11-25)
+
+To separate Trino startup/JIT cost from the route setting, the isolated Trino
+process was restarted twice from the correct `trino-data` working directory
+with `PIXELS_HOME` set to the fresh validation home.  Retina was not restarted
+and port `8090` was untouched.  The first arm after each restart was slow for
+both settings, confirming that startup/cache state dominates that arm:
+
+```text
+restart A: false first  client wall 8.929 s, SQL 6.87 s  q=20261124_194046_00000_p6wxb
+            true second client wall 5.495 s, SQL 3.61 s  q=20261124_194055_00001_p6wxb
+restart B: true first   client wall 9.735 s, SQL 7.70 s  q=20261124_194219_00000_bf3zx
+            false second client wall 4.578 s, SQL 2.65 s q=20261124_194228_00001_bf3zx
+```
+
+The two target tables both passed the exact 5,000,000-row, 5,000,000-distinct-
+ID, range, and full-tag gate after the crossed runs.  With the process warm,
+the next two reversed pairs were:
+
+```text
+true  then false: true  client wall 5.871 s, SQL 4.02 s, q=20261124_194325_00004_bf3zx
+                 false client wall 5.215 s, SQL 3.38 s, q=20261124_194331_00005_bf3zx
+false then true: false client wall 3.879 s, SQL 2.05 s, q=20261124_194336_00006_bf3zx
+                 true  client wall 4.716 s, SQL 2.87 s, q=20261124_194340_00007_bf3zx
+```
+
+Both targets then passed the exact 7,000,000-row, 7,000,000-distinct-ID,
+range, and full-tag gate.  The warm false mean was `2.72 s` versus `3.45 s`
+for true, about a 21% SQL-elapsed reduction in this crossover.  This confirms
+that fixed 32 writers plus `redistribute_writes=false` is the current
+benchmark profile to carry into the next INSERT runs; it does not turn the
+best 500K rows/s observation into a universal claim or authorize changing the
+server default.
+
+Before this clean-process correction push, the remote progress file was fetched
+and checked at `b0a4ac0d2d2f1ba898380f7f09198cf404e6a2c7`.
