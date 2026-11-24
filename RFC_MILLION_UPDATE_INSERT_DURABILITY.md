@@ -4898,6 +4898,44 @@ not beat the accepted stable warm result of `4.22 s` (`~237K rows/s`). It is
 therefore rejected as a throughput change. The runtime was restored to stable
 connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`.
 
+## Rejected final writer-close/index-finish overlap (2026-11-24)
+
+The new sink-stage instrumentation separated `PixelsWriter.close()` from
+`PixelsInsertIndexWriter.finish()`. Since both operations begin only after the
+last row group has been appended, a narrow candidate started index finish on a
+`CompletableFuture` while the writer closed, then waited for both operations
+before returning the insert fragment. The candidate did not change the index
+protocol, tag columns, file layout, or abort cleanup; its connector artifact
+SHA was `0f30982f44070e9be3735aadaf1672b12f86358c915237ca7941480981dd02fa`.
+
+Two strict table-to-table 1M-row arms used the normal 24--32 writer session,
+`task_concurrency=64`, the full 68-column projection, and disjoint target
+ranges `270,000,000,001..270,001,000,000` and
+`271,000,000,001..271,001,000,000`. Both returned exactly 1M rows and passed
+the distinct-ID, contiguous-range, `U111`, and `111.0000` checks:
+
+```text
+candidate cold query 20261124_095227_00004_hqjya: 9.003 s
+candidate warm query 20261124_095240_00009_hqjya: 4.808 s
+```
+
+The warm number was not a stable improvement over the nearby stable
+instrumented arm (`4.912 s`) and remained slower than the accepted warm
+table-to-table point around `4.22 s`. More importantly, the new subphase
+metrics showed contention rather than overlap: in the warm arm,
+`writer_close_ms` averaged about `235 ms`, while `index_finish_ms` averaged
+about `955 ms` and reached `1.676 s`; the preceding stable arm averaged about
+`165 ms` and `695 ms` for the same two fields. Running both tails concurrently
+therefore increases resource contention on this single-node runtime instead
+of shortening the query tail.
+
+The candidate was reverted without promotion. The actual 8191 process was
+restarted on the stable connector SHA
+`4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`, and
+`SELECT 1` passed. The next optimization should stay on the measured
+source/Stage-1 exchange and service-side grouped RocksDB scheduling paths;
+another finish-order change is not justified by this result.
+
 ## Rejected additional exchange.client-threads=50 check (2026-11-24)
 
 The earlier exchange-client-thread sweep had a small nominal advantage for
