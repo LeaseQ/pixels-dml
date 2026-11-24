@@ -6011,3 +6011,42 @@ restored to the default no-property command line after the probe. This A/B
 also changes the optimization priority: UPDATE is currently bottlenecked by
 primary-index resolution, while indexed INSERT is bottlenecked by primary
 index maintenance during file publication.
+
+## Promote primary-key resolution parallelism default (2026-11-24)
+
+The parallelism-16 arm was repeated independently before changing the default.
+The two matched arms produced `primary_key_resolve_ms=1386.585 ms` and
+`1435.490 ms`, with SQL elapsed times of `4.144 s` and `4.217 s` respectively.
+The result was stable enough to promote the existing bounded resolver setting
+from default `1` to default `16`, while retaining the JVM override for
+deployments that need to reduce IndexServer pressure.
+
+The source change was committed and pushed in `pixels-trino-dml` as:
+
+```text
+6b56954 perf: parallelize primary-key resolution by default
+```
+
+The full connector dependency set was rebuilt and deployed atomically. The
+active hashes include:
+
+```text
+pixels-trino-connector-0.2.0-SNAPSHOT.jar  a49a1cb1788ecf9305d1555e4e667e763f670ecb4e1a9636686cf8446701c2f0
+pixels-common-0.2.0-SNAPSHOT.jar           20366fc0fb79e93ac0e20c9298479e5c047acb0cbe8e9644caef64498c66ab75
+pixels-core-0.2.0-SNAPSHOT.jar             9ead2f164c3fe110ee99d5e13394a58e654d1483908e28cde1a3edecd5fb1a48
+```
+
+With no experimental Trino JVM property (therefore exercising the new source
+default), query `20261124_150401_00000_jsrkk` updated the same clean 1M-row
+indexed range and returned 1,000,000 rows. Its connector metric was:
+
+```text
+encoding_ms=49.559 primary_key_resolve_ms=1445.340
+request_build_ms=214.117 rpc_count=1 request_bytes=10000067
+rpc_ms=419.176 total_ms=2141.282
+```
+
+SQL elapsed was 4.215 s, approximately `237.2K rows/s`. This confirms that
+the promoted default is active and reproduces the A/B result. It is an UPDATE
+tag-index throughput result; the full post-COMPACT/restart durability chain
+remains the separate acceptance gate documented above.
