@@ -4978,3 +4978,35 @@ under a fair baseline. The asynchronous flush/index implementation is rejected
 and should be reverted from the default path. The useful remaining change is
 the stage instrumentation; the next optimization target should be the measured
 conversion/index scheduling path, not another unverified overlap variant.
+
+## Provisional RLE bulk materialization probe (2026-11-24)
+
+A 30-second JFR profile on the stable 1M-row INSERT showed low whole-machine
+CPU load (17.37% average, 36.10% maximum) but samples in
+`PixelsPageSink.appendValue`, Trino `VariableWidthBlock.copyPositions`, UTF-8
+decoding, and the string reader. The fixture also supplies many constant tag
+and decimal columns as `RunLengthEncodedBlock`s. The connector probe therefore
+keeps the existing RLE/null/type dispatch but bulk-fills the destination arrays
+for non-null repeated strings and short decimals, replacing one virtual
+`ColumnVector.add()` call per row with `Arrays.fill`. Ordinary blocks,
+long-decimal RLE, null RLE, and index/writer protocols are unchanged.
+
+Candidate connector SHA:
+`8cd7ab4de3691da7ad7cdd37eeab717b6f90bbac1d32873228ed8e617b3ab21b`.
+The candidate used fresh target ranges 140B and 141B; the stable connector was
+then restored and used fresh controls 142B and 143B:
+
+```text
+candidate 140B: 10.886 s  ~= 91.9K rows/s
+candidate 141B:  6.878 s  ~= 145.4K rows/s
+stable 142B:    10.767 s  ~= 92.9K rows/s
+stable 143B:     8.217 s  ~= 121.7K rows/s
+```
+
+All four ranges passed exact 1M-row count, contiguous min/max, distinct-ID,
+tag, and decimal checks. The cold arms are effectively tied; the warm arm is
+about 16% faster and the two-arm mean is about 6.4% faster for the candidate.
+This is a promising but single-pair result, so the probe is retained on the
+validation branch as **provisional**, not installed in the stable runtime.
+It needs at least another matched pair and a direct RLE/non-RLE fixture check
+before becoming a default optimization.
