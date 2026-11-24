@@ -6733,3 +6733,39 @@ any default change.
 
 Before this documentation push, the remote progress file was fetched and
 checked at `3b772a903309ff83923127e1f040433059c64edf`.
+
+## Exchange-bypass follow-up at 24 and 32 writers (2026-11-25)
+
+The remaining writer-count question was tested without creating more indexed
+tables.  Four targets created before the Retina recovery were empty after the
+checkpoint restore, so they could be reused without another table/index
+allocation.  The source, connector/daemon jars, endpoint, grouped-primary
+route, `task_concurrency=64`, and writer scaling setting were unchanged:
+
+```text
+writers  redistribute_writes  target                         query                         elapsed  rows/s
+24       false                 e2e68_matrix24a_20261125       20261124_193021_00047_4pjcb  1.91 s   ~=524K
+24       true                  e2e68_matrix24b_20261125       20261124_193025_00048_4pjcb  3.08 s   ~=325K
+32       false                 e2e68_matrix16a_20261125       20261124_193106_00051_4pjcb  2.33 s   ~=429K
+32       true                  e2e68_matrix16b_20261125       20261124_193110_00052_4pjcb  2.88 s   ~=347K
+```
+
+Every target returned `count=1,000,000`, `count(DISTINCT id)=1,000,000`, the
+exact ID range `10000000001..10001000000`, and one million
+`tag_1_type='U111'`/`tag_1_para=111.0000` values.  Together with the three
+usable 16-writer pairs above, this gives five paired comparisons across 16,
+24, and 32 writers in which the no-redistribution route is faster.  The
+setting is now the preferred next INSERT benchmark profile on this single-node
+wide fixture, with the explicit caveat that the 1.91/2.33 second arms are warm
+observations, not a universal or durable million-row/s claim.
+
+This still does not change a production or server default.  The setting changes
+Trino's exchange/backpressure topology, the no-redistribution writer retains a
+large accumulated `finishWall`, and the Retina OOM showed that repeatedly
+creating indexed targets can invalidate a long probe sequence.  Before a
+default change, run a bounded soak using pre-created targets or a controlled
+single target, capture client wall time as well as SQL elapsed, and repeat the
+correctness gate after a clean runtime health check.
+
+Before this follow-up documentation push, the remote progress file was fetched
+and checked at `d03e823ef49ed704288bbd097440dd71222b2c73`.
