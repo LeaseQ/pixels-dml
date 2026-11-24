@@ -5674,6 +5674,50 @@ yet establish the target throughput: the measured INSERT rate is still in the
 382K rows/s. Further optimization must therefore preserve this artifact
 isolation and durability gate.
 
+## Stage-accounted INSERT bottleneck and index-path sweep (2026-11-24)
+
+The Trino HTTP statement protocol was used to capture `outputStage` snapshots
+while a stable connector executed the real 68-column table-to-table INSERT.
+This is more reliable than looking for connector log markers in the shared
+server log, where the active logging/rotation configuration can hide them.
+For query `20261124_130205_00044_gq9b5`, the 1M-row indexed INSERT completed in
+5.450 s. The source stage read 290,289,264 bytes and produced 474,027,956
+bytes, using about 1.80 s CPU and 5.13 s stage wall time. The writer/Exchange
+stage processed about 437 MB and used about 9.11 s CPU and 38.50 s summed stage
+wall time, with 291,405,583 bytes physically written. The latter is the larger
+CPU component; source scan alone is not the dominant explanation for the
+current E2E rate.
+
+An explicit no-primary-index diagnostic target used the same source and
+session settings. Its 1M-row arm (`20261124_130437_00048_gq9b5`) passed exact
+count, distinct-ID, contiguous-range, and tag checks for IDs
+`820000000001..820001000000`. It completed in 4.120 s; the source stage was
+nearly unchanged (1.78 s CPU, 4.92 s wall), while the writer stage used 6.41 s
+CPU and 13.23 s wall. This estimates roughly 2.7 s of writer CPU attributable
+to the indexed path on this fixture. It is a diagnostic estimate rather than a
+perfect causal delta because the no-index table was created with `LIKE` and
+the INSERT used an explicit target-column list to account for its interleaved
+tag-column order.
+
+Two index scheduling knobs were then tested on the indexed target. First,
+`pixels.insert.index.flush.parallelism=32` (`20261124_130643_00051_gq9b5`)
+completed in 4.285 s, versus a close no-property control
+`20261124_130922_00052_gq9b5` at 4.463 s. The writer CPU values were 8.77 s
+and 8.83 s respectively, so the approximately 4% elapsed-time difference is
+within the observed scheduling/cache variation and does not justify a default
+change. Second, the correctly named connector property
+`pixels.insert.index.grouped.primary.write=true` with flush parallelism 4
+(`20261124_131147_00053_gq9b5`) completed in 4.352 s. Its range
+`850000000001..850001000000` passed exact count, distinct-ID, contiguous-range,
+and tag checks, but the improvement over the close control was only about
+2.5%; writer CPU was actually higher at 9.15 s. Neither setting is promoted.
+
+The Trino runtime was restored with no experimental index properties and the
+stable connector/core hashes. The result narrows the next optimization target
+to the writer/conversion plus server-side primary-index work; repeatedly
+raising client flush fan-out or changing RPC grouping is not currently a
+credible route to the million-row target.
+
 ## Rejected sink-side one-entry DictionaryBlock fast path (2026-11-24)
 
 A narrow follow-up probe tried to optimize the 30 low-cardinality tag columns
