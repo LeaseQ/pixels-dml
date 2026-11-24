@@ -5411,3 +5411,49 @@ SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4` and
 the default args. The remaining string work should reduce bytes or decoding
 before the Exchange boundary, not add more per-row dispatch caching at the
 sink.
+
+## Rejected cross-vnode single-batch primary write (2026-11-24)
+
+The next service-side candidate moved one level below the Trino sink. The
+existing grouped-primary RPC partitions entries by vnode and submits one
+RocksDB `WriteBatch` per vnode through the grouped executor. The opt-in
+candidate collected all vnode column-family writes from one grouped RPC into a
+single RocksDB `WriteBatch`, while retaining the existing `WriteOptions` (and
+therefore WAL behavior), the existing key/value encoding, and the optional
+latest-version cache update after a successful write. The default path was
+unchanged and the switch was
+`-Dpixels.index.grouped.primary.write.single-batch=true`.
+
+The candidate daemon was compiled successfully after limiting Maven to the
+already available non-Retina artifacts. On cds20 it was deployed only to the
+validation runtime and the previous daemon jar was saved at
+`pixels-daemon-0.2.0-SNAPSHOT-full.jar.before-single-batch-20261124`. The
+candidate daemon SHA observed at deployment was
+`099ae2d03c57822ba2ec2b32beccde27a3b19079d086b82394a987958d7eb328`.
+
+Two fresh, non-overlapping strict table-to-table 1M-row arms used the same
+68-column source, session settings, and restart-per-arm procedure:
+
+```text
+candidate 20261124_103927_00008_59q7y: 7.232 s, 138.3K rows/s
+  destination IDs 302000000001..302001000000
+stable    20261124_104421_00019_59q7y: 5.072 s, 197.2K rows/s
+  destination IDs 303000000001..303001000000
+```
+
+Both arms returned `INSERT: 1000000 rows`. Both passed count, distinct-ID,
+contiguous min/max, `tag_1_type = 'U111'`, and
+`tag_1_para = DECIMAL '111.0000'` checks. The daemon grouped metrics confirmed
+that the candidate branch was exercised; its observed grouped-primary tail was
+about 1.03 s, while the stable control was about 1.28 s. That local metric did
+not translate into end-to-end improvement: the candidate had substantially
+longer Trino running/finishing time and lost the end-to-end comparison by
+about 42%.
+
+The cross-vnode batch is therefore **rejected and reverted**. The validation
+runtime was restored to the stable daemon SHA
+`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`, with
+coordinator and worker running without the experimental property. The result
+points away from simply reducing RocksDB batch count; the next service-side
+experiments should instrument or change the grouped-RPC/main-index overlap and
+queueing behavior, rather than make the batch wider again.
