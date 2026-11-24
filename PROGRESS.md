@@ -111,5 +111,10 @@ stable-route recheck，不替换此前grouped配对的176K结论；后续每个�
 Retina健康，避免把运行时故障误判成吞吐结果。本轮记录基于进度文件版本
 `497fe2ee1ced69cd0325c5f97eba7bb1d07543b4`。
 
+恢复后进一步做了session-only writer-count探索：8 writers的SQL elapsed为6.93/2.76/2.45秒，
+24 writers（min=24,max=32）为5.05/3.50秒；query detail中的TableWriter finishWall也随
+writer数明显累积，但冷/热顺序仍造成较大波动。8 writers暂不改默认，只作为下一轮严格
+交叉矩阵的候选；当前默认Trino args未改变。对应完整query ID和正确性门禁已写入RFC。
+
 [runs]: https://github.com/LeaseQ/pixels-dml/blob/e5946aa2/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283

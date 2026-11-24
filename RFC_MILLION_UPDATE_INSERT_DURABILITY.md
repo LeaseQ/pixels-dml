@@ -6561,3 +6561,36 @@ recovery.  It confirms that the earlier hang was an isolated Retina failure,
 not evidence for or against the rejected finish-overlap code.  The OOM and
 recovery path remain an operational risk for future high-concurrency probes;
 each new performance arm must verify Retina health before timing.
+
+## Exploratory writer-count crossover after recovery (2026-11-25)
+
+The recovered stable runtime was then used to test whether the observed
+`TableWriterOperator.finishWall` tail was reduced by lowering the Trino writer
+count.  This was a session-only probe; the default isolated Trino args stayed
+at `task_min_writer_count=24`, `task_max_writer_count=32`, and the connector,
+daemon, grouped-primary-write route, source table, and endpoint were unchanged.
+The rejected `task_max_writer_count=24` attempt was a parameter-validation
+failure (`task_max_writer_count must be a power of 2`) and is not a sample.
+
+All successful arms inserted the same 1,000,000-row materialized source into
+independent empty targets and passed the exact row, unique-key, range, and tag
+gate.  Query detail exposed the following observations:
+
+```text
+session writers    query                         elapsed   writer finishWall
+8                  20261124_183835_00009_vjzqj    6.93 s       23.25 s
+24 (min=24,max=32) 20261124_184023_00013_vjzqj    5.05 s       49.20 s
+8                  20261124_184151_00016_vjzqj    2.76 s        2.82 s
+24 (min=24,max=32) 20261124_184433_00023_vjzqj    3.50 s        8.57 s
+8                  20261124_184551_00026_vjzqj    2.45 s        2.78 s
+```
+
+The 8-writer arms therefore show a lower finish-wall accumulation in the
+observed warm samples and reached 362--408K rows/s, while the 24-writer arms
+reached 198--286K rows/s in their corresponding samples.  However, the first
+recovered 8-writer arm took 6.93s, so the end-to-end ranges overlap and the
+order/cache state is still a confounder.  The evidence supports the narrower
+statement that writer count is an important finish-lifecycle factor; it does
+not yet justify changing the default writer count or claiming a stable
+8-writer throughput.  The next valid step is a strict crossed matrix with
+identical cold/warm preparation and full query-detail capture.
