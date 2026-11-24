@@ -4898,6 +4898,39 @@ not beat the accepted stable warm result of `4.22 s` (`~237K rows/s`). It is
 therefore rejected as a throughput change. The runtime was restored to stable
 connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`.
 
+## Rejected opt-in VarcharArrayBlock source path (2026-11-24)
+
+The strict table-to-table profile still showed source string decoding and
+`VariableWidthBlock` handling in the hot path. `PixelsBlockLoader` currently
+creates a `VarcharArrayBlock` and immediately materializes a contiguous
+`VariableWidthBlock` through `replacementBlockForWrite()`. An opt-in candidate
+kept the custom block for the source-to-writer path, controlled by
+`-Dpixels.trino.varchar-array-block=true`; the default path remained unchanged.
+The candidate connector SHA was
+`7c854a5a36e47eb9363a59437140dc37b24c562ab472c32234aed5850a64dc06`.
+
+Two strict table-to-table 1M-row arms used the normal 24--32 writer session,
+`task_concurrency=64`, the full 68-column projection, and disjoint target
+ranges `272,000,000,001..272,001,000,000` and
+`273,000,000,001..273,001,000,000`. Both returned exactly 1M rows and passed
+the distinct-ID, contiguous-range, `U111`, and `111.0000` checks:
+
+```text
+candidate cold query 20261124_100105_00004_dgjf7: 9.511 s
+candidate warm query 20261124_100119_00009_dgjf7: 5.230 s
+```
+
+The warm result is slower than the accepted stable table-to-table range and
+also slower than the nearby stable instrumented arms. The custom block's
+registered Exchange encoding and downstream block operations therefore cost
+more than the avoided eager copy on this workload. The candidate was rejected
+and not committed. The 8191 process was restored to the default args and
+stable connector SHA
+`4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`; a
+post-restore `SELECT 1` passed. Future source-side work should target a
+representation that reduces bytes or decoding without routing the ordinary
+Exchange through this custom block implementation.
+
 ## Rejected final writer-close/index-finish overlap (2026-11-24)
 
 The new sink-stage instrumentation separated `PixelsWriter.close()` from
