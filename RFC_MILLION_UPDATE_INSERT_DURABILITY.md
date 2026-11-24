@@ -4898,6 +4898,28 @@ not beat the accepted stable warm result of `4.22 s` (`~237K rows/s`). It is
 therefore rejected as a throughput change. The runtime was restored to stable
 connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`.
 
+## Rejected additional exchange.client-threads=50 check (2026-11-24)
+
+The earlier exchange-client-thread sweep had a small nominal advantage for
+`exchange.client-threads=50`, so it was rerun with two fresh candidate arms
+against two fresh default arms. The candidate used a temporary config with
+`exchange.client-threads=50`; the control used the normal config, whose
+effective default is 25. All four arms used the strict 68-column
+table-to-table INSERT and passed exact 1M-row count, contiguous min/max,
+distinct-ID, tag, and decimal checks:
+
+```text
+candidate 50: 9.078 s, 5.712 s   mean 7.395 s ~= 135.2K effective rows/s
+default 25:   8.051 s, 5.769 s   mean 6.910 s ~= 144.7K effective rows/s
+```
+
+This fresh pair reverses the direction of the earlier small-sample signal.
+Pooling the six candidate and six default arms collected so far leaves only
+about a 1% difference, with no stable per-pair direction. The setting is
+therefore **rejected as a tuning conclusion** and was not added to the normal
+runtime configuration. The 8191 instance was restored to the default args and
+passed `SELECT 1`; the temporary candidate config was not promoted.
+
 ## Rejected adaptive write partition-count session property (2026-11-24)
 
 Trino exposes `determine_partition_count_for_write_enabled`, which can derive
