@@ -14,23 +14,25 @@ INSERT候选仍是固定32 writers加关闭redistribution；当前观测到的Tr
 吞吐约350K--508K行/秒，最近三次false样本约350K--400K行/秒，客户端wall（含CLI
 开销）约201K--260K行/秒，尚未达到百万行/秒，也尚未改变默认配置。正确指向8191
 的JFR已把剩余成本定位到UTF-8解码、VariableWidthBlock复制、字符串读写与高对象分配；
-重复字符串统计批处理和常量字符串RLE两个候选均未获E2E收益，且候选混合目标的后续
-完整读回出现DecimalColumnReader越界，因此均撤回，不得推广为默认优化。
+重复字符串统计批处理候选未获E2E收益，且候选混合目标的后续完整读回出现
+DecimalColumnReader越界，因此已撤回，不得推广为默认优化。常量字符串RLE候选此前的
+计时因JVM属性误放在主类之后而未真正启用，已作废；修正参数后，主测例在PageSink
+入口观测到string_blocks=0、string_rows=0，证明该RLE sink路径不适用于当前主测例。
 随后在清理远端候选源码后，纯 `StringStatsRecorder` 解码缓存也完成了独立新表
 对照：warm SQL 4.31秒，对照4.12秒，完整2M行/全标签读回通过但仍略慢，已撤回。
 
-本轮继续验证了写入端 RLE 常量字符串的批量填充候选：候选只把
-`PixelsPageSink` 中逐行 `BinaryColumnVector.setRef` 改为一次性填充引用数组，
-通过 JVM 开关启用，不改变默认路径。两个候选臂的客户端 wall 为9.405/7.257秒，
-两个稳定对照为11.407/6.755秒；四个1M目标均通过行数、唯一键、范围及
-`U111`/`111.0000`标签门禁，但warm臂候选反而较慢，故判定为交叉波动并撤回。
-这进一步说明单点字符串填充不是当前可证明的E2E瓶颈，后续应先确认RLE是否穿过
-投影并定位更大的Exchange/block分配路径。
+本轮修正并完成了RLE sink探针：一次完整1M行主测例在PageSink入口的
+`string_blocks=0`、`string_rows=0`，说明字符串列已经以普通Block到达写入端，
+因此此前RLE sink候选的计时全部作废，不能作为负优化证据。探针已撤回；后续应转向
+上游投影/Exchange的Block构造和`VariableWidthBlock.copyPositions`分配路径。
+对应分布式计划显示源TableScan为ROUND_ROBIN、100个输入分区，随后经
+`LocalExchange[partitioning=SINGLE]`进入TableWriter；因此当前优先级已转向该
+重布局边界，而不是PageSink的RLE分支。
 
 本轮现场状态（2026-11-25）：8191已恢复stable connector/core与默认args，
-`starting=false`；共享8090未重启。JFR有效样本、候选query ID、拒绝原因与最终jar哈希
-见RFC末尾；本轮推送前远端`PROGRESS.md`版本为
-`edce3e0d776d5d18d32258130feff970e05d8a3e`。
+`starting=false`；共享8090未重启。JFR有效样本、探针query ID、作废原因与最终jar哈希
+见RFC末尾。本次修正推送前已核对当前远端文件版本为
+`a79addbcb33997b15e95c4cd78aeb556aa915112`。
 
 ## 1. 已确认的目标与边界
 

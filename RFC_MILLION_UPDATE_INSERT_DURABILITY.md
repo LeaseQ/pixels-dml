@@ -7126,46 +7126,47 @@ stable pixels-core SHA
 args, and shared 8090 untouched.  Before this documentation push, the remote
 `PROGRESS.md` was fetched at `edce3e0d776d5d18d32258130feff970e05d8a3e`.
 
-## Rejected bulk fill for RLE string sink values (2026-11-25)
+## Corrected RLE sink probe: not exercised by the primary workload (2026-11-25)
 
-The JFR hotspot in `VariableWidthBlock.copyPositions` suggested checking the
-other side of the same boundary. When `PixelsPageSink` receives a Trino
-`RunLengthEncodedBlock` for a string column, the stable path calls
-`BinaryColumnVector.setRef` once per row. An opt-in candidate replaced only
-that loop with `Arrays.fill` over the vector's backing-array, offset, and
-length slots; it did not copy bytes, change the file writer, or change the
-default path. The candidate was enabled only with
-`-Dpixels.trino.sink.bulk-rle-string=true` and built as connector jar
-`b2c849476e3b7e27f30bfe990171175140b88ce2171a2f49d9a95e87f39c4d1a`.
+The previous entry claiming an RLE sink A/B was invalid. The JVM property had
+been appended after the Java main class in the `@argfile`, so the candidate
+property was passed as a program argument and `Boolean.getBoolean` remained
+false. The reported timings are therefore stable-path timings and must not be
+used as candidate evidence. This is corrected here rather than silently
+retained as a negative optimization result.
 
-The isolated 8191 instance used the same source
-`validationfresh.e2e68_fresh_candidate86_20261124`, four newly created empty
-68-column indexed targets, `task_concurrency=64`, fixed 32 writers, and
-`redistribute_writes=false`. Two candidate targets were compared with two
-stable targets, with the same 1M-row source and the same full target schema:
+The property placement was fixed and a diagnostic connector was run on a fresh
+1M-row, 68-column indexed target using the primary workload, fixed 32 writers,
+`task_concurrency=64`, and `redistribute_writes=false`. The probe counted
+`RunLengthEncodedBlock` inputs for string categories at `PixelsPageSink`:
 
 ```text
-RLE sink candidate  e2e68_bulk_rle_candidate_a_20261125  9.405 s  ~=106K/s
-RLE sink candidate  e2e68_bulk_rle_candidate_b_20261125  7.257 s  ~=138K/s
-stable control     e2e68_bulk_rle_stable_a_20261125      11.407 s  ~=87.7K/s
-stable control     e2e68_bulk_rle_stable_b_20261125       6.755 s  ~=148K/s
+target=e2e68_rle_probe2_20261125
+query=20261124_214058_00001_uw29b
+string_blocks=0
+string_rows=0
 ```
 
-All four targets committed 1,000,000 rows and passed the count, distinct-ID,
-contiguous-range, and `tag_1_type='U111'` / `tag_1_para=111.0000` checks.
-The warm candidate was slower than the warm stable control, while the cold
-pair was faster; this is a crossover without a repeatable E2E improvement.
-The candidate is therefore rejected and its source was reverted. This probe
-does not justify changing the default sink path; future work should first
-measure whether the RLE block survives through the relevant projections and
-whether the larger Exchange/block allocation path, rather than this final
-array fill, is the dominant cost.
-
-The isolated runtime is restored to stable connector SHA
+The diagnostic code was then removed, the source tree was restored, and the
+isolated runtime returned to stable connector SHA
 `62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`, stable
 pixels-core SHA
 `baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`, default
-args, and `starting=false` on 8191 (PID `2058869`). Shared 8090 (PID
-`1799749`) was not restarted or changed. Before this documentation push, the
-remote `PROGRESS.md` was checked at
-`edce3e0d776d5d18d32258130feff970e05d8a3e`.
+args, and `starting=false` on 8191 (PID `2068614`). Shared 8090 (PID
+`1799749`) was not restarted or changed. The result is a useful negative
+direction finding: this primary table-to-table workload reaches the sink with
+ordinary string Blocks, so an RLE sink fast path is not applicable. The next
+probe should target the upstream projection/Exchange block construction or
+the observed `VariableWidthBlock.copyPositions` allocation path instead.
+
+The corresponding `EXPLAIN (TYPE DISTRIBUTED)` also narrows the location. The
+source `TableScan` is Fragment 2 with `Output partitioning: ROUND_ROBIN` and
+`Output partition count: 100`; Fragment 1 feeds `TableWriter` through a
+`LocalExchange[partitioning = SINGLE]`. The plan has no constant-expression
+projection that could preserve the tag strings as RLE blocks. This makes the
+local exchange/re-layout boundary a more plausible place for the sampled
+`VariableWidthBlock.copyPositions` work than the final `PixelsPageSink` RLE
+branch.
+
+Before this correction push, the remote `PROGRESS.md` was checked at
+`a79addbcb33997b15e95c4cd78aeb556aa915112`.
