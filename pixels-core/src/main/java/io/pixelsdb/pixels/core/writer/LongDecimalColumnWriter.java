@@ -51,36 +51,7 @@ public class LongDecimalColumnWriter extends BaseColumnWriter
         LongDecimalColumnVector columnVector = (LongDecimalColumnVector) vector;
         long[] values = columnVector.vector;
         boolean littleEndian = this.byteOrder.equals(ByteOrder.LITTLE_ENDIAN);
-        int offset = 0;
-        while (offset < length)
-        {
-            int segment = Math.min(length - offset, pixelStride - curPixelEleIndex);
-            boolean noNulls = true;
-            for (int i = 0; i < segment; ++i)
-            {
-                if (vector.isNull[offset + i])
-                {
-                    noNulls = false;
-                    break;
-                }
-            }
-            if (noNulls && littleEndian)
-            {
-                encodingUtils.writeLongLEPairs(outputStream, values, offset, segment);
-                for (int i = 0; i < segment; ++i)
-                {
-                    isNull[curPixelIsNullIndex++] = false;
-                    curPixelEleIndex++;
-                    pixelStatRecorder.updateInteger128(values[(offset + i) << 1], values[((offset + i) << 1) + 1], 1);
-                }
-                offset += segment;
-                if (curPixelEleIndex >= pixelStride)
-                {
-                    newPixel();
-                }
-                continue;
-            }
-        for (int i = offset; i < offset + segment; i++)
+        for (int i = 0; i < length; i++)
         {
             isNull[curPixelIsNullIndex++] = vector.isNull[i];
             curPixelEleIndex++;
@@ -114,8 +85,6 @@ public class LongDecimalColumnWriter extends BaseColumnWriter
             {
                 newPixel();
             }
-        }
-            offset += segment;
         }
         return outputStream.size();
     }
