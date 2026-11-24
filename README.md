@@ -1,5 +1,8 @@
 Pixels
 =======
+
+Pixels DML research: [当前进度 / Progress](PROGRESS.md) · [开题报告](docs/thesis-proposal-20261123.md) · [执行方案](docs/superpowers/plans/2026-11-23-tagging-research-roadmap.md)
+
 [![Pixels Daily Build](https://github.com/pixelsdb/pixels/actions/workflows/daily-build.yml/badge.svg)](https://github.com/pixelsdb/pixels/releases/tag/daily-latest)
 ![GitHub commits](https://img.shields.io/github/commit-activity/m/pixelsdb/pixels/master)
 [![GitHub License](https://img.shields.io/github/license/pixelsdb/pixels)](https://github.com/pixelsdb/pixels/blob/master/LICENSE)
