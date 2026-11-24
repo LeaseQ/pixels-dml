@@ -6723,13 +6723,11 @@ redistribute_writes=false  e2e68_redist_off16b_20261125 20261124_192620_00040_4p
 
 Both post-recovery targets again passed the full gate.  The post-recovery
 numbers are a health/repeatability check, not a new headline because recovery
-warm-up dominates them.  Across the three usable paired comparisons,
-`redistribute_writes=false` is a strong session-level benchmark candidate, but
-it is not installed as a Trino or production default: the sample is one-node
-and one wide table shape, the writer finish tail remains, and the 8-writer
-crossed arm was invalidated by the Retina OOM.  Future INSERT headline runs
-should report this setting explicitly and add a clean 24/32-writer pair before
-any default change.
+warm-up dominates them.  At this point the setting was a strong session-level
+candidate, but it was not installed as a Trino or production default: the
+sample was one-node and one wide table shape, the writer finish tail remained,
+and the 8-writer crossed arm was invalidated by the Retina OOM.  The bounded
+same-target soak below supersedes the broader wording about all writer counts.
 
 Before this documentation push, the remote progress file was fetched and
 checked at `3b772a903309ff83923127e1f040433059c64edf`.
@@ -6769,3 +6767,51 @@ correctness gate after a clean runtime health check.
 
 Before this follow-up documentation push, the remote progress file was fetched
 and checked at `d03e823ef49ed704288bbd097440dd71222b2c73`.
+
+## Correction: bounded same-target exchange soak (2026-11-25)
+
+The fresh-target results above were followed by a bounded soak that reused the
+same four indexed targets; no new table or index was created.  Each arm
+appended the same 1M-row source with a disjoint `id + 1,000,000,000,000` or
+`id + 2,000,000,000,000` expression.  This kept the wide 68-column and tag
+payload while avoiding duplicate primary keys.  The target checks after the
+soak were exact at 3,000,000 rows per table, 3,000,000 distinct IDs, the
+expected combined range, and 3,000,000 `U111`/`111.0000` tag values.
+
+The 24-writer交错序列 was:
+
+```text
+false  20261124_193505_00055_4pjcb  3.26 s
+true   20261124_193510_00056_4pjcb  2.71 s
+true   20261124_193515_00057_4pjcb  2.74 s
+false  20261124_193519_00058_4pjcb  2.14 s
+```
+
+The false/true means are close (`2.70 s` versus `2.73 s`), so the earlier
+`1.91 s` versus `3.08 s` empty-target result is not a stable 24-writer claim.
+The 32-writer交错序列 was:
+
+```text
+false  20261124_193610_00061_4pjcb  1.96 s
+true   20261124_193614_00062_4pjcb  2.61 s
+true   20261124_193618_00063_4pjcb  2.48 s
+false  20261124_193623_00064_4pjcb  2.00 s
+```
+
+Here false is repeatably faster (`1.98 s` versus `2.55 s`).  Query detail
+explains why: the false arms kept the scan and writer in one stage and had no
+stage-2 `TaskOutput`/stage-1 `Exchange` pair; the true arms paid about
+`0.29--0.38 s` of stage-2 task-output wall plus `2.56--2.76 s` of stage-1
+exchange output.  All four 32-writer arms passed the same 3M-row gate.
+
+The corrected optimization conclusion is therefore narrower: use
+`task_min_writer_count=32`, `task_max_writer_count=32`,
+`task_scale_writers_enabled=false`, and `redistribute_writes=false` as the next
+INSERT benchmark profile on this fixture.  It has repeatable warm SQL elapsed
+around `500K rows/s` and preserves the complete indexed/tagged route.  This is
+not yet a server or production default: the soak used a pre-created target and
+an ID-offset query, and a clean-process/client-wall soak plus operational
+memory guard is still required before promotion.
+
+Before this correction push, the remote progress file was fetched and checked
+at `7385329130ee3386bf4adb852e4e17a53f0e4f0c`.

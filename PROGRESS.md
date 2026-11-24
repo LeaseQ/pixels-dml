@@ -6,8 +6,9 @@
 
 **当前结论：** 原型与局部优化已有运行证据，但INSERT、UPDATE相对可比原路径的
 总体收益尚未证明。当前阶段仍以双路径总体成本为主；新增的
-`redistribute_writes=false` 已在16/24/32 writers上获得五组配对读数和完整正确性
-门禁，现作为INSERT下一轮基准候选，尚未改变默认配置。
+`redistribute_writes=false` 在空目标上有跨writer收益迹象；同目标soak进一步显示，
+32 writers下收益可复现，24 writers下基本持平。因此当前INSERT候选收窄为固定32
+writers加关闭redistribution，尚未改变默认配置。
 
 ## 1. 已确认的目标与边界
 
@@ -38,7 +39,7 @@
 | 工作项 | 当前状态 | 已有证据 | 尚缺证据 |
 | --- | --- | --- | --- |
 | 运行包一致性 | 记录有修正与读回 | 混用Connector/common/core后出现方法缺失及可见性错误；整体重建部署后新表读回通过 | 后续每臂继续固定全套jar与实际端口；不能沿用混包运行的性能结论 |
-| INSERT | grouped对照完成；exchange候选已扩展 | 带主键索引、grouped写入及完整标签门禁已完成；`redistribute_writes=false` 在16/24/32 writers五组可用配对均快于 `true`，但未改默认 | 受控soak、客户端wall time和故障前后状态隔离；8-writer臂因Retina OOM排除 |
+| INSERT | grouped对照完成；32-writer exchange候选有soak证据 | 带主键索引、grouped写入及完整标签门禁已完成；32 writers同目标soak为false约1.98s、true约2.55s，24 writers基本持平 | clean-process/client-wall soak及内存护栏；8-writer臂因Retina OOM排除 |
 | UPDATE | 代码默认值已改；记录有重复实测 | 主键解析由串行约8.27～10秒降至并行16下约1.39～1.45秒；新默认SQL elapsed 4.215秒，约23.7万行/秒 | 对应正常运行物化、最终标签与完整周期配对；并发负载表现尚不能推断 |
 | MainIndexBuffer反向映射 | 记录有测试与对照；INSERT优化未采纳 | 惰性版本记录3项测试通过；同32 fragments配对为稳定版5.759秒、候选6.446秒，未获收益，运行包已恢复稳定版本 | UPDATE/COMPACT收益及内存代价仍待证明；分支保留代码不等于默认部署采用 |
 | 原Retina对照 | 已识别语义缺口 | 现有测试“更新”为删除旧键并插入新键 | 保留主键、相同标签赋值及完成边界的对照适配；INSERT也需对齐输入准备及发布成本 |
@@ -64,7 +65,7 @@
 | --- | --- | --- | --- |
 | P0 / BASE-01 | UPDATE/INSERT路由对照完成 | 确定INSERT、UPDATE各自可比的原路径或优化前版本 | UPDATE已完成parallelism=1/16控制；INSERT已完成grouped与非grouped路由对照；原Retina删旧键/插新键路径仍不可直接等价 |
 | P0 / ENV-01 | 现场核验完成（两条路由） | 固定匹配版本、有效参数、源数据及每臂初始状态 | 两条路由的jar哈希、端口、schema、独立空目标、输入及最终校验已写入RFC |
-| P1 / INS-01 | 已有总体配对；exchange候选已完成跨writer扩展 | 完整表到表INSERT对照，并验证 `redistribute_writes=false` 的计划和标签正确性 | 做受控soak并记录client wall time；之后再决定是否改默认 |
+| P1 / INS-01 | 已有总体配对；32-writer exchange候选已完成同目标soak | 完整表到表INSERT对照，并验证 `redistribute_writes=false` 的计划和标签正确性 | 做clean-process/client-wall soak并设置内存护栏；之后再决定是否改默认 |
 | P1 / UPD-01 | 已有总体配对，待多轮扩展 | 主键常量赋值及独立多轮UPDATE对照 | 已完成两目标交叉顺序的SQL UPDATE与COMPACT/标签读回；独立多轮打标及重启不属于本轮新增门槛 |
 | P2 / OPT-01 | INSERT候选未采纳 | 保留反向映射负结果；按总体成本证据决定是否继续研究定位开销 | 不将其作为已成立的INSERT优化；如另评估UPDATE/COMPACT，需独立位置迁移、内存和端到端配对证据 |
 | 后续 / EXT-01 | 待平台与接口核验 | 外部基线与鲲鹏实验 | 按既有方案推进；正常运行语义与计时可比，实际结果留证 |
@@ -129,10 +130,12 @@ writers两次为3.05/2.68秒（约328K/373K rows/s），且finishWall为4.33/4.6
 ROUND_ROBIN和Pixels writer。固定16 writers下的两组顺序交叉为关闭5.02/3.96秒、
 开启5.91/5.57秒，四个目标均通过1M行、唯一键、范围和U111/111.0000标签门禁；
 恢复后再跑的开启/关闭为11.03/7.86秒，作为健康复核而非新headline。该运行时
-候选尚未改默认；随后复用恢复后已存在的空目标补齐24/32 writers：24 writers
-关闭/开启为1.91/3.08秒，32 writers关闭/开启为2.33/2.88秒，四个目标均通过
-同一完整门禁。当前它已成为下一轮INSERT基准候选，但还需要受控soak和client wall
-time记录才能考虑默认化。
+候选尚未改默认；复用目标继续做同目标追加soak后，24 writers的false/true为
+3.26/2.71、2.14/2.74秒，均值基本持平；32 writers的false/true为1.96/2.61、
+2.00/2.48秒，收益可复现，且四个目标均通过300万行、唯一键、范围和标签门禁。
+因此下一轮INSERT基准固定为32 writers加`redistribute_writes=false`，仍需clean
+process/client wall和内存护栏验证后才考虑默认化。本次修订前检查的远端进度文件
+版本为`7385329130ee3386bf4adb852e4e17a53f0e4f0c`。
 8-writer扩展因连续创建索引目标触发隔离Retina OOM而排除；Retina已从
 `recovery_cds20_860063.bin`恢复、重新加入hash ring，并通过一行打标读回。
 本次提交前检查的远端进度文件版本为
