@@ -4774,3 +4774,36 @@ This rejects reader-side RLE substitution as a throughput optimization for the
 current Trino Exchange/PagesSerde path. The constant-tag diagnostic still
 shows that reduced input width helps, but the representation change must be
 made at a layer that does not introduce an Exchange or writer long tail.
+
+## Rejected native decimal block fast path (2026-11-24)
+
+The wide fixture contains three `decimal(38,2)` columns and thirty
+`decimal(18,4)` columns. The connector therefore materializes approximately
+288 fixed-width decimal bytes per row before the target writer does any other
+work. A candidate added direct reads from Trino's native
+`Int128ArrayBlock`/`LongArrayBlock` for these decimal columns, avoiding the
+per-row `Int128` object on the long-decimal path. Non-native blocks retained
+the existing conversion path. The candidate was compiled with JDK 23 and was
+deployed only after stopping the actual 8191 Trino process; the active jar SHA
+was `d1b309811a3f0ae228426612f4ba364c930133fff0382cfd439d59f34bb6588d`.
+
+Two strict table-to-table arms used disjoint ranges
+`77,000,000,001..77,001,000,000` and
+`78,000,000,001..78,001,000,000`. Queries
+`20261124_052155_00004_4h8jj` and `20261124_052249_00010_4h8jj` took
+`8.69 s` and `4.57 s` respectively. Both exact checks passed for row count,
+distinct contiguous IDs, and representative `tag_1`, `tag_2`, and `tag_30`
+values. Matched stable-connector controls on ranges
+`79,000,000,001..79,001,000,000` and
+`80,000,000,001..80,001,000,000` took `8.44 s` and `5.45 s` in queries
+`20261124_052425_00004_trqpv` and `20261124_052512_00010_trqpv`.
+
+The candidate warm result is within the observed run-to-run variance and does
+not beat the accepted stable warm result of `4.22 s` (`~237K rows/s`). It is
+therefore rejected as a throughput change. The runtime was restored to stable
+connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`.
+The deployment recheck also corrected an operational pitfall: starting
+`runtime/trino/bin/launcher` uses the separate 8091 configuration; the E2E
+benchmark must launch from the runtime/trino working directory with
+`e2e-fresh-20261122/trino-data/default-cap24-trino.args` so that the actual
+8191 process and jar are the ones being measured.
