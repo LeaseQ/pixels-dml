@@ -6520,3 +6520,44 @@ shared `8090` process was not changed.  The finish-overlap idea is rejected;
 future work must preserve the existing serial lifecycle or first introduce a
 dedicated non-blocking writer/index protocol with explicit cancellation and
 failure tests.
+
+## Isolated-runtime recovery and stable INSERT recheck (2026-11-25)
+
+The first post-candidate control attempt was not accepted as a performance
+sample because the isolated Retina service had already failed.  Its log showed
+`OutOfMemoryError: Java heap space` while creating a write buffer in
+`RetinaResourceManager.addWriteBuffer`, followed by a metadata `addWriteBuffer`
+RPC error and removal of `cds20` from the coordinator hash ring.  The
+subsequent INSERT had 90 drivers, 89 blocked drivers, and no physical progress;
+it was cancelled rather than timed as a slow run.
+
+Recovery was limited to the isolated endpoint: the failed Retina process was
+restarted with the original stable args and the required `PIXELS_HOME` for
+`e2e-fresh-20261122`.  It replayed the existing checkpoint, reported
+`Recovery complete` (8,208 baseline files, 28 retired files, 5,858 temporary
+ingest visibility entries cleaned), and the coordinator logged
+`Added node to hash ring: cds20`.  The stable connector remained SHA
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`; no
+candidate jar was deployed and shared port `8090` was not touched.
+
+A one-row INSERT smoke test then completed successfully.  The recovered
+stable route was rechecked by first writing the missing one row and then
+inserting the remaining `999,999` source rows into
+`e2e68_finish_overlap_control1_20261125`:
+
+```text
+smoke: INSERT 1 row, completed
+recheck: query=20261124_183416_00006_vjzqj
+         SQL elapsed=8.89 s for 999,999 rows ~=112.5K rows/s
+         execution=8.84 s, inputRows=1,000,000
+```
+
+The final target gate returned `count=1,000,000`,
+`count(DISTINCT id)=1,000,000`, IDs `10000000001..10001000000`, and the exact
+tag predicate `tag_1_type='U111' AND tag_1_para=111.0000`.  This result is a
+valid recovered stable-route recheck, not a new grouped-route best: its target
+already contained one smoke row, and the 999,999-row SQL was measured after
+recovery.  It confirms that the earlier hang was an isolated Retina failure,
+not evidence for or against the rejected finish-overlap code.  The OOM and
+recovery path remain an operational risk for future high-concurrency probes;
+each new performance arm must verify Retina health before timing.

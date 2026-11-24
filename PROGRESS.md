@@ -103,6 +103,13 @@ Trino finish/exchange与sink/index_finish长尾，不再把单次最好值当作
 对finish overlap候选的首次实现已撤回：候选jar在两个fresh target上使INSERT长期
 RUNNING（90 drivers中89 blocked、零输出），查询已取消，原jar与默认参数已恢复。
 该候选作为生命周期hang负结果记录在RFC，不计入吞吐，也不保留为默认优化。
+随后发现该隔离实例的控制重测受Retina写缓冲`OutOfMemoryError`影响，节点被从hash
+ring移除；该次卡住不计入性能。按原stable args并显式设置`PIXELS_HOME`重启Retina、
+完成checkpoint恢复并重新加入hash ring后，1行smoke和999,999行stable INSERT均成功，
+重测约112.5K rows/s，最终目标为1M行/1M distinct id/精确U111标签。该结果是恢复后
+stable-route recheck，不替换此前grouped配对的176K结论；后续每个性能臂必须先检查
+Retina健康，避免把运行时故障误判成吞吐结果。本轮记录基于进度文件版本
+`497fe2ee1ced69cd0325c5f97eba7bb1d07543b4`。
 
 [runs]: https://github.com/LeaseQ/pixels-dml/blob/e5946aa2/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283
