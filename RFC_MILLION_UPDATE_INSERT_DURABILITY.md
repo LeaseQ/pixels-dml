@@ -6152,3 +6152,9 @@ writer arm was rejected by Trino because writer counts must be powers of two.
 The accepted indexed INSERT headline is therefore approximately `248.5K
 rows/s`; the no-primary-index `283.2K rows/s` and UPDATE `237.2K rows/s`
 results remain separate workload baselines.
+
+A fixed writer count of 16 was also run on a fresh disjoint range. It passed
+the exact gate but took 5.679 s (about 176.1K rows/s), so both 16 and 64 are
+rejected against the matched 32-writer result. The current writer-count
+conclusion is therefore a measured sweet spot at 32, not a general rule that
+more parallelism is beneficial.
