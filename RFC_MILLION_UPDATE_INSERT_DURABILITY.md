@@ -5674,6 +5674,35 @@ yet establish the target throughput: the measured INSERT rate is still in the
 382K rows/s. Further optimization must therefore preserve this artifact
 isolation and durability gate.
 
+## Fresh Retina JFR confirms main-index allocation hotspot (2026-11-24)
+
+A 20-second JDK Flight Recorder profile was captured on the stable Retina
+while a real indexed 1M-row table-to-table INSERT ran
+(`20261124_132800_00058_gq9b5`). The query completed correctly in 4.423 s;
+its Trino stage split was about 9.66 s writer-stage CPU versus 1.30 s source
+stage CPU. The recording is retained on cds20 at:
+
+```text
+runtime/e2e-fresh-20261122/jfr/insert-primary-stable-20261124.jfr
+```
+
+The 640 KiB profile contained 151 execution samples. Its largest sampled
+methods were `HashMap.getNode` (15.89%),
+`HashMap.removeNode` (13.91%), `ThreadLocal` map lookup (8.61%),
+`HashMap.keysToArray` (6.62%), `HashMap.resize` (5.96%),
+`HashMap.HashIterator.nextNode` (5.96%), `ComparableTimSort.binarySort`
+(5.96%), and `SqliteMainIndex.putEntries` (5.96%). Because the recording also
+contains daemon background activity, these percentages are directional rather
+than a query-only CPU accounting. They nevertheless align with the current
+`MainIndexBuffer.insert` implementation: every ordinary INSERT entry performs
+the relocation-safe scan across other file buffers and cache invalidation,
+although `RowIdAllocator` guarantees that INSERT row IDs are newly allocated.
+
+This is stronger evidence for evaluating the existing `insertNew` main-index
+contract on the current explicit indexed fixture than for another Trino block
+conversion micro-optimization. No runtime default or source code was changed
+by this profile; the stable connector/core hashes remained active afterward.
+
 ## Stage-accounted INSERT bottleneck and index-path sweep (2026-11-24)
 
 The Trino HTTP statement protocol was used to capture `outputStage` snapshots
