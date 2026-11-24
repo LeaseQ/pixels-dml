@@ -6864,17 +6864,19 @@ The two pre-existing targets `e2e68_matrix16a_20261125` (false) and
 client wall-time evidence was:
 
 ```text
-redistribute_writes=false  q=20261124_194800_00010_bf3zx  4.127 s  ~=242K rows/s
-redistribute_writes=true   q=20261124_194804_00011_bf3zx  4.977 s  ~=201K rows/s
-redistribute_writes=true   q=20261124_194809_00012_bf3zx  4.669 s  ~=214K rows/s
-redistribute_writes=false  q=20261124_194814_00013_bf3zx  3.853 s  ~=260K rows/s
+redistribute_writes=false  q=20261124_194800_00010_bf3zx  client 4.127 s; SQL 2.23 s  ~=448K SQL rows/s
+redistribute_writes=true   q=20261124_194804_00011_bf3zx  client 4.977 s; SQL 3.10 s  ~=323K SQL rows/s
+redistribute_writes=true   q=20261124_194809_00012_bf3zx  client 4.669 s; SQL 2.82 s  ~=355K SQL rows/s
+redistribute_writes=false  q=20261124_194814_00013_bf3zx  client 3.853 s; SQL 1.97 s  ~=508K SQL rows/s
 ```
 
 The two false arms averaged `3.990 s` and the two true arms `4.823 s` by
-client wall time, so the no-redistribution route remained about `17%` faster
-on this longer same-target extension. This is deliberately reported as
-client wall time; the retained Trino query list did not expose completed
-`elapsedTimeMillis` for these four entries.
+client wall time, but the CLI startup/connection overhead is material. The
+retained Trino query details report SQL elapsed averages of `2.10 s` for false
+and `2.96 s` for true, approximately `476K` versus `339K` SQL rows/s; the
+no-redistribution route is about `29%` lower in SQL elapsed on this extension.
+The client wall numbers remain useful for full invocation cost, but must not be
+used as the server-side throughput headline.
 
 Both targets passed the complete gate after the soak:
 
@@ -6894,11 +6896,11 @@ single-sequence memory guard, not a long-term leak proof.
 
 The result strengthens fixed 32 writers plus `redistribute_writes=false` as
 the current INSERT benchmark profile, but it does not establish the overall
-million-row/s target: this complete indexed/tagged end-to-end wall-time sample
-is approximately `201K--260K rows/s`. It also does not authorize changing a
-server or production default; the next meaningful check is repeated clean
-process runs or a controlled default-vs-session comparison with the same
-memory observation.
+million-row/s target: this complete indexed/tagged sample is approximately
+`323K--508K rows/s` by Trino SQL elapsed, or `201K--260K rows/s` by client wall
+time including CLI overhead. It also does not authorize changing a server or
+production default; the next meaningful check is repeated clean process runs
+or a controlled default-vs-session comparison with the same memory observation.
 
 Before this documentation push, the remote progress file was fetched and
-checked at `d3786a36878c309382b05e9bd1f450919b435a4f`.
+checked at `62d33b0fba8919469e961b3ea1251fca83bbbc90`.
