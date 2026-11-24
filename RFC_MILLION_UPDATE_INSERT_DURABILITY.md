@@ -5354,6 +5354,34 @@ runtime was restored to stable `pixels-core` SHA
 `baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12` and
 connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`.
 
+## Rejected direct VariableWidthBlock sink path (2026-11-24)
+
+The sink already obtains a `Slice` for each string value and then reads its
+backing byte array. A narrow opt-in candidate bypassed the intermediate Slice
+view for `VariableWidthBlock`, using `getRawSlice()` and
+`getRawSliceOffset()` directly while retaining the existing fallback for
+non-array-backed slices. It did not change the Exchange representation,
+dictionary behavior, or tag/index semantics. The candidate connector SHA was
+`cd41f593cc303f2bc9c092bae36955a66cd358186287315a78ea67a88b74cb33`.
+
+Two strict table-to-table 1M-row arms used destination ranges
+`290,000,000,001..290,001,000,000` and
+`291,000,000,001..291,001,000,000`; both passed the exact count, distinct-ID,
+contiguous-range, `U111`, and `111.0000` checks. QueryMonitor reported:
+
+```text
+candidate cold query 20261124_102112_00004_34iwe: 9.545 s
+candidate warm query 20261124_102126_00009_34iwe: 5.124 s
+```
+
+The warm result did not beat the accepted stable point around `4.22 s` and
+did not show a reproducible improvement over the preceding controls. The
+candidate was rejected without commit. The 8191 runtime was restored to the
+stable connector SHA
+`4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`, using
+the default args; the next readiness check should remain the gate before any
+further candidate deployment.
+
 ## Rejected sink-side dictionary Slice cache (2026-11-24)
 
 The previous source-block experiment showed that changing the block
