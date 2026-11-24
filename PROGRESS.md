@@ -209,3 +209,11 @@ E2E 门禁淘汰。候选进程内可读出 1M 行和精确标签聚合；恢复
 VariableWidthBlock/Exchange上游分配与完整双路径总体成本，不再重复窄RLE缓存变体。
 本轮提交前检查的远端 `PROGRESS.md` blob 为
 `7229cf51c6b298ad6cc036f1a110c488e24a3295`。
+
+随后对单值字典的`VarcharArrayBlock` backing复用候选完成了编译和6/6单测，
+但首次隔离E2E在零输出时以`PIXELS_DATA_TYPE_ERROR`失败；稳定connector恢复后，
+同源同参数控制臂成功写入1M行并完整读回（SQL 8.989秒）。候选源码已回退，未产生
+吞吐证据，也未提交代码。JFR的`DictionaryBlockEncoding -> VariableWidthBlock.copyPositions`
+调用栈仍指向Trino Exchange解码层，后续候选必须保持标准VariableWidthBlock类型契约，
+或先完成完整的Block encoding集成测试。本轮提交前检查的远端`PROGRESS.md` blob为
+`2bf2c8f6b745fbfc1e4d9adbdd5da1c0081068d3`。

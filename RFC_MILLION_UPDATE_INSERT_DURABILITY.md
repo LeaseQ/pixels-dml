@@ -7267,3 +7267,47 @@ code A/B.
 
 Before this documentation push, the remote `PROGRESS.md` was fetched at
 `7229cf51c6b298ad6cc036f1a110c488e24a3295`.
+
+## Rejected single-value dictionary `ValueBlock` reuse candidate (2026-11-25)
+
+The JFR call stack narrowed a possible allocation site to
+`DictionaryBlockEncoding.readBlock -> VariableWidthBlock.copyPositions`.
+An isolated connector candidate therefore used the existing
+`VarcharArrayBlock` only for one-entry dictionary columns and retained a shared
+backing byte array in its `copyPositions` result. General dictionaries and the
+stable `VariableWidthBlock` path were unchanged. The candidate connector SHA
+was `6d5a933cec3c558323bb44d61f0d7e17df792d52903118fcefe8b8d83e4dfa06`;
+stable control SHA was
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`.
+The candidate compiled successfully and `PixelsPageSinkTest` passed 6/6.
+
+The first isolated indexed E2E did not reach a measurable write. On fresh
+target `e2e68_varchar_dict_candidate_20261125`, using the normal materialized
+68-column source, fixed 16 writers, `task_concurrency=64`, and
+`redistribute_writes=false`, query
+`20261124_234830_00003_rz8h5` failed after 2.073 seconds with
+`PIXELS_DATA_TYPE_ERROR: failed to convert a Trino value to a Pixels value`.
+The target remained at zero rows, so its client wall time (3.950 seconds) is
+not throughput evidence. This is a type/representation contract failure in
+the custom block path, not a slow result.
+
+The candidate connector was removed immediately and the isolated runtime was
+restarted with stable connector SHA `62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`
+and stable core SHA
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`.
+A post-restore control into the independent target
+`e2e68_varchar_dict_control_20261125` succeeded:
+
+```text
+query=20261124_234958_00000_27wmw  SQL=8.989 s  ~=111.2K rows/s
+readback=1000000/1000000/10000000001..10001000000/tag_check=1000000
+```
+
+The candidate source was reverted locally and remotely; no connector code was
+committed or pushed. The JFR finding remains useful as a Trino-core/Exchange
+investigation target, but future connector candidates must preserve the
+standard `VariableWidthBlock` type contract or add a complete, tested block
+encoding integration first.
+
+Before this documentation push, the remote `PROGRESS.md` was fetched at
+`2bf2c8f6b745fbfc1e4d9adbdd5da1c0081068d3`.
