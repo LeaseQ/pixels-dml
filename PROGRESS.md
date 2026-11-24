@@ -189,3 +189,13 @@ connector与默认args。本次提交前检查的远端进度文件版本为
 
 [runs]: https://github.com/LeaseQ/pixels-dml/blob/e5946aa2/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283
+
+2026-11-25 reader-side single-entry dictionary fast path：主测例的 tag 列确实是单值字典，
+但三种批量填充变体（包括修复 writeIndex、保留逐行 readInt 的保守版）都被完整跨版本
+E2E 门禁淘汰。候选进程内可读出 1M 行和精确标签聚合；恢复 stable core 后读取候选产物
+在 `DecimalColumnReader.readSelected` 抛 `IndexOutOfBoundsException`，而 matched control
+可读，因此候选耗时一律不计入吞吐。8191 已恢复 stable core/connector，PID `2091020`，
+共享 8090 未触碰。结论：不能直接改 encoded-vector 的状态来绕过逐行字典 ID 写入；下一步
+应转向只读 instrumentation 或 Exchange/block copy 的上游路径，并继续保留完整产物读回门禁。
+本轮提交前检查的远端 `PROGRESS.md` blob 为
+`639fa112af9fbaa25b61e1294060f4697219f639`。

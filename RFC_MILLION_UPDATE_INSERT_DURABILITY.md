@@ -7170,3 +7170,40 @@ branch.
 
 Before this correction push, the remote `PROGRESS.md` was checked at
 `a79addbcb33997b15e95c4cd78aeb556aa915112`.
+
+## Rejected single-entry dictionary reader fast path (2026-11-25)
+
+The primary 68-column source has one distinct value in each sampled tag type
+and parameter column.  A reader candidate therefore detected a one-entry
+dictionary and tried to batch-fill encoded IDs with zero while preserving the
+`DictionaryColumnVector` representation.  Three variants were exercised on
+fresh isolated 8191 runs: bulk skip of non-cascade ID bytes, the same path with
+`writeIndex` repaired, and a conservative variant that still called
+`contentBuf.readInt()` for every row.  The candidate compiled successfully and
+the candidate process could read its own output, including the 1M-row count and
+the expected ID/tag aggregates.
+
+The full cross-version gate rejected all variants.  After restoring the stable
+core, reading candidate output failed with `GENERIC_INTERNAL_ERROR`; the query
+failure was an `IndexOutOfBoundsException` in
+`DecimalColumnReader.readSelected`, while the matched stable-control targets
+were readable.  The candidate output directories were also materially smaller
+than controls (about 50M versus 279M for the same 1M-row shape), which is a
+warning sign rather than a performance win.  The first invalid variant showed
+client wall times 7.964s/5.611s; the repaired variant showed 9.291s/5.090s;
+the conservative variant showed 9.586s.  These timings are explicitly
+excluded from throughput evidence because the output failed the stable-reader
+correctness gate.
+
+The candidate source was reverted.  The isolated runtime is stable again on
+8191 (PID `2091020`, `starting=false`) with connector SHA
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039` and
+pixels-core SHA
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`.
+Shared 8090 (PID `1799749`) was not touched.  This closes the current
+reader-side single-value dictionary branch; future work must preserve exact
+cross-reader file semantics and should prefer an instrumentation-first probe
+over another direct vector-state shortcut.
+
+Before this documentation push, the remote `PROGRESS.md` was fetched at
+`639fa112af9fbaa25b61e1294060f4697219f639`.
