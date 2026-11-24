@@ -4268,3 +4268,46 @@ historical sources carried different tag values, so the target now contains
 tag-preserving benchmark baseline. The accepted tag-preserving checkpoint
 state remains the 25.1M-row state immediately before this probe, and the clean
 multi-source target above is used for any follow-up split experiments.
+
+## Rejected RocksDB value-buffer hoist (2026-11-24)
+
+The JFR profile showed `RocksDBThreadResources.getValueBuffer()` on the grouped
+primary-write path. A low-risk-looking candidate therefore resolved the
+thread-local eight-byte value buffer once per `WriteBatch` instead of once per
+entry. The candidate module compiled successfully and was installed only as an
+isolated Retina overlay; the stable overlay remained available for rollback.
+
+The candidate was tested on the same indexed `e2e68_page_fresh_20261124`
+target after a successful stable warm append. Its first real 24-writer append
+failed during writer close:
+
+```text
+query=20261124_000503_00012_mb5ng
+elapsed=11.252 s
+failure=IndexException: Failed to put primary index entries, error code=10602
+path=RPCIndexService.putPrimaryIndexEntries -> grouped primary writer
+10602=INDEX_PUT_SINGLE_POINT_INDEX_FAIL
+```
+
+The failure is materially different from the earlier first-open timeout: the
+candidate reached the single-point primary-index write and returned the index
+service error. No candidate rows were committed. The stable runtime was
+restored, the same target recovered with exactly 2,000,000 rows, and a stable
+24-writer append then committed successfully in 7.456 s. The final target
+check was exact:
+
+```text
+count=3,000,000
+distinct(id)=3,000,000
+min(id)=10,000,000,001
+max(id)=310,001,000,000
+tag_1_type='U111'=3,000,000
+tag_1_para min=max=111.0000
+```
+
+The precise JNI ownership/position mechanism behind the error is not yet
+proven, so this experiment does not claim a narrower root cause. The
+engineering conclusion is firm: the value-buffer hoist is rejected and must
+not be merged. The original per-entry buffer preparation is restored in both
+the source tree and the running Retina; the failed overlay is retained only as
+forensic evidence.
