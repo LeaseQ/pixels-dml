@@ -5010,3 +5010,22 @@ This is a promising but single-pair result, so the probe is retained on the
 validation branch as **provisional**, not installed in the stable runtime.
 It needs at least another matched pair and a direct RLE/non-RLE fixture check
 before becoming a default optimization.
+
+## Correction: RLE bulk probe rejected after second pair (2026-11-24)
+
+The first RLE pair was promising but insufficient. A second candidate pair used
+fresh ranges 144B and 145B and completed in `11.193 s` and `7.153 s`. The
+stable runtime was then checked for empty ranges before running fresh controls
+148B and 149B; those controls completed in `7.089 s` and `6.477 s`. All four
+new ranges passed exact count, contiguous-ID, distinct-ID, tag, and decimal
+checks. The earlier 146B/147B control attempt was excluded because a long
+script had already inserted those ranges before its output window ended, and a
+retry made them duplicate ranges.
+
+Across the valid pairs, the RLE bulk candidate has no repeatable advantage and
+is slower on the second pair. The `Arrays.fill` change is therefore **rejected
+and reverted**. The JFR result remains useful: conversion and variable-width
+handling are real hotspots, but this particular optimization does not address
+the dominant end-to-end scheduling cost reliably. Future work should use an
+explicit RLE/non-RLE fixture split and per-column conversion counters before
+attempting another materialization rewrite.
