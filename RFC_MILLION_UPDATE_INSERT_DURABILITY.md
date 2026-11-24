@@ -7043,9 +7043,12 @@ The candidate lost the warm comparison and was reverted.  A later combined
 post-probe gate on the candidate target also failed with
 `IndexOutOfBoundsException` in `DecimalColumnReader.readSelected`; because
 the target contained this candidate's appends and the following RLE candidate
-appends, the exact faulty arm cannot be isolated retrospectively.  This is a
-correctness stop signal: neither candidate output is eligible for promotion,
-and the candidate source was removed locally.
+appends, the exact faulty arm was not isolated on a fresh target.  The failing
+files were the earlier `...20261125033610...` and `...20261125033623...`
+files, created before the RLE deployment, so the evidence points more strongly
+at this first candidate; the conservative conclusion remains that neither
+candidate output is eligible for promotion.  This is a correctness stop
+signal, and the candidate source was removed locally.
 
 ## Rejected constant-string RLE source block (2026-11-25)
 
@@ -7080,5 +7083,6 @@ the default args with `starting=false` on 8191 (PID `2022467`).  Shared 8090
 (PID `1799749`) was not restarted or changed.  Both source candidates are
 reverted locally and neither is a default or production recommendation.
 
-Before this documentation push, the remote `PROGRESS.md` was fetched and
-checked at `a23b7582be5f43baa8ff20dea4706f71514e2c45`.
+Before the previous documentation push, the remote `PROGRESS.md` was fetched
+and checked at `a23b7582be5f43baa8ff20dea4706f71514e2c45`.  Before this
+correction push, the remote commit was `7c41e1c5`.
