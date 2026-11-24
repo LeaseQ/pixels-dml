@@ -3956,6 +3956,39 @@ disabled.
 The correctness check after the probe remained exact at 31M rows, with all IDs
 unique and all `U111`/`111.0000` tag values preserved.
 
+## Long-decimal direct-read probe: rejected (2026-11-24)
+
+Trino JFR on the 8191 validation server showed
+`PixelsPageSink.appendValue`, `VariableWidthBlock.copyPositions`, and
+`LongDecimalType.getObject` among the hottest INSERT-side methods. The test
+table contains three `DECIMAL(38,2)` columns, so a connector candidate replaced
+the per-position `Int128` wrapper read in `appendDecimalValues` with direct
+`Int128ArrayBlock` high/low reads. The candidate compiled successfully and was
+installed only on the validation runtime; it was not committed or pushed.
+
+The first implementation retained the block logical-position lookup inside
+the row loop and produced a 7.05 s warm arm. A second implementation added a
+plain-`Int128ArrayBlock` direct-index branch and retained mapping only for
+wrapped blocks, but still produced a 7.32 s warm arm. The stable connector
+jar, restored afterward, produced a 4.46 s warm arm at the same 24--32 writer
+session settings. The candidate therefore made the end-to-end INSERT slower;
+the allocation hotspot is not independently worth optimizing in this form.
+
+Both candidate arms wrote valid data. After restoring the original connector
+jar, the final check was exact at 38M rows:
+
+```text
+count=38,000,000
+distinct(id)=38,000,000
+min(id)=10,000,000,001
+max(id)=4,010,001,000,000
+tag_1_type='U111'=38,000,000
+tag_1_para min=max=111.0000
+```
+
+The source worktree is clean and the runtime is back on the original stable
+connector jar.
+
 The normal GC cycle then published `recovery_cds20_670080.bin`. Retina was
 stopped and restarted from that body with the 64 GiB configuration, and the
 normal recovery-epoch handshake completed (`RECOVERING -> READY`). The
