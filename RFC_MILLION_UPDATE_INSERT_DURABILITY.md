@@ -6158,3 +6158,29 @@ the exact gate but took 5.679 s (about 176.1K rows/s), so both 16 and 64 are
 rejected against the matched 32-writer result. The current writer-count
 conclusion is therefore a measured sweet spot at 32, not a general rule that
 more parallelism is beneficial.
+
+## Rejected grouped RPC cap-32 recheck (2026-11-24)
+
+Because the 32-writer arm still showed a roughly two-second finishing tail, the
+grouped primary flush semaphore was raised from the source default/candidate
+24 to 32 using the existing `flush-cap32-trino.args` profile. The fresh Trino
+process was launched with `PIXELS_HOME` explicitly set to the isolated
+validation home; without that environment variable, startup waits in
+`PixelsSplitManager` on the wrong etcd port. That startup issue was corrected
+before measuring and is not a performance result.
+
+With 32 fixed writers and the same grouped-primary/flush-4 route, the first
+post-restart arm took 10.782 s and the warm repeat took 6.152 s. Both passed
+the complete exact gate:
+
+```text
+count=1000000 distinct_id=1000000
+min=1010000000001 max=1010001000000 tag_check=1000000
+count=1000000 distinct_id=1000000
+min=1011000000001 max=1011001000000 tag_check=1000000
+```
+
+The warm cap-32 result is materially slower than the matched cap-24 results
+near 4.02 s, so increasing grouped RPC concurrency is rejected. The isolated
+Trino process was restored to `default-cap24-trino.args`; shared port `8090`
+was not changed.
