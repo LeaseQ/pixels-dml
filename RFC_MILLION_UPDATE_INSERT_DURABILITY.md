@@ -5080,3 +5080,30 @@ validation branch, but the sample is still small and absolute time remains
 variable. The 8191 runtime was restored to the stable connector SHA after the
 experiment; a later soak should verify the candidate under repeated INSERT and
 UPDATE traffic before making it the default deployment artifact.
+
+### Follow-up soak and UPDATE regression (2026-11-24)
+
+The candidate was deployed again on the actual 8191 E2E runtime for three
+consecutive fresh INSERT arms. New target ranges 167B, 168B, and 169B each
+passed the exact 1M-row count, contiguous min/max, distinct-ID, tag, and
+decimal checks:
+
+```text
+candidate 167B: 8.071 s ~= 123.9K rows/s
+candidate 168B: 6.652 s ~= 150.3K rows/s
+candidate 169B: 7.714 s ~= 129.6K rows/s
+soak mean:      7.479 s ~= 133.7K effective rows/s
+```
+
+The same candidate instance then ran a dense 1M-row UPDATE over the 167B
+range, changing `tag_1_type` to `R` and `tag_1_para` to `9.0000`. The command
+completed in `3.901 s`, returned a 1,000,000-row range count, and did not
+produce an index/service failure. This is a regression smoke check rather than
+a new UPDATE throughput baseline because the tested code only changes INSERT
+primary-key ByteString ownership.
+
+After the soak the runtime was restored to stable connector SHA
+`4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4` and a
+`SELECT 1` readiness check passed. The candidate remains pushed on the
+validation branch; production/default rollout still requires a longer soak and
+an explicit artifact promotion decision.
