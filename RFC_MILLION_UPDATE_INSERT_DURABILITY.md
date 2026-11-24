@@ -4542,3 +4542,48 @@ max(id)=2,710,001,000,000
 tag_1_type='U111'=27,000,000
 tag_1_para min=max=111.0000
 ```
+
+## Compact grouped-primary wire format: rejected (2026-11-24)
+
+The JFR profile showed nested `PrimaryIndexEntry` protobuf parsing and
+construction on the grouped INSERT route. An opt-in protocol candidate added a
+`PutCompactPrimaryIndexEntries` RPC whose batch carried table id, index id,
+timestamp, and file id once; each row carried only the primary-key bytes,
+rowId, and row-group coordinates. The daemon reconstructed the existing
+`PrimaryIndexEntry` objects before entering the unchanged grouped RocksDB and
+main-index code, so WAL, tag-preserving row locations, abort bookkeeping, and
+recovery semantics were unchanged. The default RPC remained untouched.
+
+The candidate was compiled and deployed only to the isolated validation
+runtime. The first run exposed a deployment omission (`pixels-common` in the
+Trino plugin directory still contained the old generated protobuf classes) and
+failed before index flush; that run committed no rows and was excluded. After
+installing the matching common jar, the candidate completed two disjoint 1M-row
+INSERTs successfully. The comparable timings were:
+
+```text
+regular grouped RPC, query 20261124_021925_00022_iwrt8: 6.063 s (~165K rows/s)
+compact grouped RPC, query 20261124_022151_00000_yx5fg: 10.414 s (~96K rows/s; post-restart)
+compact grouped RPC, warm query 20261124_022339_00003_yx5fg: 5.864 s (~170K rows/s)
+regular grouped RPC, warm query 20261124_022515_00001_nve3a: 4.623 s (~216K rows/s)
+```
+
+All successful arms used `task_concurrency=64`, 24--32 writers, disabled writer
+scaling, the same 68-column tag-preserving source, and disjoint primary-key
+ranges. The final target check was exact at 44M rows:
+
+```text
+count=44,000,000
+distinct(id)=44,000,000
+min(id)=10,000,000,001
+max(id)=10,010,000,100,000
+tag_1_para min=max=111.0000
+tag_1_type='U111'=44,000,000
+```
+
+The compact wire shape is therefore rejected: reconstructing the nested
+objects server-side and adding a second RPC path cost more than it saved in
+this workload. The source, generated protocol, daemon fat jar, connector jar,
+and runtime switch were restored to the pre-probe stable versions. The next
+optimization should target the service-side grouped RocksDB scheduling or a
+representation that avoids reconstruction entirely, not this wire-only form.
