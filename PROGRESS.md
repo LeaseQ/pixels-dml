@@ -12,7 +12,15 @@
 client wall time均值约3.990秒、开启约4.823秒，且内存采样未见增长异常。因此当前
 INSERT候选仍是固定32 writers加关闭redistribution；当前观测到的Trino SQL elapsed
 吞吐约350K--508K行/秒，最近三次false样本约350K--400K行/秒，客户端wall（含CLI
-开销）约201K--260K行/秒，尚未达到百万行/秒，也尚未改变默认配置。
+开销）约201K--260K行/秒，尚未达到百万行/秒，也尚未改变默认配置。正确指向8191
+的JFR已把剩余成本定位到UTF-8解码、VariableWidthBlock复制、字符串读写与高对象分配；
+重复字符串统计批处理和常量字符串RLE两个候选均未获E2E收益，且候选混合目标的后续
+完整读回出现DecimalColumnReader越界，因此均撤回，不得推广为默认优化。
+
+本轮现场状态（2026-11-25）：8191已恢复stable connector/core与默认args，
+`starting=false`；共享8090未重启。JFR有效样本、候选query ID、拒绝原因与最终jar哈希
+见RFC末尾；本轮推送前远端`PROGRESS.md`版本为
+`a23b7582be5f43baa8ff20dea4706f71514e2c45`。
 
 ## 1. 已确认的目标与边界
 

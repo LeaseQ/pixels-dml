@@ -6980,3 +6980,105 @@ by this A/B.
 
 Before this documentation push, the remote progress file was fetched and
 checked at `5cf8f3a78d4489984382721824ea8b0c886eb518`.
+
+## Correctly targeted JFR bottleneck probe (2026-11-25)
+
+The earlier JFR attempt is invalid as documented above.  A second probe first
+verified that PID `1987850` belonged to the isolated 8191 process and that
+Retina PID `1925521` was the expected validation daemon; neither recording was
+attached to shared 8090.  The recording overlapped eight complete one-million-
+row appends on the fixed benchmark profile.  The target gates were exact after
+the probe: the false-route target had 24M rows/24M distinct IDs and the
+true-route target had 18M rows/18M distinct IDs, with the expected ranges and
+`U111`/`111.0000` tags.
+
+The eight SQL elapsed samples were:
+
+```text
+redistribute_writes=false  2.12, 1.82, 2.29, 2.44 s
+redistribute_writes=true   4.14, 6.28, 3.82, 2.71 s
+```
+
+The valid Trino recording lasted 87 seconds and contained 4,832
+`jdk.ExecutionSample` events.  Its strongest application samples were
+`UTF_8$Decoder.decodeLoop`, `VariableWidthBlock.copyPositions/getSlice`,
+`StringColumnReader.readSelected`, `StringColumnWriter.writeCurPartWithDict`,
+`StringStatsRecorder.updateString`, `HashTableDictionary`, and
+`PixelsPageSink.appendDecimalValues`.  Allocation pressure was dominated by
+`byte[]` (46.58%), `long[]` (9.52%), `int[]` (7.94%), `HeapCharBuffer` (7.44%),
+and `HashTableDictionary$KeyBuffer` (4.30%); `Arrays.copyOfRange` alone was
+16.42% of sampled allocation sites.  The JVM recorded 31 GCs with 952 ms of
+total pause time, but 36.9 seconds of GC CPU time, so allocation pressure and
+string/block materialization are more actionable than simply increasing
+worker concurrency.  Machine CPU averaged only 6.88% during the recording.
+
+This is the first usable component-level evidence for the remaining INSERT
+gap.  It points to the read/block/writer representation boundary and repeated
+string-statistics decoding, not to a single RocksDB write call.
+
+## Rejected repeated-string statistics batching (2026-11-25)
+
+The source fixture has one distinct value in each of its 30 string tag columns.
+An opt-in `pixels.writer.batch-repeated-string-values=true` candidate batched
+consecutive equal byte values in `StringColumnWriter`, calling the existing
+statistics API once with a repetition count.  The candidate pixels-core jar
+SHA was `419ad97b07ee7470d727620953215a2d80e0f910b347d9288ec65a86e919d801`;
+the source change was not committed after the test.
+
+After a clean candidate restart, two false-route appends took:
+
+```text
+candidate  q=20261124_203505_00000_7jxhv  6.73 s
+candidate  q=20261124_203514_00001_7jxhv  3.37 s
+```
+
+The matched stable restart/control on the other indexed target took:
+
+```text
+stable     q=20261124_203620_00000_276f3  6.91 s
+stable     q=20261124_203629_00001_276f3  2.29 s
+```
+
+The candidate lost the warm comparison and was reverted.  A later combined
+post-probe gate on the candidate target also failed with
+`IndexOutOfBoundsException` in `DecimalColumnReader.readSelected`; because
+the target contained this candidate's appends and the following RLE candidate
+appends, the exact faulty arm cannot be isolated retrospectively.  This is a
+correctness stop signal: neither candidate output is eligible for promotion,
+and the candidate source was removed locally.
+
+## Rejected constant-string RLE source block (2026-11-25)
+
+The next opt-in connector candidate detected a no-null dictionary column whose
+whole batch used one dictionary ID and emitted a Trino `RunLengthEncodedBlock`.
+The property was `pixels.trino.reader.rle-constant-block=true`; the candidate
+connector SHA was
+`ac12adb05ddc8ecaa2314b536e3907ff8bde73c83d476b5510996fa79ced3555`.
+The matched stable connector remained
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`.
+
+Two candidate appends and two stable controls used fixed 32 writers,
+`task_concurrency=64`, and `redistribute_writes=false`:
+
+```text
+RLE candidate  q=20261124_204025_00000_qe3aa  6.73 s
+RLE candidate  q=20261124_204033_00001_qe3aa  2.65 s
+stable         q=20261124_204137_00000_y5bt8  6.90 s
+stable         q=20261124_204146_00001_y5bt8  2.21 s
+```
+
+The warm candidate was about 20% slower than the matched warm control, so the
+candidate was reverted.  The control target reached 22M rows/22M distinct IDs
+with exact range and tag checks.  The candidate target was not accepted as a
+correctness baseline after the mixed-candidate gate failure described above.
+
+The isolated runtime is now restored to stable connector SHA
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`, stable
+pixels-core SHA
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`, and
+the default args with `starting=false` on 8191 (PID `2022467`).  Shared 8090
+(PID `1799749`) was not restarted or changed.  Both source candidates are
+reverted locally and neither is a default or production recommendation.
+
+Before this documentation push, the remote `PROGRESS.md` was fetched and
+checked at `a23b7582be5f43baa8ff20dea4706f71514e2c45`.
