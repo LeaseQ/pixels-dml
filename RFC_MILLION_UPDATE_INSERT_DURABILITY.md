@@ -4587,3 +4587,63 @@ this workload. The source, generated protocol, daemon fat jar, connector jar,
 and runtime switch were restored to the pre-probe stable versions. The next
 optimization should target the service-side grouped RocksDB scheduling or a
 representation that avoids reconstruction entirely, not this wire-only form.
+
+## Fresh coordinator recovery and current paired throughput (2026-11-24)
+
+The first post-restart one-row INSERT probe was invalid as a performance run.
+The Trino task had read its one source row but waited in
+`PixelsInsertIndexWriter.finish()` for `putPrimaryIndexEntries`. A thread dump
+showed the Retina request blocked in `RocksDBFactory.preCreateColumnFamilies()`
+while waiting for the coordinator's metadata `getTableById` RPC. The active
+coordinator log also contained repeated `NoClassDefFoundError` entries for
+Guava and shaded Netty classes. This was a runtime classpath/process-lifecycle
+failure after the isolated jar replacement, not an INSERT algorithm result.
+
+The stuck query was canceled without being counted. The fresh coordinator and
+worker were restarted from the current complete daemon fat jar, while Retina
+and its data/checkpoint directories were left in place. The restarted
+coordinator reached the existing Retina READY state and emitted no class-load
+errors. A one-row INSERT then finished in 1.03 s, and a primary-key readback
+returned exactly one row.
+
+The corrected wide-table benchmark used the historical session controls:
+`task_concurrency=64`, `task_min_writer_count=24`,
+`task_max_writer_count=32`, and `task_scale_writers_enabled=false`, together
+with grouped primary writes and connector flush parallelism 4. Disjoint
+one-million-row ranges were appended to the indexed
+`validationfresh.e2e68_page_fresh_20261124` table:
+
+```text
+session-corrected cold arm: 4.22 s ~= 237K rows/s
+session-corrected warm arm: 4.02 s ~= 249K rows/s
+```
+
+Both INSERTs returned `1,000,000 rows`; the warm connector metrics showed five
+grouped primary RPCs, with primary-index put wall time still about 4--5 s in
+aggregate. The omitted-session control was much slower (11.63 s cold and
+8.98 s warm), so those numbers are retained only as a harness warning and are
+not compared with the accepted session-corrected results.
+
+The same runtime then executed tag-aware UPDATEs on confirmed contiguous
+one-million-row ranges created by the preceding INSERTs. The first arm took
+1.96 s (`~510K rows/s`), and the disjoint warm arm took 1.69 s
+(`~592K rows/s`). The warm connector metric was:
+
+```text
+rows=1000000
+primary_key_resolve_ms=892.589
+request_build_ms=238.885
+rpc_ms=338.929
+total_ms=1515.004
+rpc_count=1
+```
+
+The tag predicate read immediately after UPDATE returned zero physical rows,
+which is expected under the existing tag-before-COMPACT contract; the UPDATE
+results and shared tag-index RPC completed successfully, while physical tag
+materialization remains a separate COMPACT step. The current headline remains
+therefore approximately `249K rows/s` for indexed INSERT and `592K rows/s`
+for tag-aware UPDATE on this fixture. INSERT is still below the several-
+hundred-thousand target band, and the next optimization target remains the
+service-side grouped RocksDB write schedule rather than Trino transaction or
+metadata commit.
