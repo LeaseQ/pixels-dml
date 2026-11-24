@@ -5597,3 +5597,79 @@ promoting a new headline rate. The active 8191 runtime was restored to stable
 connector SHA
 `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4` after the
 run.
+
+## Corrected connector-only full E2E and restart durability gate (2026-11-24)
+
+The previous indexed A/B exposed one more artifact-isolation issue. A Maven
+build produces both the connector jar and a `pixels-core` jar, but the running
+Trino validation environment must keep its known-good core. An earlier
+discarded COMPACT trial mixed the candidate connector with a different target
+`pixels-core`; the physical rewrite then failed in
+`DecimalColumnReader.read` with `IndexOutOfBoundsException`. The stable plugin
+core contains the 6,896-byte `DecimalColumnReader` class, while the accidental
+target core contained an 8,093-byte variant. That trial is invalid performance
+and correctness evidence. A separate `LIKE`-based target also failed at the
+old runtime CLI's path-metadata entry point and is not accepted as E2E
+evidence.
+
+The accepted run used a fresh explicit 68-column target with
+`storage='file'`, an isolated root, `pk='id'`, and `pk_scheme='rocksdb'`:
+
+```text
+table: e2e68_codex_idx_ab3_20261124
+INSERT IDs: 770000000001..770001000000 (1,000,000 rows)
+connector under test: 9da741bc00acd86598c4d9e018747e5681fd32fcfc820b1630364854f387593c
+stable pixels-core retained in plugin: baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12
+```
+
+The INSERT passed exact count, distinct-ID, contiguous-range, and tag-value
+checks. QueryMonitor recorded
+`20261124_123026_00017_gq9b5` at 6.363 s (about 157.2K rows/s), with CLI wall
+time about 8.453 s. The UPDATE then changed all 1,000,000 rows:
+
+```sql
+SET tag_1_type = 'E2E_R3', tag_1_para = DECIMAL '11.0000'
+WHERE id BETWEEN 770000000001 AND 770001000000
+```
+
+The exact-eligible indexed route was selected, the update metric reported one
+RPC for 1,000,000 rows, and the command returned 1,000,000 updated rows.
+Before COMPACT, the expected physical-read behavior was observed: the old
+`U111` value was still visible in the compacted storage layer while the
+logical update was represented by the update/index path.
+
+COMPACT was run with the rebuilt `pixels-cli` target jar (the installed runtime
+CLI was older and incorrectly treated the table root as a missing metadata
+directory). It completed the physical rewrite and produced:
+
+```text
+.../e2e68_codex_idx_ab3_20261124/v-0-compact/
+  cds20_20261124203456_0_-1_compact.pxl  (291,341,683 bytes)
+tag_entries=2, tagged_rows=1000000, resolve_rows=1000000
+resolve_rpc_count=62, resolve_ms=13555.771764
+```
+
+The final post-COMPACT query returned 1,000,000 rows, 1,000,000 distinct IDs,
+the exact ID range, and 1,000,000 rows for both updated tag predicates.
+Finally, Retina was stopped and restarted. Recovery completed from
+`recovery_cds20_730113.bin` with `baselineFiles=7363`, after which the same
+query still returned:
+
+```text
+total_rows=1000000, total_distinct=1000000
+min_id=770000000001, max_id=770001000000
+updated_tag_rows=1000000, updated_para_rows=1000000
+predicate_rows=1000000, predicate_min=770000000001,
+predicate_max=770001000000
+```
+
+The runtime was then returned to the stable connector
+`4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`, with the
+same stable `pixels-core` SHA above, and Trino was restarted and checked with
+`SELECT 1`. The final readback remained identical. This establishes the first
+valid connector-only INSERT -> UPDATE -> COMPACT -> Retina restart -> Trino
+restart durability chain for the 68-column indexed fixture. It does **not**
+yet establish the target throughput: the measured INSERT rate is still in the
+~150K rows/s range, and the earlier valid UPDATE observation remains about
+382K rows/s. Further optimization must therefore preserve this artifact
+isolation and durability gate.
