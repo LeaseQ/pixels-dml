@@ -6624,11 +6624,49 @@ Every successful target returned `count=1,000,000`,
 `finishWall` is the sum of per-driver operator intervals, so it is not added
 to SQL elapsed; it is used here to explain the lifecycle tail.
 
-The sweep narrows the next candidate to 16 writers: it has two consistent
+The sweep makes 16 writers a useful next candidate: it has two consistent
 328--373K rows/s samples and 4.33--4.68s aggregate finishWall, while 8 writers
 has a 6.93s cold-tail outlier and 24/32 writers retain larger finish tails.
 This is still an exploratory operating-point result, not a production-default
 change: the targets were independent and the warm/cache state was not fully
-randomized.  The next acceptance gate is a crossed cold/warm 16-versus-24
-matrix with client wall time and final queryable/tag state recorded for every
-arm.
+randomized.  The crossed follow-up below is required before selecting a
+default.
+
+## Crossed cold-start and warm-pair writer check (2026-11-25)
+
+The next check used four newly created empty targets.  Trino was restarted
+between the two orderings with the same isolated `PIXELS_HOME`, working
+directory, default grouped route, and endpoint.  The first ordering was
+16-writer then 24-writer; the second ordering, after another restart, was
+24-writer then 16-writer.  Client wall time was measured around the CLI
+process, while the Trino elapsed value came from the query record.
+
+```text
+restart/order   writers  query                         client wall  SQL elapsed
+A / first       16       20261124_185821_00000_mxk89     9.25 s       7.30 s
+A / second      24       20261124_185830_00001_mxk89     5.24 s       3.40 s
+B / first       24       20261124_185928_00000_j5q9i     9.00 s       7.00 s
+B / second      16       20261124_185937_00001_j5q9i     5.02 s       3.23 s
+```
+
+All four targets passed the exact 1,000,000-row, 1,000,000-distinct-ID,
+range, and `U111/111.0000` tag gate.  The first arm after each restart was
+about 7 seconds regardless of writer count; the second arm was about
+3.2--3.4 seconds regardless of writer count.  Thus the ordering/warm-up effect
+is larger than the observed 16-versus-24 difference.
+
+Because the restart discarded the prior process's query-detail history, a
+non-restarted warm pair was also captured immediately after each query:
+
+```text
+writers  query                         client wall  SQL elapsed  finishWall(sum)
+24       20261124_190054_00005_j5q9i     4.93 s       3.16 s         6.20 s
+16       20261124_190059_00006_j5q9i     5.70 s       3.89 s         4.82 s
+```
+
+Both warm-pair targets again passed the exact correctness gate.  The lower
+16-writer finishWall is real at the operator level, but it did not produce a
+stable end-to-end win in this crossed experiment.  The corrected conclusion is
+that writer count affects finish-lifecycle accumulation, while Trino/source
+warm-up currently dominates SQL wall time.  No writer-count default change is
+accepted; further work must control or report warm-up state explicitly.
