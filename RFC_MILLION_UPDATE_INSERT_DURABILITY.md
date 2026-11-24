@@ -6933,16 +6933,50 @@ The post-probe correctness gates were also extended: the false target reached
 `10,000,000` rows and `10,000,000` distinct IDs. Both retained the exact ID
 range and full `tag_1_type='U111'`/`tag_1_para=111.0000` counts.
 
-An exploratory CPU probe was run during the false route. Java Flight Recorder
-was attached to the current Trino coordinator and Retina processes for the
-sequence, and the recordings were stopped cleanly. The Trino recording had
-only four `jdk.ExecutionSample` events and the Retina recording had two, so it
-does not identify a trustworthy Java hotspot. `perf` is not installed on this
-host. The recordings therefore change no optimization decision and are not
-used as evidence for a code change. This confirms that the next bottleneck
-investigation needs either a longer sampling window or component-level
-instrumentation; the existing Trino operator metrics remain the stronger
-evidence for the scan/projection, writer, and exchange costs.
+An exploratory CPU probe was attempted during the false route. A PID-selection
+mistake attached Java Flight Recorder to the shared 8090 Trino process rather
+than the isolated 8191 coordinator. No query, restart, or data mutation was
+sent to 8090, but the recordings are invalid for this experiment and are not
+used as evidence. `perf` is not installed on this host. The next bottleneck
+investigation therefore needs either a correctly targeted longer sampling
+window or component-level instrumentation; the existing Trino operator metrics
+remain the stronger evidence for the scan/projection, writer, and exchange
+costs.
 
 Before this documentation push, the remote progress file was fetched and
 checked at `c3c6e1a25c1511ed363f1e8f2d751315f6e9467d`.
+
+## Rejected encoded-column-vector opt-out (2026-11-25)
+
+The reader's encoded-column-vector setting was tested as an isolated connector
+candidate. The temporary candidate made
+`PixelsReaderOption.enableEncodedColumnVector(false)` opt-in through the JVM
+property `pixels.trino.reader.encoded-column-vector`; the default remained
+`true`. The candidate connector built successfully with SHA
+`1258c3ae307a7c2a26c7a8d8ff4d83d08b9ca301049f9bb076ad40c5e459caf1`, while
+the stable connector was SHA
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`.
+
+Both arms used the same isolated 8191 endpoint, 68-column source, grouped
+primary route, `redistribute_writes=false`, `task_concurrency=64`, fixed 32
+writers, and writer scaling disabled. Each pair was run after a clean Trino
+restart, with one cold and one warm append against an existing indexed target:
+
+```text
+encoded=false candidate  q=20261124_201400_00000_4gxhi  cold SQL=6.92 s  ~=145K rows/s
+encoded=false candidate  q=20261124_201409_00001_4gxhi  warm SQL=2.56 s  ~=391K rows/s
+encoded=true  stable     q=20261124_201524_00000_57axd  cold SQL=6.22 s  ~=161K rows/s
+encoded=true  stable     q=20261124_201532_00001_57axd  warm SQL=2.32 s  ~=431K rows/s
+```
+
+The opt-out was slower in both corresponding positions, including about `10%`
+slower in the warm arm. The candidate was therefore rejected and its local
+source change was reverted without a pixels-trino-dml commit. The final target
+gates after all append probes were exact at 16M rows/16M distinct IDs and 14M
+rows/14M distinct IDs, with the expected ID ranges and full `U111`/`111.0000`
+tag counts. The isolated 8191 process was left on the stable connector and
+default args with `starting=false`; shared 8090 was not restarted or queried
+by this A/B.
+
+Before this documentation push, the remote progress file was fetched and
+checked at `5cf8f3a78d4489984382721824ea8b0c886eb518`.

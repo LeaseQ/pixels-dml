@@ -43,7 +43,7 @@ INSERT候选仍是固定32 writers加关闭redistribution；当前观测到的Tr
 | 工作项 | 当前状态 | 已有证据 | 尚缺证据 |
 | --- | --- | --- | --- |
 | 运行包一致性 | 记录有修正与读回 | 混用Connector/common/core后出现方法缺失及可见性错误；整体重建部署后新表读回通过 | 后续每臂继续固定全套jar与实际端口；不能沿用混包运行的性能结论 |
-| INSERT | grouped对照完成；32-writer exchange候选有clean crossover和更长soak证据 | 带主键索引、grouped写入及完整标签门禁已完成；追加到12M/10M行后，false最新三臂约2.50--2.86s、true近邻对照2.94s；Retina单序列内存采样稳定 | 更长采样或组件级instrumentation；默认化前仍需受控对照；8-writer臂因Retina OOM排除 |
+| INSERT | grouped对照完成；32-writer exchange候选有clean crossover和更长soak证据 | 带主键索引、grouped写入及完整标签门禁已完成；追加到12M/10M行后，false最新三臂约2.50--2.86s、true近邻对照2.94s；encoded-column-vector opt-out严格A/B反而慢约10%，已拒绝 | 更长采样或组件级instrumentation；默认化前仍需受控对照；8-writer臂因Retina OOM排除 |
 | UPDATE | 代码默认值已改；记录有重复实测 | 主键解析由串行约8.27～10秒降至并行16下约1.39～1.45秒；新默认SQL elapsed 4.215秒，约23.7万行/秒 | 对应正常运行物化、最终标签与完整周期配对；并发负载表现尚不能推断 |
 | MainIndexBuffer反向映射 | 记录有测试与对照；INSERT优化未采纳 | 惰性版本记录3项测试通过；同32 fragments配对为稳定版5.759秒、候选6.446秒，未获收益，运行包已恢复稳定版本 | UPDATE/COMPACT收益及内存代价仍待证明；分支保留代码不等于默认部署采用 |
 | 原Retina对照 | 已识别语义缺口 | 现有测试“更新”为删除旧键并插入新键 | 保留主键、相同标签赋值及完成边界的对照适配；INSERT也需对齐输入准备及发布成本 |
@@ -160,6 +160,12 @@ rows/s），client wall均值为3.990/4.823秒，四臂均成功，
 tag_1门禁。JFR仅得到4个Trino、2个Retina execution sample，主机没有perf命令，
 因此没有从这次CPU探针推出新的代码热点。本次提交前检查的远端进度文件版本为
 `c3c6e1a25c1511ed363f1e8f2d751315f6e9467d`。
+
+随后对`enableEncodedColumnVector`做了严格A/B：false候选冷/热SQL elapsed为6.92/2.56秒，
+stable true对照为6.22/2.32秒；候选约慢10%，已撤回且没有pixels-trino-dml代码提交。
+两张目标最终通过1600万/1400万行、distinct-ID、范围和完整tag门禁；8191已恢复stable
+connector与默认args。本次提交前检查的远端进度文件版本为
+`5cf8f3a78d4489984382721824ea8b0c886eb518`。
 
 [runs]: https://github.com/LeaseQ/pixels-dml/blob/e5946aa2/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283
