@@ -5806,3 +5806,50 @@ stable connector and stable pixels-core hashes. This confirms that a generic
 SPI block-type check alone is not a useful optimization lever for the current
 fixture; a future conversion optimization needs a measured per-column layout
 or allocation advantage, not only a lower-level accessor.
+
+## Rejected `insertNew` E2E attempt: recovery/visibility gate failed (2026-11-24)
+
+The existing `insertNew` path was then tested as an explicit service-side A/B
+on the current indexed 68-column fixture. The candidate was enabled only in
+the isolated daemon JVMs with:
+
+```text
+-Dpixels.index.grouped.primary.write.new-main-index=true
+-Dpixels.index.grouped.primary.write.threads=32
+```
+
+and the Trino JVM used the matching grouped connector route:
+
+```text
+pixels.insert.index.grouped.primary.write=true
+pixels.insert.index.flush.parallelism=4
+pixels.insert.index.grouped.primary.write.max.entries=200000
+```
+
+The candidate property was verified with `jcmd VM.system_properties`; the
+stable connector and stable pixels-core hashes were otherwise unchanged. The
+test used a materialized source table, an explicit projection of all 68
+columns, the standard 24-writer session, and a disjoint destination range
+`880000000001..880001000000`. Trino query
+`20261124_141208_00006_g7mjh` returned `1,000,000 rows`, but took 41.84 s
+and physically wrote 291,407,273 B. This is not a usable throughput result.
+
+The mandatory readback failed with:
+
+```text
+PIXELS_BAD_DATA
+RGVisibility not found for fileId=155318, rgId=0
+file=.../e2e68_codex_idx_ab3_20261124/v-0-ordered/...
+```
+
+Therefore the arm failed the durability/visibility gate and provides no
+evidence for or against the `insertNew` algorithm. It is rejected as an
+invalid performance run rather than reported as a 23.9K rows/s result. The
+runtime investigation also exposed two runbook requirements: hand-launched
+daemon/Trino/Retina processes must preserve `PIXELS_HOME` (otherwise the
+connector falls back to the wrong etcd port), and a checkpoint-backed Retina
+restart must complete the normal `get status -> markReady(recoveryEpoch)`
+handshake before any benchmark. The candidate daemon and grouped Trino
+settings were removed afterward; coordinator/worker now run without
+`new-main-index`, Trino has no experimental insert properties, and
+`/v1/info` reports `starting=false`.
