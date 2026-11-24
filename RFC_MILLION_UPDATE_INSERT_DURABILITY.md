@@ -6308,3 +6308,24 @@ remain archived because the first-update fallback preserves the desired
 UPDATE/COMPACT invariant, but it must not be enabled as a general INSERT
 optimization.  This correction also explains why the old one-fragment control
 numbers must not be used when estimating the indexed INSERT ceiling.
+
+## Strict grouped-RPC concurrency recheck (2026-11-25)
+
+To isolate the grouped-primary semaphore from writer-count effects, the
+stable daemon was held constant and the strict 32-writer session above was
+repeated on a fresh target.  Only the isolated Trino process property
+`pixels.insert.index.flush.max-concurrency` changed from 24 to 32.  Both runs
+created 32 fragments and passed the exact gate:
+
+```text
+cap24 stable: query 20261124_170605_00061_663j4, 5.759 s ~= 173.6K rows/s
+cap32 cold:   query 20261124_171402_00002_x73rc, 10.307 s, exact gate passed
+cap32 warm:   query 20261124_171520_00006_x73rc, 7.319 s ~= 136.6K rows/s
+```
+
+The warm cap32 result is slower than cap24, so the semaphore increase is
+rejected.  The fresh Trino endpoint was restored to `default-cap24-trino.args`
+after the probe.  The remaining indexed INSERT ceiling is therefore not
+addressed by simply allowing more concurrent grouped RPCs; the next probe
+should target the Trino finish/exchange coordination or reduce per-writer
+serialization with a correctness-preserving design.
