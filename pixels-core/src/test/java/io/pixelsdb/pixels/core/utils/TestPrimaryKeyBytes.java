@@ -36,6 +36,21 @@ import static org.junit.Assert.fail;
 public class TestPrimaryKeyBytes
 {
     @Test
+    public void singleLongVectorUsesCanonicalBigEndianBytes()
+    {
+        TypeDescription schema = TypeDescription.fromString("struct<a:bigint>");
+        VectorizedRowBatch batch = schema.createRowBatch(2);
+        LongColumnVector a = (LongColumnVector) batch.cols[0];
+        a.add(-42L);
+        batch.size = 1;
+
+        byte[] encoded = PrimaryKeyBytes.fromColumnVectors(
+                schema.getChildren(), batch.cols, new int[]{0}, 0);
+
+        assertArrayEquals(ByteBuffer.allocate(Long.BYTES).putLong(-42L).array(), encoded);
+    }
+
+    @Test
     public void sqlAndVectorPathsProduceSameKey()
     {
         TypeDescription schema = TypeDescription.fromString("struct<a:bigint,b:varchar(16)>");

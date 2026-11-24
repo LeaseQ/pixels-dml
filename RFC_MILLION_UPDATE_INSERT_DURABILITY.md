@@ -4354,3 +4354,53 @@ one million more existing rows, but the candidate was slower despite the
 smaller index. The result provides no evidence of an INSERT gain, so the
 ThreadLocal lookup change is rejected and was not committed. The remote source
 and running Retina were restored to the original implementation.
+
+## Accepted BIGINT primary-key encoding fast path (2026-11-24)
+
+The INSERT JFR profile also showed per-row allocation in
+`TypeDescription.convertColumnVectorToByte`. The common benchmark schema uses a
+single BIGINT primary key; the old path allocated a `ByteBuffer` for every key
+just to emit eight canonical big-endian bytes. The accepted change adds a
+specialized single-BIGINT path in `PrimaryKeyBytes.fromColumnVectors` that emits
+the same bytes directly into one eight-byte array. Composite keys and all other
+types keep the existing path, and NULL primary keys still raise the same
+`IllegalArgumentException` contract.
+
+After the unit test passed, the candidate was loaded only into the isolated
+validation Trino plugin. With the same 24-writer settings and the same
+tag-preserving source, it appended 1M rows to `e2e68_page_fresh_20261124`:
+
+```text
+candidate query=20261124_003342_00001_waz8q
+existing rows=5,000,000
+execution=6.59 s  (~152K rows/s)
+physicalWrittenDataSize=291,443,975 B
+```
+
+The stable plugin was then restored and appended the same 1M-row shape at the
+next disjoint offset:
+
+```text
+control query=20261124_003543_00000_b3nad
+existing rows=6,000,000
+execution=8.28 s  (~121K rows/s)
+physicalWrittenDataSize=291,405,090 B
+```
+
+This is a conservative comparison because the stable control started with a
+larger existing index. The fast path was nevertheless about 20% faster in
+execution time and preserved exact data correctness. After both arms, the
+target check was:
+
+```text
+count=7,000,000
+distinct(id)=7,000,000
+min(id)=10,000,000,001
+max(id)=710,001,000,000
+tag_1_type='U111'=7,000,000
+tag_1_para min=max=111.0000
+```
+
+The candidate is accepted for the BIGINT single-column primary-key case; a
+follow-up paired run should measure it on an empty/fresh target before using it
+as the final headline throughput number.

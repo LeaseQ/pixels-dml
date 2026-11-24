@@ -21,6 +21,7 @@ package io.pixelsdb.pixels.core.utils;
 
 import io.pixelsdb.pixels.core.TypeDescription;
 import io.pixelsdb.pixels.core.vector.ColumnVector;
+import io.pixelsdb.pixels.core.vector.LongColumnVector;
 
 import java.nio.ByteBuffer;
 import java.util.List;
@@ -99,6 +100,30 @@ public final class PrimaryKeyBytes
         {
             throw new IllegalArgumentException("Primary key types and ordinals size mismatch.");
         }
+        if (pkTypes.size() == 1 && pkTypes.get(0).getCategory() == TypeDescription.Category.LONG)
+        {
+            int ordinal = ordinals[0];
+            if (ordinal < 0 || ordinal >= cols.length)
+            {
+                throw new IllegalArgumentException(
+                        "Primary key column at ordinal 0 maps to invalid vector index " + ordinal);
+            }
+            LongColumnVector longColumn = (LongColumnVector) cols[ordinal];
+            if (longColumn.isNull[row])
+            {
+                throw new IllegalArgumentException("Primary key column at ordinal 0 cannot be NULL.");
+            }
+            long value = longColumn.vector[row];
+            byte[] encoded = new byte[Long.BYTES];
+            for (int shift = Long.SIZE - Byte.SIZE, offset = 0;
+                    shift >= 0;
+                    shift -= Byte.SIZE, offset++)
+            {
+                encoded[offset] = (byte) (value >>> shift);
+            }
+            return encoded;
+        }
+
         byte[][] parts = new byte[pkTypes.size()][];
         for (int i = 0; i < pkTypes.size(); i++)
         {
