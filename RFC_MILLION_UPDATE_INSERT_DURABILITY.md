@@ -4404,3 +4404,31 @@ tag_1_para min=max=111.0000
 The candidate is accepted for the BIGINT single-column primary-key case; a
 follow-up paired run should measure it on an empty/fresh target before using it
 as the final headline throughput number.
+
+## `insertNew` grouped-main-index switch: inconclusive, not enabled (2026-11-24)
+
+The Retina JFR after the BIGINT fast path still sampled
+`MainIndexBuffer.insert`. The daemon already contains an opt-in
+`pixels.index.grouped.primary.write.new-main-index=true` switch that routes
+grouped INSERTs through `MainIndex.putNewEntries`/`MainIndexBuffer.insertNew`,
+avoiding relocation scans and cache invalidation that are unnecessary for
+freshly allocated row IDs. The switch was tested without changing source or
+the default, using the same 24-writer, tag-preserving INSERT shape.
+
+The first candidate arm after a Retina restart took 24.59 s and was excluded
+as a cold RocksDB/recovery arm; its grouped metrics showed primary-index work
+around 18.5 s. A second candidate arm without restart took 4.88 s elapsed
+(4.80 s execution). The switch was then removed and the stable daemon was
+restarted from a checkpoint containing the same 10M-row state. Its first arm
+took 15.77 s and was likewise excluded as cold; a stable warm arm then took
+5.19 s elapsed (5.12 s execution).
+
+The warm difference is too small and not perfectly paired because the arms
+started with different existing index sizes. The grouped metrics show the
+main-index portion around 0.29--0.32 s per candidate request versus
+0.30--0.37 s for the stable requests, while the primary RocksDB portion still
+dominates. The switch is therefore retained as a diagnostic option but is not
+enabled by default or claimed as a throughput optimization. The runtime is
+back on the stable daemon configuration. After the complete probe sequence,
+the target check remained exact at 12M rows with unique IDs and complete
+`U111`/`111.0000` tags.
