@@ -4724,3 +4724,32 @@ and passed the same exact check. This pair rejects 32 writers as a current
 default for this one-node wide fixture; 24 writers remains the better
 reproducible point. The next optimization target is the Stage-1 exchange and
 source-to-writer scheduling path, not another primary-index-only change.
+
+## Constant-tag projection diagnostic (2026-11-24)
+
+The materialized source fixture is intentionally wide and its observed sample
+row has constant tag values (`tag_1=U111/111.0000` and the remaining tag
+columns `AAA/3.1400`). To isolate the cost of carrying those columns through
+the source and Stage-1 exchange, a diagnostic arm projected the six dimensions
+from the source but supplied those observed constants as typed SQL literals.
+This is not a general table-to-table implementation and is not a correctness
+substitute for copying arbitrary source tags.
+
+The two disjoint diagnostic arms wrote destination ranges
+`71,000,000,001..71,001,000,000` and `72,000,000,001..72,001,000,000` with
+the normal 24-writer session. They finished in `4.17 s` and `3.93 s`, or
+approximately `240K` and `254K rows/s`. The exact checks passed for both arms:
+`count=1,000,000`, `distinct(id)=1,000,000`, contiguous min/max, and the
+representative `tag_1`, `tag_2`, and `tag_30` values.
+
+The first diagnostic query read only `50,033,632B` from the source versus
+`290,289,264B` for the strict copy. Its Stage-1 exchange output was `257ms`
+(`153ms` CPU), versus `2.27s` (`2.25s` CPU) on the neighboring strict arm;
+TableWriter CPU fell from `7.34s` to `3.58s`. Nevertheless, end-to-end wall
+time stayed near four seconds because the target still physically writes the
+same wide row and performs the same primary-index publication. The warm
+repeat improved only to about `254K rows/s`, so column width and exchange are
+confirmed contributors but not the sole INSERT ceiling. A real optimization
+should preserve arbitrary tags while avoiding redundant materialization, for
+example through a connector/Trino dictionary or constant-block path, and must
+be revalidated against non-constant tags before acceptance.
