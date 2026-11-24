@@ -3942,6 +3942,20 @@ is rejected and the benchmark remains on the 24--32 writer range.
 The post-probe correctness check remained exact at 29M rows with unique IDs
 and complete `U111`/`111.0000` tags.
 
+## Writer-range follow-up: 16--16 also rejected (2026-11-24)
+
+The legal lower writer setting was tested after Trino rejected `max=24` because
+`task_max_writer_count` must be a power of two. With
+`task_min_writer_count=16` and `task_max_writer_count=16`, two warm arms
+measured 4.38 s and 4.45 s (`20261124_012612_00037_txdru` and
+`20261124_012621_00038_txdru`). This is slower than the 24--32 baseline, so
+the lower writer range is also rejected. The benchmark configuration remains
+`task_min_writer_count=24`, `task_max_writer_count=32`, with writer scaling
+disabled.
+
+The correctness check after the probe remained exact at 31M rows, with all IDs
+unique and all `U111`/`111.0000` tag values preserved.
+
 The normal GC cycle then published `recovery_cds20_670080.bin`. Retina was
 stopped and restarted from that body with the 64 GiB configuration, and the
 normal recovery-epoch handshake completed (`RECOVERING -> READY`). The
