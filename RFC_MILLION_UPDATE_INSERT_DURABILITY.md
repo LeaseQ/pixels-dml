@@ -6272,3 +6272,39 @@ pre-candidate build after the probe.  The reverse-map work remains archived on
 the validation branch as an UPDATE/COMPACT relocation probe; the next useful
 optimization target is the Trino writer/finish path and its variable driver
 count, not another unconditional Java map on the INSERT hot path.
+
+## Fair fixed-writer recheck (2026-11-25)
+
+The earlier candidate/control pair was not a fair code A/B: the slow control
+query produced one physical fragment while the candidate produced 32.  The
+query was therefore repeated with the same explicit Trino session on fresh
+targets and with the stable daemon restored between probes:
+
+```text
+task_concurrency=64
+task_min_writer_count=32
+task_max_writer_count=32
+task_scale_writers_enabled=false
+```
+
+Both arms produced 32 fragments and passed the complete exact gate.  The
+stable arm was `e2e68_stable32_recheck_20261125`, query
+`20261124_170605_00061_663j4`, and the lazy-reverse arm was
+`e2e68_lazy32_recheck_20261125`, query `20261124_170943_00065_663j4`:
+
+```text
+stable daemon + 32 writers: 5.759 s ~= 173.6K rows/s
+lazy reverse + 32 writers:  6.446 s ~= 155.1K rows/s
+
+stable: count=1000000 distinct_id=1000000
+        min=10010000000001 max=10010001000000 tag_check=1000000
+lazy:   count=1000000 distinct_id=1000000
+        min=11010000000001 max=11010001000000 tag_check=1000000
+```
+
+The lazy reverse-map candidate is approximately 12% slower in this corrected
+comparison and is rejected for the INSERT path.  The code and relocation test
+remain archived because the first-update fallback preserves the desired
+UPDATE/COMPACT invariant, but it must not be enabled as a general INSERT
+optimization.  This correction also explains why the old one-fragment control
+numbers must not be used when estimating the indexed INSERT ceiling.
