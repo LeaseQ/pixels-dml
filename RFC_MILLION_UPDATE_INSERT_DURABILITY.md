@@ -5748,3 +5748,32 @@ preserved. The probe is rejected, its source change was reverted without a
 result also reinforces that the dominant INSERT cost cannot be inferred from
 the apparent low-cardinality representation alone; future candidates need
 stage metrics and a matched fresh-target comparison before deployment.
+
+## Rejected direct numeric Block accessor probe (2026-11-24)
+
+Because the stage comparison put most CPU in the writer/conversion stage, a
+connector-only candidate bypassed `Type.getLong`/`Type.getObject` for the
+common `LongArrayBlock` and `Int128ArrayBlock` cases in the sink. Null handling,
+RLE handling, dictionary handling, and all other block types retained the
+existing path. The candidate connector SHA was
+`91156ee62612ad6e92d720ea28a30cbba23a3295f11e92eb6f6bc56feaaa7916`, with the
+stable pixels-core unchanged.
+
+The candidate was first tested on the no-index 68-column diagnostic target,
+where index overhead could not mask conversion behavior. Its 1M-row arm
+(`20261124_132057_00055_gq9b5`) passed exact count, distinct-ID,
+contiguous-range, and tag checks for IDs
+`860000000001..860001000000`. Stage results were:
+
+```text
+candidate: elapsed 4.104 s, writer CPU 6.73 s, source CPU 1.76 s
+stable no-index reference: elapsed 4.120 s, writer CPU 6.41 s, source CPU 1.78 s
+```
+
+The elapsed difference is noise-level and writer CPU was slightly worse, so
+the candidate was rejected before an indexed E2E run. The local change was
+reverted without a `pixels-trino-dml` commit; the runtime was restored to the
+stable connector and stable pixels-core hashes. This confirms that a generic
+SPI block-type check alone is not a useful optimization lever for the current
+fixture; a future conversion optimization needs a measured per-column layout
+or allocation advantage, not only a lower-level accessor.
