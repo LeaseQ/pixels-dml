@@ -46,4 +46,19 @@ class TestMainIndexBuffer
         assertEquals(second, buffer.lookup(101L));
         assertTrue(!buffer.insertNew(100L, first));
     }
+
+    @Test
+    void firstRelocationAfterInsertNewStillRemovesTheOlderLocation() throws MainIndexException
+    {
+        MainIndexBuffer buffer = new MainIndexBuffer(new MainIndexCache());
+        IndexProto.RowLocation oldLocation = IndexProto.RowLocation.newBuilder()
+                .setFileId(30L).setRgId(0).setRgRowOffset(1).build();
+        IndexProto.RowLocation newLocation = IndexProto.RowLocation.newBuilder()
+                .setFileId(31L).setRgId(0).setRgRowOffset(2).build();
+
+        assertTrue(buffer.insertNew(200L, oldLocation));
+        assertTrue(buffer.insert(200L, newLocation));
+        assertEquals(newLocation, buffer.lookup(200L));
+        assertTrue(buffer.snapshotForFlush(30L).isEmpty());
+    }
 }

@@ -6231,9 +6231,44 @@ full-column reads can hit an old DECIMAL file that fails in
 
 The source candidate adds a reverse `rowId -> fileId` map to
 `MainIndexBuffer`.  The existing relocation semantics remain unchanged, but
-`insert()` no longer scans every other file buffer for each row.  Both
-`insert()` and `insertNew()` maintain the map, and committed flush discard and
-`close()` remove its entries.  This is an experimental candidate only; it has
-not yet been deployed or promoted.  The required next gate is a matched fresh
-indexed A/B with exact count, distinct-ID, contiguous range, all tag checks,
-and an UPDATE/relocation regression test before any default change.
+`insert()` no longer scans every other file buffer when the reverse map has a
+hit.  The first matched pair was promising but not conclusive:
+
+```text
+candidate  e2e68_reverse_idx_candidate_20261125  5.273 s  exact gate passed
+control    e2e68_reverse_idx_control_20261125     5.710 s  exact gate passed
+candidate  e2e68_reverse_idx_candidate2_20261125  6.628 s  exact gate passed
+control    e2e68_reverse_idx_control2_20261125   13.207 s  exact gate passed
+```
+
+The second control arm also appended another disjoint 1M rows in the same
+stable process and took 11.297 s on the Trino timeline.  The runs had different
+writer-driver counts (112 for the second candidate and 81 for the second
+control), so the pair does not isolate the Java change.  The daemon's grouped
+primary metrics were broadly similar; the large difference was in Trino
+writer/finish coordination.  The candidate therefore is not promoted as a
+causal INSERT optimization.
+
+The follow-up `lazy-reverse` build removes the reverse-map write from
+`insertNew()`.  A first UPDATE/COMPACT relocation that misses the map performs
+one compatibility scan, then records the row for subsequent O(1) relocations.
+This preserves correctness while avoiding a HashMap write for every fresh
+INSERT row.  The new regression test
+`firstRelocationAfterInsertNewStillRemovesTheOlderLocation` passed together
+with the existing two `MainIndexBuffer` tests (`3 tests, 0 failures`).  Its
+fresh 1M-row indexed E2E target
+`e2e68_lazy_reverse_20261125` passed the exact gate:
+
+```text
+query 20261124_165726_00055_663j4
+SQL timeline 12.581 s
+count=1000000 distinct_id=1000000
+min=9010000000001 max=9010001000000 tag_check=1000000
+```
+
+This single lazy-map arm did not beat the strict indexed INSERT baseline and
+is also not promoted.  The latest runtime jar was restored to the stable
+pre-candidate build after the probe.  The reverse-map work remains archived on
+the validation branch as an UPDATE/COMPACT relocation probe; the next useful
+optimization target is the Trino writer/finish path and its variable driver
+count, not another unconditional Java map on the INSERT hot path.

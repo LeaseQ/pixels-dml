@@ -51,11 +51,12 @@ public class MainIndexBuffer implements Closeable
      */
     private final Map<Long, Map<Long, IndexProto.RowLocation>> indexBuffer;
     /**
-     * Reverse lookup for buffered row locations.  INSERT, UPDATE, and COMPACT
-     * all share the relocation-safe insert path; scanning every file buffer to
-     * find an older row location makes that path grow with the number of open
-     * files.  Keep the existing per-file maps for flush/layout behavior, but
-     * use this map to locate a prior row in constant time.
+     * Reverse lookup for rows that have taken the relocation-safe insert path.
+     * Fresh INSERT rows intentionally do not populate this map: doing so adds
+     * one HashMap write per row to the hottest INSERT path.  If an UPDATE or
+     * COMPACT first encounters a fresh row that is still buffered, insert()
+     * performs one compatibility scan and then remembers the row for all
+     * subsequent relocations.
      */
     private final Map<Long, Long> rowIdToFileId;
     private final MainIndexCache indexCache;
@@ -135,6 +136,20 @@ public class MainIndexBuffer implements Closeable
         }
 
         Long previousFileId = this.rowIdToFileId.get(rowId);
+        if (previousFileId == null)
+        {
+            // Fresh INSERT rows are not tracked in rowIdToFileId.  Preserve
+            // relocation correctness by finding one only on the first update
+            // that touches a still-buffered row; subsequent updates are O(1).
+            for (Map.Entry<Long, Map<Long, IndexProto.RowLocation>> entry : this.indexBuffer.entrySet())
+            {
+                if (entry.getValue().containsKey(rowId))
+                {
+                    previousFileId = entry.getKey();
+                    break;
+                }
+            }
+        }
         if (previousFileId != null && previousFileId != location.getFileId())
         {
             Map<Long, IndexProto.RowLocation> previousFileBuffer = this.indexBuffer.get(previousFileId);
@@ -188,7 +203,6 @@ public class MainIndexBuffer implements Closeable
         {
             return false;
         }
-        this.rowIdToFileId.put(rowId, location.getFileId());
         // Newly allocated row ids cannot overlap an older persistent range.
         // Deliberately avoid per-row cache eviction/admission on this hot path;
         // lookup still finds the entry in the active file buffer.
