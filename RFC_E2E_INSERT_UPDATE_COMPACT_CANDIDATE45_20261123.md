@@ -1463,3 +1463,30 @@ restart; each had `count=1,000,000`, `distinct_id=1,000,000`, and zero null
 values in `tag_1_type`. Thus the new cap/scheduling measurements have a
 checkpoint-and-restart proof, while the older offset48B duplicate remains a
 known historical test-data contamination to exclude from final acceptance.
+
+## Probe note: INSERT-only main-index result aggregation (2026-11-24)
+
+The Retina JFR showed `MainIndexBuffer.insert` as the largest sampled Java
+method in the grouped-primary route. I prepared a default-off candidate for
+the already opt-in `pixels.index.grouped.primary.write.new-main-index=true`
+route: retain duplicate detection, pre-size a new file buffer from the batch,
+and return one aggregate success value instead of materializing one Boolean
+per row. UPDATE and recovery paths were not changed.
+
+The candidate compiled successfully in `pixels-common`,
+`pixels-index-main-sqlite`, and `pixels-daemon`, and was deployed only to the
+isolated Retina with the normal daemon jar kept as a byte-for-byte backup.
+The E2E attempt was not a valid performance arm: the correct Trino instance
+(`8191`) accepted the query, but Trino remained in `WAITING_FOR_RESOURCES`
+during analysis for 300 seconds with `totalTasks=0`, `executionTime=0`, and
+zero input/output. The same symptom affected metadata probes after the
+runtime restart; the older Trino instance (`8091`) was a separate stale
+runtime and was excluded. No candidate throughput or correctness conclusion
+is drawn from this attempt. The candidate jar was rolled back and Retina was
+restarted with the stable jar; the stable hash is
+`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`.
+
+The source change was reverted locally rather than retained as an
+unvalidated optimization. A future retry must first prove a healthy Trino
+node/resource state (`/v1/service` and a non-empty schedulable node set) and
+then run matched candidate/control INSERTs on fresh row-id ranges.
