@@ -4898,6 +4898,29 @@ not beat the accepted stable warm result of `4.22 s` (`~237K rows/s`). It is
 therefore rejected as a throughput change. The runtime was restored to stable
 connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`.
 
+## Rejected adaptive write partition-count session property (2026-11-24)
+
+Trino exposes `determine_partition_count_for_write_enabled`, which can derive
+the write partition count from the amount of data processed. Since the current
+strict INSERT profile still shows Stage-1 Exchange/TableWriter scheduling
+pressure, the property was tested with all accepted benchmark settings held
+constant: 24--32 writers, `task_concurrency=64`, writer scaling disabled,
+grouped primary writes, and the full 68-column table-to-table projection.
+
+The property was interleaved across four fresh one-million-row arms. All arms
+passed exact count, contiguous min/max, distinct-ID, tag, and decimal checks:
+
+```text
+enabled=true : 6.187 s, 6.186 s   mean 6.187 s
+enabled=false: 6.225 s, 6.152 s   mean 6.189 s
+```
+
+The difference is negligible and has no consistent direction, so enabling the
+adaptive partition-count property is **rejected as an optimization**. The
+benchmark default remains `false`; the remaining Exchange work needs to target
+buffering/backpressure or operator scheduling rather than partition-count
+selection.
+
 ## Rejected Exchange compression sweep (2026-11-24)
 
 The strict table-to-table path currently reports
