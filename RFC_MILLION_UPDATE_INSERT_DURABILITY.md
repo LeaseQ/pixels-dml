@@ -6050,3 +6050,55 @@ SQL elapsed was 4.215 s, approximately `237.2K rows/s`. This confirms that
 the promoted default is active and reproduces the A/B result. It is an UPDATE
 tag-index throughput result; the full post-COMPACT/restart durability chain
 remains the separate acceptance gate documented above.
+
+## Correct-runtime grouped primary and `insertNew` recheck (2026-11-24)
+
+The clean indexed target was extended with disjoint 1M-row ranges so the
+primary-index writer could be compared without reusing historical files. The
+default connector path remained valid and passed exact readback for query
+`20261124_150913_00003_jsrkk`:
+
+```text
+SQL elapsed=11.871 s
+count=1000000 distinct_id=1000000 min=1000000000001 max=1000001000000
+tag_check=1000000
+primary_rpc_count=128 per file
+```
+
+The server-side grouped-primary route was then enabled only in Trino with
+`pixels.insert.index.grouped.primary.write=true`,
+`pixels.insert.index.flush.parallelism=4`, and the existing daemon setting
+`pixels.index.grouped.primary.write.threads=32`. Query
+`20261124_151138_00000_srhcd` appended another disjoint 1M rows and passed
+the exact check:
+
+```text
+SQL elapsed=9.110 s ~= 109.8K rows/s
+count=1000000 distinct_id=1000000 min=1001000000001 max=1001001000000
+tag_check=1000000
+primary_rpc_count=1 per file
+```
+
+The connector metrics show the intended route change: per-file primary puts
+fell from roughly 6.3 s in the 128-RPC path to sub-second-to-1.4 s grouped
+service work. The end-to-end improvement is real but insufficient for the
+million-row target because Trino scheduling, source/writer work, and grouped
+request finishing still occupy most of the statement wall time.
+
+Increasing connector flush parallelism to 8 was rejected. Query
+`20261124_151325_00000_nhu2q` passed exact readback but took 9.591 s, slower
+than grouped parallelism 4. The daemon-side new-row main-index switch was then
+retested under the corrected connector/runtime (the earlier visibility failure
+had used an old connector jar). With
+`pixels.index.grouped.primary.write.new-main-index=true`, grouped connector
+parallelism 4, and a fresh disjoint range, query
+`20261124_151732_00000_g5fvk` passed exact readback in 9.323 s. It did not
+beat the ordinary grouped result and is therefore retained only as a
+diagnostic opt-in, not promoted.
+
+The runtime was restored to the stable configuration: no grouped connector
+properties, no `new-main-index`, and the validated default connector artifact.
+This recheck closes the prior artifact-mismatch uncertainty around
+`insertNew`, while leaving the main indexed INSERT gap focused on grouped
+RocksDB/service and Trino finishing/scheduling rather than the
+`MainIndexBuffer.insert` relocation scan alone.
