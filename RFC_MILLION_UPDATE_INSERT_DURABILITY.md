@@ -4942,3 +4942,39 @@ times are slower than the earlier 4-second warm arms and remain sensitive to
 runtime/cache state. The change is therefore retained as a **provisional
 scheduling candidate**, not declared the final INSERT default. The 8191 runtime
 was restored to the stable connector SHA after measurement.
+
+## Correction: fair overlap A/B rejects throughput gain (2026-11-24)
+
+Before accepting the provisional result, the active jars were inspected rather
+than compared by filename alone. The stable runtime jar contained an existing
+`conversion_ms` instrumentation field and used serial writer-then-index flush;
+the first overlap candidate jar did not contain that instrumentation. Those
+earlier comparisons were therefore not strict same-baseline A/B measurements
+and are downgraded to diagnostic evidence.
+
+The instrumentation was restored in the candidate source, then the candidate
+was rebuilt as SHA
+`d273253003d34ecd92da26affa19008e1b4e04aed2babbb1a40c803a9947f63a`. On the
+actual 8191 runtime, the fair candidate used fresh target ranges 134B and 135B:
+
+```text
+20261124_064731_00004_knmm5  11.177 s  cold
+20261124_064742_00009_knmm5   7.503 s  warm
+```
+
+The stable jar SHA
+`4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4` was then
+restored and measured on fresh ranges 136B and 137B:
+
+```text
+20261124_064841_00004_mqeqz  11.506 s  cold
+20261124_064852_00009_mqeqz   6.842 s  warm
+```
+
+All four ranges passed exact 1M-row, contiguous-ID, distinct-ID, tag, and
+decimal checks. The candidate is slightly faster on the cold arm but slower on
+the warm arm, so the overlap has **no reproducible end-to-end throughput gain**
+under a fair baseline. The asynchronous flush/index implementation is rejected
+and should be reverted from the default path. The useful remaining change is
+the stage instrumentation; the next optimization target should be the measured
+conversion/index scheduling path, not another unverified overlap variant.
