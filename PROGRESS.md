@@ -100,6 +100,9 @@ timeline为9.937/11.567秒，parallelism=16为3.921/3.989秒，均为1M行、1 R
 grouped为10.524/5.681秒；四个独立空目标均通过行数、唯一键、范围和标签校验。当前
 可接受的warm grouped实测约176K rows/s，尚未达到最低几十万目标；下一步优先解释
 Trino finish/exchange与sink/index_finish长尾，不再把单次最好值当作稳定吞吐。
+对finish overlap候选的首次实现已撤回：候选jar在两个fresh target上使INSERT长期
+RUNNING（90 drivers中89 blocked、零输出），查询已取消，原jar与默认参数已恢复。
+该候选作为生命周期hang负结果记录在RFC，不计入吞吐，也不保留为默认优化。
 
 [runs]: https://github.com/LeaseQ/pixels-dml/blob/e5946aa2/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283

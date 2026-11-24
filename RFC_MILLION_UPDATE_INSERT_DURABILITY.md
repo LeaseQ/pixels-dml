@@ -6488,3 +6488,35 @@ the lower-hundreds-of-thousands target band and far below one million rows/s.
 The current remaining cost is in Trino finishing/exchange coordination and
 per-writer sink/index-finish intervals; this result does not justify another
 unpaired micro-optimization or a production-default change by itself.
+
+## Rejected INSERT finish-overlap candidate (2026-11-25)
+
+After the paired route controls established that `index_finish_ms` contributes
+to the writer tail, an opt-in candidate was tested.  It launched
+`PixelsWriter.close()` and `InsertIndexWriter.finish()` on separate
+`CompletableFuture`s after the final flush, controlled by
+`-Dpixels.insert.finish.parallel=true`.  The normal path remained unchanged
+when the property was absent.  The candidate connector built successfully as
+jar SHA
+`2bbac0f0875cac821cf8c0a926e3f8e1c2ae50c0bd7cc4a404bfac86645b2385`, and
+the `PixelsPageSinkTest` suite passed 6/6.
+
+The isolated E2E rejected the candidate before any throughput comparison.
+Two INSERT attempts on fresh indexed targets
+`e2e68_finish_overlap_candidate1_20261125` and
+`e2e68_finish_overlap_candidate2_20261125` remained RUNNING with zero output.
+The Trino query snapshots showed 90 total drivers, 1 running driver and 89
+blocked drivers, with zero physical input/output progress after roughly two
+and four minutes.  Query IDs were
+`20261124_181137_00007_f9btm` and `20261124_181328_00009_f9btm`; both were
+cancelled and both targets remained at zero rows.  This is a lifecycle
+deadlock/hang, not a slow performance result.
+
+The candidate was removed from the runtime and source copy.  The active
+connector was restored byte-for-byte to SHA
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`, the
+isolated Trino process was restored to `default-cap24-trino.args`, and the
+shared `8090` process was not changed.  The finish-overlap idea is rejected;
+future work must preserve the existing serial lifecycle or first introduce a
+dedicated non-blocking writer/index protocol with explicit cancellation and
+failure tests.
