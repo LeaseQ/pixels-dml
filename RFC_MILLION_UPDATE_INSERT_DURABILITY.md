@@ -4753,3 +4753,24 @@ confirmed contributors but not the sole INSERT ceiling. A real optimization
 should preserve arbitrary tags while avoiding redundant materialization, for
 example through a connector/Trino dictionary or constant-block path, and must
 be revalidated against non-constant tags before acceptance.
+
+## Rejected reader-side single-entry dictionary-to-RLE probe (2026-11-24)
+
+The source reader was temporarily changed so a non-null string dictionary with
+exactly one dictionary entry became a Trino `RunLengthEncodedBlock`; arbitrary
+dictionaries and nullable dictionaries retained the existing `DictionaryBlock`
+path. The connector compiled successfully on JDK 23 and loaded on the
+isolated Trino with the correct `PIXELS_HOME`/`PIXELS_CONFIG` environment.
+
+The strict table-to-table arm used the fixed source and the disjoint destination
+range `73,000,000,001..73,001,000,000`. It returned the exact expected
+`1,000,000` rows, unique contiguous IDs, and representative `tag_1`, `tag_2`,
+and `tag_30` values, but query `20261124_044254_00004_qdbrs` took `10.28 s`
+(`~97K rows/s`) versus the stable connector's neighboring `4.22 s`
+(`~237K rows/s`). The candidate was rolled back to connector SHA
+`4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`.
+
+This rejects reader-side RLE substitution as a throughput optimization for the
+current Trino Exchange/PagesSerde path. The constant-tag diagnostic still
+shows that reduced input width helps, but the representation change must be
+made at a layer that does not introduce an Exchange or writer long tail.
