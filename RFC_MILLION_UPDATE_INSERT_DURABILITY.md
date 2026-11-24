@@ -5353,3 +5353,33 @@ preserved in commits `56562cdc` and `a4a1dfb5` for auditability. The 8191
 runtime was restored to stable `pixels-core` SHA
 `baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12` and
 connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`.
+
+## Rejected sink-side dictionary Slice cache (2026-11-24)
+
+The previous source-block experiment showed that changing the block
+representation hurts Exchange. A narrower candidate therefore left the
+representation untouched and changed only `PixelsPageSink.appendSliceValues()`:
+when the input was a `DictionaryBlock`, it cached the `Slice` for each dictionary
+entry and reused it while appending rows. The path was opt-in through
+`-Dpixels.trino.dictionary-slice-fast-path=true`; all other block types and the
+default path were unchanged. The candidate connector SHA was
+`95c22d70f0ae5a538fba66af2f538702c40af3ee0c9db3620dc6867753f2c53c`.
+
+Two candidate warm arms used destination ranges
+`274,000,000,001..274,001,000,000` and
+`278,000,000,001..278,001,000,000`; they took `4.933 s` and `5.311 s`.
+The matched stable runtime controls used ranges
+`276,000,000,001..276,001,000,000` and
+`277,000,000,001..277,001,000,000`; the warm control took `5.330 s` after
+the corresponding restart. All four arms passed exact 1M-row count,
+distinct-ID, contiguous-range, `U111`, and `111.0000` checks.
+
+The candidate's two-arm warm mean was only about 3.9% below this one control
+arm, and the second candidate repeat was effectively tied with the control;
+neither exceeded the accepted stable warm point around `4.22 s`. The result is
+therefore not a reproducible throughput improvement and the candidate was
+rejected without commit. The 8191 runtime was restored to the stable connector
+SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4` and
+the default args. The remaining string work should reduce bytes or decoding
+before the Exchange boundary, not add more per-row dispatch caching at the
+sink.
