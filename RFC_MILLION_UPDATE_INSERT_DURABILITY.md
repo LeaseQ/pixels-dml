@@ -4897,6 +4897,35 @@ The candidate warm result is within the observed run-to-run variance and does
 not beat the accepted stable warm result of `4.22 s` (`~237K rows/s`). It is
 therefore rejected as a throughput change. The runtime was restored to stable
 connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`.
+
+## Rejected Exchange compression sweep (2026-11-24)
+
+The strict table-to-table path currently reports
+`exchange_compression_codec=NONE`. Because Stage 1 Exchange is visible in the
+query profile, the session property was tested without changing connector or
+Pixels code. Fresh one-million-row arms used the same 68-column source and
+disjoint target ranges; every arm passed exact count, contiguous min/max,
+distinct-ID, tag, and decimal checks.
+
+```text
+LZ4 : 6.696 s
+ZSTD: 6.393 s
+NONE: 6.383 s
+NONE: 6.793 s
+ZSTD: 5.884 s
+NONE: 6.695 s
+ZSTD: 7.064 s
+NONE: 6.420 s
+```
+
+The three ZSTD arms averaged 6.447 s and the three matched NONE controls
+averaged 6.573 s, but the pair-wise outcomes were inconsistent: the first was
+effectively tied, the second favored ZSTD, and the third favored NONE. LZ4 did
+not beat its neighboring NONE control. This is not sufficient evidence for a
+default session change on the single-node runtime, so Exchange compression is
+**rejected as a current optimization** and `NONE` remains the benchmark
+baseline. The test also reinforces that Stage-1 Exchange scheduling/state,
+rather than a fixed codec choice, is the remaining variable to investigate.
 The deployment recheck also corrected an operational pitfall: starting
 `runtime/trino/bin/launcher` uses the separate 8091 configuration; the E2E
 benchmark must launch from the runtime/trino working directory with
