@@ -4902,3 +4902,43 @@ The deployment recheck also corrected an operational pitfall: starting
 benchmark must launch from the runtime/trino working directory with
 `e2e-fresh-20261122/trino-data/default-cap24-trino.args` so that the actual
 8191 process and jar are the ones being measured.
+
+## Flush/index overlap failure convergence and fresh-pair recheck (2026-11-24)
+
+The provisional overlap candidate was tightened before another E2E run. The
+first implementation waited for the asynchronous index append after a normal
+`IOException`, but a runtime exception from `PixelsWriter.addRowBatch()` could
+leave the index task running while `finish()` entered `abort()`. The connector
+now captures writer runtime failures, always joins the overlapped index future,
+and attaches any secondary failure before propagating the primary one. A
+focused `PixelsPageSinkTest` covers this ordering. The source and test classes
+compiled on cds20; the repository's inherited Surefire configuration hard-codes
+`skipTests=true`, so Maven did not execute the JUnit test.
+
+The safety-fixed candidate connector SHA was
+`999a70dc335f9a82a615f9000db0f82de3bf0162ca3687bef583f4be5d4728b6`.
+Fresh destination ranges were selected and checked by their final exact
+results. The candidate ran with offsets `120,000,000,000` and
+`121,000,000,000`, producing target ID ranges
+`130,000,000,001..130,001,000,000` and
+`131,000,000,001..131,001,000,000`:
+
+```text
+candidate 130B: 7.262 s  ~= 138K rows/s
+candidate 131B: 6.021 s  ~= 166K rows/s
+```
+
+The stable connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`
+was then restored and measured on disjoint fresh target ranges 132B and 133B:
+
+```text
+stable 132B:    11.356 s ~= 88K rows/s
+stable 133B:     7.335 s ~= 136K rows/s
+```
+
+All four ranges passed exact count, contiguous min/max, distinct-ID, tag, and
+decimal checks. This second matched pair again favors overlap, but its absolute
+times are slower than the earlier 4-second warm arms and remain sensitive to
+runtime/cache state. The change is therefore retained as a **provisional
+scheduling candidate**, not declared the final INSERT default. The 8191 runtime
+was restored to the stable connector SHA after measurement.
