@@ -6852,3 +6852,53 @@ server default.
 
 Before this clean-process correction push, the remote progress file was fetched
 and checked at `b0a4ac0d2d2f1ba898380f7f09198cf404e6a2c7`.
+
+## Longer fixed-32 soak to 9M rows (2026-11-25)
+
+The candidate profile was extended without creating another indexed target.
+The two pre-existing targets `e2e68_matrix16a_20261125` (false) and
+`e2e68_matrix16b_20261125` (true) each already contained 7M rows. Four more
+1M-row appends were interleaved with offsets `7,000,000,000,000` and
+`8,000,000,000,000`, using the same 68-column source, grouped primary route,
+`task_concurrency=64`, fixed 32 writers, and writer scaling disabled. The
+client wall-time evidence was:
+
+```text
+redistribute_writes=false  q=20261124_194800_00010_bf3zx  4.127 s  ~=242K rows/s
+redistribute_writes=true   q=20261124_194804_00011_bf3zx  4.977 s  ~=201K rows/s
+redistribute_writes=true   q=20261124_194809_00012_bf3zx  4.669 s  ~=214K rows/s
+redistribute_writes=false  q=20261124_194814_00013_bf3zx  3.853 s  ~=260K rows/s
+```
+
+The two false arms averaged `3.990 s` and the two true arms `4.823 s` by
+client wall time, so the no-redistribution route remained about `17%` faster
+on this longer same-target extension. This is deliberately reported as
+client wall time; the retained Trino query list did not expose completed
+`elapsedTimeMillis` for these four entries.
+
+Both targets passed the complete gate after the soak:
+
+```text
+target                         rows       distinct_ids  min_id       max_id          tag_type_ok  min/max tag_1_para
+e2e68_matrix16a_20261125       9000000    9000000       10000000001   8010001000000   9000000      111.0000/111.0000
+e2e68_matrix16b_20261125       9000000    9000000       10000000001   8010001000000   9000000      111.0000/111.0000
+```
+
+The operational guard was sampled before and after the sequence. Retina PID
+`1925521` stayed alive; its RSS changed from `30,930,708 KB` to
+`30,965,384 KB`, while G1 heap used changed from `25,752,150 KB` to
+`25,800,721 KB` with committed heap unchanged at `45,350,912 KB`. The
+isolated Trino coordinator remained healthy on port `8191` and reported
+`starting=false`; shared port `8090` was not touched. This is a useful
+single-sequence memory guard, not a long-term leak proof.
+
+The result strengthens fixed 32 writers plus `redistribute_writes=false` as
+the current INSERT benchmark profile, but it does not establish the overall
+million-row/s target: this complete indexed/tagged end-to-end wall-time sample
+is approximately `201K--260K rows/s`. It also does not authorize changing a
+server or production default; the next meaningful check is repeated clean
+process runs or a controlled default-vs-session comparison with the same
+memory observation.
+
+Before this documentation push, the remote progress file was fetched and
+checked at `d3786a36878c309382b05e9bd1f450919b435a4f`.

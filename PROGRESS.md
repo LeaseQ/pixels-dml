@@ -8,8 +8,10 @@
 总体收益尚未证明。当前阶段仍以双路径总体成本为主；新增的
 `redistribute_writes=false` 在空目标上有跨writer收益迹象；同目标soak进一步显示，
 32 writers下收益可复现，24 writers下基本持平。clean Trino crossover及预热交错
-复测也已完成，因此当前INSERT候选收窄为固定32 writers加关闭redistribution，尚未
-改变默认配置。
+复测也已完成；追加到两张目标各900万行的更长交错soak中，关闭redistribution的
+client wall time均值约3.990秒、开启约4.823秒，且内存采样未见增长异常。因此当前
+INSERT候选仍是固定32 writers加关闭redistribution，但端到端样本约201K--260K行/秒，
+尚未达到百万行/秒，也尚未改变默认配置。
 
 ## 1. 已确认的目标与边界
 
@@ -40,7 +42,7 @@
 | 工作项 | 当前状态 | 已有证据 | 尚缺证据 |
 | --- | --- | --- | --- |
 | 运行包一致性 | 记录有修正与读回 | 混用Connector/common/core后出现方法缺失及可见性错误；整体重建部署后新表读回通过 | 后续每臂继续固定全套jar与实际端口；不能沿用混包运行的性能结论 |
-| INSERT | grouped对照完成；32-writer exchange候选有clean crossover和soak证据 | 带主键索引、grouped写入及完整标签门禁已完成；32 writers warm crossover为false约2.72s、true约3.45s，24 writers基本持平 | 更长soak与内存护栏；8-writer臂因Retina OOM排除 |
+| INSERT | grouped对照完成；32-writer exchange候选有clean crossover和更长soak证据 | 带主键索引、grouped写入及完整标签门禁已完成；两目标各900万行后，false client wall均值约3.990s、true约4.823s；Retina单序列内存采样稳定 | 重复clean-run及默认化前的受控对照；8-writer臂因Retina OOM排除 |
 | UPDATE | 代码默认值已改；记录有重复实测 | 主键解析由串行约8.27～10秒降至并行16下约1.39～1.45秒；新默认SQL elapsed 4.215秒，约23.7万行/秒 | 对应正常运行物化、最终标签与完整周期配对；并发负载表现尚不能推断 |
 | MainIndexBuffer反向映射 | 记录有测试与对照；INSERT优化未采纳 | 惰性版本记录3项测试通过；同32 fragments配对为稳定版5.759秒、候选6.446秒，未获收益，运行包已恢复稳定版本 | UPDATE/COMPACT收益及内存代价仍待证明；分支保留代码不等于默认部署采用 |
 | 原Retina对照 | 已识别语义缺口 | 现有测试“更新”为删除旧键并插入新键 | 保留主键、相同标签赋值及完成边界的对照适配；INSERT也需对齐输入准备及发布成本 |
@@ -66,7 +68,7 @@
 | --- | --- | --- | --- |
 | P0 / BASE-01 | UPDATE/INSERT路由对照完成 | 确定INSERT、UPDATE各自可比的原路径或优化前版本 | UPDATE已完成parallelism=1/16控制；INSERT已完成grouped与非grouped路由对照；原Retina删旧键/插新键路径仍不可直接等价 |
 | P0 / ENV-01 | 现场核验完成（两条路由） | 固定匹配版本、有效参数、源数据及每臂初始状态 | 两条路由的jar哈希、端口、schema、独立空目标、输入及最终校验已写入RFC |
-| P1 / INS-01 | 已有总体配对；32-writer exchange候选已完成clean crossover | 完整表到表INSERT对照，并验证 `redistribute_writes=false` 的计划、wall time和标签正确性 | 做更长soak并设置内存护栏；之后再决定是否改默认 |
+| P1 / INS-01 | 已有总体配对；32-writer exchange候选已完成clean crossover和9M-row soak | 完整表到表INSERT对照，并验证 `redistribute_writes=false` 的计划、client wall time和标签正确性；两目标均9M行/9M distinct/全标签通过 | 重复clean-run并观察内存后，再决定是否改默认；当前不要把201K--260K行/秒推广为百万行/秒 |
 | P1 / UPD-01 | 已有总体配对，待多轮扩展 | 主键常量赋值及独立多轮UPDATE对照 | 已完成两目标交叉顺序的SQL UPDATE与COMPACT/标签读回；独立多轮打标及重启不属于本轮新增门槛 |
 | P2 / OPT-01 | INSERT候选未采纳 | 保留反向映射负结果；按总体成本证据决定是否继续研究定位开销 | 不将其作为已成立的INSERT优化；如另评估UPDATE/COMPACT，需独立位置迁移、内存和端到端配对证据 |
 | 后续 / EXT-01 | 待平台与接口核验 | 外部基线与鲲鹏实验 | 按既有方案推进；正常运行语义与计时可比，实际结果留证 |
@@ -143,6 +145,13 @@ ROUND_ROBIN和Pixels writer。固定16 writers下的两组顺序交叉为关闭5
 `recovery_cds20_860063.bin`恢复、重新加入hash ring，并通过一行打标读回。
 本次提交前检查的远端进度文件版本为
 `3b772a903309ff83923127e1f040433059c64edf`。
+
+本轮在不创建新索引目标的前提下，把固定32-writer交错soak从700万行扩展到
+两张目标各900万行：false/true的client wall均值为3.990/4.823秒，四臂均成功，
+两张目标均通过900万行、900万distinct id、范围和完整tag_1门禁；Retina保持存活，
+前后RSS与G1已用堆仅小幅波动。该结果支持继续使用候选session profile，但没有把
+端到端吞吐提升宣称为百万行/秒。本次提交前检查的远端进度文件版本为
+`d3786a36878c309382b05e9bd1f450919b435a4f`。
 
 [runs]: https://github.com/LeaseQ/pixels-dml/blob/e5946aa2/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283
