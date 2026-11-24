@@ -5107,3 +5107,38 @@ After the soak the runtime was restored to stable connector SHA
 `SELECT 1` readiness check passed. The candidate remains pushed on the
 validation branch; production/default rollout still requires a longer soak and
 an explicit artifact promotion decision.
+
+## Rejected consecutive string dictionary-ID cache (2026-11-24)
+
+The INSERT stage metrics show that wide-column physical writing, rather than
+primary-index append, is the larger remaining stage. A focused `pixels-core`
+candidate changed `StringColumnWriter` at EL2 to reuse a dictionary ID when
+consecutive rows referenced the exact same byte array, offset, and length. This
+targets the constant tag columns in the fixture while leaving dictionary
+semantics and encoded output unchanged. Candidate `pixels-core` SHA was
+`09c804360a76ec4c98e6042f10bc201c873ca5a93c1d14a775ec0ea674d64940`.
+
+The first matched pair used fresh target ranges 181B/182B for the candidate
+and 183B/184B for stable:
+
+```text
+candidate: 8.843 s, 6.536 s   mean 7.690 s
+stable:    9.178 s, 7.217 s   mean 8.198 s
+```
+
+The apparent first-pair improvement was not reproducible. A second fresh pair
+used 185B/186B for the candidate and 187B/188B for stable:
+
+```text
+candidate: 9.140 s, 6.907 s   mean 8.024 s
+stable:    9.388 s, 6.531 s   mean 7.960 s
+```
+
+All eight arms across the two pairs passed exact 1M-row count, contiguous
+min/max, distinct-ID, tag, and decimal checks. Because the candidate lost the
+second warm comparison and the pair-level result changed sign, the string
+dictionary cache is **rejected and reverted**. The candidate and revert are
+preserved in commits `56562cdc` and `a4a1dfb5` for auditability. The 8191
+runtime was restored to stable `pixels-core` SHA
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12` and
+connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`.
