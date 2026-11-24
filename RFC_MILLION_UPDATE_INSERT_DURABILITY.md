@@ -4647,3 +4647,52 @@ for tag-aware UPDATE on this fixture. INSERT is still below the several-
 hundred-thousand target band, and the next optimization target remains the
 service-side grouped RocksDB write schedule rather than Trino transaction or
 metadata commit.
+
+## Strict table-to-table INSERT recheck and current source-side profile (2026-11-24)
+
+The preceding session-corrected 4.02 s INSERT used a generated `UNNEST` source
+and is retained only as a connector/service diagnostic. The general INSERT
+headline must use a materialized source table. A strict recheck therefore used
+the one-million-row table
+`validationfresh.e2e68_fresh_candidate86_20261124`, whose source range is
+`10,000,000,001..10,001,000,000` and whose rows carry `U111/111.0000` tags.
+The source and target had different historical tag-column orderings, so the
+statement explicitly projected all thirty type columns followed by all thirty
+parameter columns. The first attempted statement was rejected during analysis
+with a type-order mismatch and committed no rows; the explicit projection then
+completed successfully.
+
+With the same grouped-primary route and the standard 24-writer session:
+
+```text
+strict table-to-table cold arm: 7.01 s ~= 143K rows/s
+strict table-to-table warm arm: 4.27 s ~= 234K rows/s
+```
+
+The two arms used disjoint destination ranges `66,000,000,001..66,001,000,000`
+and `67,000,000,001..67,001,000,000`. Each range passed the exact check
+`count=1,000,000`, `distinct(id)=1,000,000`, and
+`tag_1_type='U111' AND tag_1_para=111.0000`. This is the current accepted
+table-to-table INSERT point for the present wide fixture; the faster 249K
+generated-source arm is not used as the general INSERT headline.
+
+A 20-second JFR around a third strict warm arm produced the following sampled
+hot-method ordering:
+
+```text
+PixelsPageSink.appendValue                                  16.32%
+UTF_8$Decoder.decodeLoop                                     5.93%
+VariableWidthBlock.copyPositions                             5.93%
+PixelsPageSink.appendColumnValues                            1.48%
+PixelsInsertIndexWriter.appendBatch                          1.73%
+StringColumnWriter.writeCurPartWithDict                      1.85%
+```
+
+The source-side sink metrics for the warm arm summed, across 24 writers, to
+approximately `conversion_ms=7.03 s`, `write_ms=3.15 s`, and `index_ms=1.26 s`;
+these are overlapping per-writer intervals, not a serial query duration. The
+profile and interval split move the next INSERT work from metadata/commit
+tuning toward source string/dictionary decoding, PageSink conversion, and
+Stage-1 exchange scheduling. Any further candidate must retain the hidden
+timestamp, wide-decimal handling, tag columns, primary-index write, and exact
+table-to-table semantics.
