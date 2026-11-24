@@ -115,6 +115,9 @@ Retina健康，避免把运行时故障误判成吞吐结果。本轮记录基�
 24 writers（min=24,max=32）为5.05/3.50秒；query detail中的TableWriter finishWall也随
 writer数明显累积，但冷/热顺序仍造成较大波动。8 writers暂不改默认，只作为下一轮严格
 交叉矩阵的候选；当前默认Trino args未改变。对应完整query ID和正确性门禁已写入RFC。
+随后完成8/16/24/32 writers sweep：16 writers两次为3.05/2.68秒（约328K/373K rows/s），
+且finishWall为4.33/4.68秒；8 writers虽有408K最好值但存在6.93秒冷尾，24/32 writers
+的finish尾部更大。16 writers进入下一轮严格冷/热交叉矩阵的首选候选，尚未改变默认配置。
 
 [runs]: https://github.com/LeaseQ/pixels-dml/blob/e5946aa2/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283

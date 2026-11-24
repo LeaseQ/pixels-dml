@@ -6594,3 +6594,41 @@ statement that writer count is an important finish-lifecycle factor; it does
 not yet justify changing the default writer count or claiming a stable
 8-writer throughput.  The next valid step is a strict crossed matrix with
 identical cold/warm preparation and full query-detail capture.
+
+## Writer-count sweep: 8/16/24/32 (2026-11-25)
+
+To locate a useful operating point without changing connector code, the same
+stable grouped route was run against independent empty targets with session
+writer counts of 8, 16, 24, and 32.  All arms used the isolated `8191`
+endpoint, the same materialized 1,000,000-row source, `task_concurrency=64`,
+`task_scale_writers_enabled=false`, and the stable connector/daemon jars.  The
+24-writer setting used `min=24,max=32` because Trino rejects `max=24` as not a
+power of two; query detail showed 24 actual writer drivers.  The other arms
+used equal power-of-two min/max values.
+
+```text
+writers  query                         elapsed     rows/s       finishWall(sum)
+8        20261124_183835_00009_vjzqj    6.93 s      144K         23.25 s
+8        20261124_184151_00016_vjzqj    2.76 s      362K          2.82 s
+8        20261124_184551_00026_vjzqj    2.45 s      408K          2.78 s
+16       20261124_184906_00029_vjzqj    3.05 s      328K          4.33 s
+16       20261124_185045_00035_vjzqj    2.68 s      373K          4.68 s
+24       20261124_184023_00013_vjzqj    5.05 s      198K         49.20 s
+24       20261124_184433_00023_vjzqj    3.50 s      286K          8.57 s
+32       20261124_184955_00032_vjzqj    3.38 s      296K         22.40 s
+```
+
+Every successful target returned `count=1,000,000`,
+`count(DISTINCT id)=1,000,000`, the exact ID range
+`10000000001..10001000000`, and `tag_1_type='U111' AND tag_1_para=111.0000`.
+`finishWall` is the sum of per-driver operator intervals, so it is not added
+to SQL elapsed; it is used here to explain the lifecycle tail.
+
+The sweep narrows the next candidate to 16 writers: it has two consistent
+328--373K rows/s samples and 4.33--4.68s aggregate finishWall, while 8 writers
+has a 6.93s cold-tail outlier and 24/32 writers retain larger finish tails.
+This is still an exploratory operating-point result, not a production-default
+change: the targets were independent and the warm/cache state was not fully
+randomized.  The next acceptance gate is a crossed cold/warm 16-versus-24
+matrix with client wall time and final queryable/tag state recorded for every
+arm.
