@@ -5673,3 +5673,34 @@ yet establish the target throughput: the measured INSERT rate is still in the
 ~150K rows/s range, and the earlier valid UPDATE observation remains about
 382K rows/s. Further optimization must therefore preserve this artifact
 isolation and durability gate.
+
+## Rejected sink-side one-entry DictionaryBlock fast path (2026-11-24)
+
+A narrow follow-up probe tried to optimize the 30 low-cardinality tag columns
+without changing `PixelsBlockLoader`: `PixelsPageSink` treated a
+`DictionaryBlock` whose dictionary had exactly one entry as a repeated value
+and reused the existing `appendRepeated` path. Multi-entry dictionaries,
+nullable/mixed dictionaries, and the loader behavior were unchanged. The
+candidate was compiled as connector SHA
+`b926309b47ba4d34cbfa062167443c82f1d40270ae6d743d6a568a6b1a6e7403`, while
+the stable `pixels-core` remained
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`.
+
+The probe used non-overlapping 1M-row ranges on the indexed 68-column
+`e2e68_codex_idx_ab3_20261124` target and the same source/session/writer
+settings. Both INSERTs returned exact count, distinct-ID, and tag checks:
+
+```text
+dictionary sink candidate, IDs 780000000001..780001000000:
+  CLI wall: 20.779 s ~= 48.1K rows/s
+stable connector, IDs 790000000001..790001000000:
+  CLI wall: 8.055 s ~= 124.1K rows/s
+```
+
+This is a clear regression (about 2.58x slower), even though correctness was
+preserved. The probe is rejected, its source change was reverted without a
+`pixels-trino-dml` commit, and the runtime was left on stable connector SHA
+`4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`. The
+result also reinforces that the dominant INSERT cost cannot be inferred from
+the apparent low-cardinality representation alone; future candidates need
+stage metrics and a matched fresh-target comparison before deployment.
