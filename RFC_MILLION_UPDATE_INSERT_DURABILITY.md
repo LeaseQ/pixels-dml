@@ -4920,6 +4920,29 @@ therefore **rejected as a tuning conclusion** and was not added to the normal
 runtime configuration. The 8191 instance was restored to the default args and
 passed `SELECT 1`; the temporary candidate config was not promoted.
 
+## Rejected task_concurrency=128 probe with QueryStats (2026-11-24)
+
+The strict materialized-source INSERT was then tested with
+`task_concurrency=128`, while keeping the 24--32 writer range, writer scaling
+disabled, grouped primary route, and connector cap 24 unchanged. Two fresh
+arms were compared with two same-runtime `task_concurrency=64` controls. All
+four ranges passed exact 1M-row count, contiguous min/max, distinct-ID, tag,
+and decimal checks:
+
+```text
+task_concurrency=128: QueryMonitor 4.17 s, 4.71 s   mean 4.44 s
+task_concurrency=64:  QueryMonitor 4.63 s, 4.06 s   mean 4.35 s
+```
+
+QueryStats shows that 128 only raises the Stage-0 source driver count from 64
+to 128; the Stage-1 Exchange still has 24 writer consumers. The 128 arms had
+Stage-1 Exchange `getOutputWall` of 2.67s and 3.09s, with TableWriter
+`finishWall` sums of 24.09s and 27.34s. The 64 controls measured 2.44s and
+2.44s for Exchange output and 22.09s and 24.14s for writer finish. The first
+128 arm looked faster, but the paired second arm reversed the result, leaving
+the two-arm mean slightly slower. This is therefore **rejected** as a stable
+throughput optimization; the benchmark remains at `task_concurrency=64`.
+
 ## Rejected exchange.concurrent-request-multiplier=6 check (2026-11-24)
 
 The remaining Exchange backpressure knob was tested after the buffer-size,
