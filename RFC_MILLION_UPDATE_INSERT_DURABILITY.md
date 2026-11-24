@@ -4921,6 +4921,28 @@ benchmark default remains `false`; the remaining Exchange work needs to target
 buffering/backpressure or operator scheduling rather than partition-count
 selection.
 
+## Rejected Exchange client buffer increase (2026-11-24)
+
+The official Trino Exchange configuration documents `exchange.max-buffer-size`
+as a configuration-level client buffer whose default is `32MB`. The isolated
+8191 runtime did not set it explicitly, so a temporary restart was used to
+measure `64MB` against the original configuration. No connector or Pixels jar
+changed; all accepted writer, task, primary-index, and projection settings
+remained the same.
+
+Fresh strict table-to-table arms all passed exact count, contiguous min/max,
+distinct-ID, tag, and decimal checks:
+
+```text
+exchange.max-buffer-size=64MB: 8.830 s, 7.567 s   mean 8.199 s
+default 32MB:                  8.795 s, 7.467 s   mean 8.131 s
+```
+
+The larger buffer was slightly slower and did not reduce the Stage-1/TableWriter
+tail. It is therefore **rejected as an optimization** for this single-node
+fixture. The runtime was restored to the original configuration and the
+benchmark remains on the documented 32MB default.
+
 ## Rejected Exchange compression sweep (2026-11-24)
 
 The strict table-to-table path currently reports
