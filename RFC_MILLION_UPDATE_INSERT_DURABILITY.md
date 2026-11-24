@@ -6424,3 +6424,67 @@ by a separately measured, materially more expensive COMPACT/materialization
 stage.  It does not claim million-row throughput, and it does not promote a
 new code change; the next optimization decision should account for the full
 UPDATE-to-queryable cost rather than optimize resolver milliseconds alone.
+
+## Paired table-to-table INSERT: grouped versus original primary writes (2026-11-25)
+
+The same overall-cost approach was applied to INSERT using the materialized
+source `validationfresh.e2e68_fresh_candidate86_20261124`.  The source contains
+exactly 1,000,000 rows with IDs `10000000001..10001000000` and
+`tag_1_type='U111', tag_1_para=111.0000`.  Four independent empty target roots
+were created with the identical 68-column schema and explicit
+`pk='id', pk_scheme='rocksdb'`; no target had a prior row or fragment.
+
+The isolated endpoint remained Trino `8191` / `leaseq_validation_fresh`, and
+the shared `8090` process was not touched.  Both routes used
+`task_concurrency=64`, `task_min_writer_count=24`,
+`task_max_writer_count=32`, and `task_scale_writers_enabled=false`, with the
+same connector jar
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039` and
+stable daemon jar
+`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`.
+
+The grouped route used `pixels.insert.index.grouped.primary.write=true` and
+`pixels.insert.index.flush.parallelism=4`.  The original control removed both
+properties, leaving the same connector and daemon code but using the
+pre-grouped per-file primary-index append path.  This is a route-level control,
+not a claim that every historical connector commit is represented by one jar.
+
+The first fresh-target pair was:
+
+```text
+original/un-grouped:
+  target=e2e68_insert_ungrouped_20261125
+  query=20261124_175733_00000_njd5u
+  SQL timeline=21.509 s ~= 46.5K rows/s
+  primary_rpc_count=128 per writer, primary_flush_parallelism=1
+
+grouped:
+  target=e2e68_insert_grouped_20261125
+  query=20261124_175856_00000_fjvsk
+  SQL timeline=10.524 s ~= 95.0K rows/s
+  primary_rpc_count=1 per writer, primary_flush_parallelism=4
+```
+
+The grouped arm's per-writer primary-put wall intervals were approximately
+`1.83--2.52 s`, while the ungrouped arm's corresponding intervals were about
+`13.7--13.9 s`.  Both arms committed 1,000,000 rows and passed
+`count=1000000`, `count(DISTINCT id)=1000000`, the exact ID range, and the
+exact tag predicate.
+
+A second pair reversed the route order on two more fresh indexed targets.  The
+grouped warm arm `20261124_180006_00005_fjvsk` completed in `5.681 s`, about
+`176.0K rows/s`; the ungrouped arm
+`20261124_180108_00000_66zyx` completed in `19.608 s`, about `51.0K rows/s`.
+Both again returned the exact million-row/unique-key/tag checks.  The two
+pairs therefore show a real grouped-route SQL-wall improvement of about
+`2.0--3.5x` under the observed cold/warm states, but the range is not a stable
+throughput claim because the first arm after process restart and source/cache
+warmth affect the wall time.
+
+The accepted general INSERT conclusion is consequently narrower: grouped
+primary writes remove the obvious 128-RPC bottleneck and can reach about
+`176K rows/s` on a warm materialized table-to-table run, but this is still below
+the lower-hundreds-of-thousands target band and far below one million rows/s.
+The current remaining cost is in Trino finishing/exchange coordination and
+per-writer sink/index-finish intervals; this result does not justify another
+unpaired micro-optimization or a production-default change by itself.

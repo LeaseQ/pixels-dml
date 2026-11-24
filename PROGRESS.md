@@ -60,9 +60,9 @@
 
 | 优先级 / ID | 当前状态 | 下一项工作 | 完成条件 |
 | --- | --- | --- | --- |
-| P0 / BASE-01 | UPDATE部分完成 | 确定INSERT、UPDATE各自可比的原路径或优化前版本 | UPDATE已完成parallelism=1/16的SQL-wall成对控制；原Retina路径仍不可直接等价，INSERT总体对照仍待完成 |
-| P0 / ENV-01 | UPDATE现场核验完成 | 固定匹配版本、有效参数、源数据及每臂初始状态 | 本轮两仓SHA、daemon/connector哈希、端口、schema、目标范围及最终标签校验已写入RFC；INSERT仍需同口径复核 |
-| P1 / INS-01 | 待总体配对 | 完整表到表INSERT对照 | 相同输入及目标条件下重复配对，保存全部样本、SQL/可见时间、阶段成本、字节与结果校验 |
+| P0 / BASE-01 | UPDATE/INSERT路由对照完成 | 确定INSERT、UPDATE各自可比的原路径或优化前版本 | UPDATE已完成parallelism=1/16控制；INSERT已完成grouped与非grouped路由对照；原Retina删旧键/插新键路径仍不可直接等价 |
+| P0 / ENV-01 | 现场核验完成（两条路由） | 固定匹配版本、有效参数、源数据及每臂初始状态 | 两条路由的jar哈希、端口、schema、独立空目标、输入及最终校验已写入RFC |
+| P1 / INS-01 | 已有总体配对，待稳定性/阶段扩展 | 完整表到表INSERT对照 | 已完成两组fresh target grouped/非grouped对照；继续补齐更多样本及finish/exchange成本解释 |
 | P1 / UPD-01 | 已有总体配对，待多轮扩展 | 主键常量赋值及独立多轮UPDATE对照 | 已完成两目标交叉顺序的SQL UPDATE与COMPACT/标签读回；独立多轮打标及重启不属于本轮新增门槛 |
 | P2 / OPT-01 | INSERT候选未采纳 | 保留反向映射负结果；按总体成本证据决定是否继续研究定位开销 | 不将其作为已成立的INSERT优化；如另评估UPDATE/COMPACT，需独立位置迁移、内存和端到端配对证据 |
 | 后续 / EXT-01 | 待平台与接口核验 | 外部基线与鲲鹏实验 | 按既有方案推进；正常运行语义与计时可比，实际结果留证 |
@@ -96,6 +96,10 @@ BASE-01与ENV-01可以并行推进；INS-01与UPD-01需要对应基线和环境�
 timeline为9.937/11.567秒，parallelism=16为3.921/3.989秒，均为1M行、1 RPC、
 最终COMPACT标签读回全量正确；结果与完整阶段指标已记录在RFC末尾。profile_idx
 目标的旧CLI目录元数据报错已由最新构建CLI复验通过，旧失败不计入性能样本。
+随后完成INSERT grouped/非grouped的两组1M表到表对照：非grouped为21.509/19.608秒，
+grouped为10.524/5.681秒；四个独立空目标均通过行数、唯一键、范围和标签校验。当前
+可接受的warm grouped实测约176K rows/s，尚未达到最低几十万目标；下一步优先解释
+Trino finish/exchange与sink/index_finish长尾，不再把单次最好值当作稳定吞吐。
 
 [runs]: https://github.com/LeaseQ/pixels-dml/blob/e5946aa2/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283
