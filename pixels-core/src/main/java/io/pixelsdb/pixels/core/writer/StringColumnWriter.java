@@ -165,10 +165,6 @@ public class StringColumnWriter extends BaseColumnWriter
     private void writeCurPartWithDict(BinaryColumnVector columnVector, byte[][] values, int[] vLens, int[] vOffsets,
                                       int curPartLength, int curPartOffset)
     {
-        byte[] previousValue = null;
-        int previousOffset = -1;
-        int previousLength = -1;
-        int previousDictionaryId = -1;
         for (int i = 0; i < curPartLength; i++)
         {
             curPixelEleIndex++;
@@ -184,23 +180,8 @@ public class StringColumnWriter extends BaseColumnWriter
             }
             else
             {
-                byte[] value = values[curPartOffset + i];
-                int valueOffset = vOffsets[curPartOffset + i];
-                int valueLength = vLens[curPartOffset + i];
-                int dictionaryId;
-                if (value == previousValue && valueOffset == previousOffset && valueLength == previousLength)
-                {
-                    dictionaryId = previousDictionaryId;
-                }
-                else
-                {
-                    dictionaryId = dictionary.add(value, valueOffset, valueLength);
-                    previousValue = value;
-                    previousOffset = valueOffset;
-                    previousLength = valueLength;
-                    previousDictionaryId = dictionaryId;
-                }
-                curPixelVector[curPixelVectorIndex++] = dictionaryId;
+                curPixelVector[curPixelVectorIndex++] = dictionary
+                        .add(values[curPartOffset + i], vOffsets[curPartOffset + i], vLens[curPartOffset + i]);
                 pixelStatRecorder.updateString(values[curPartOffset + i], vOffsets[curPartOffset + i],
                         vLens[curPartOffset + i], 1);
             }
