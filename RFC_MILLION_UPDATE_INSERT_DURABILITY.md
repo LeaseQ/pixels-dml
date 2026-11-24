@@ -5457,3 +5457,34 @@ coordinator and worker running without the experimental property. The result
 points away from simply reducing RocksDB batch count; the next service-side
 experiments should instrument or change the grouped-RPC/main-index overlap and
 queueing behavior, rather than make the batch wider again.
+
+## Small-file compaction check: not yet a proven E2E optimization (2026-11-24)
+
+The source fixture is physically fragmented: the original 1M-row, 68-column
+source occupied about 290.7 MB across 832 non-empty Pixels files. A derived
+source table with identical values and schema was materialized through the
+normal INSERT path; it occupied about 291.6 MB across roughly 96 non-empty
+files. This is a valid storage-layout concern, but it must be measured against
+the full table-to-table INSERT rather than inferred from file counts.
+
+Strict 1M-row arms used the same session settings and destination table. The
+first compact-source arm was promising, but the paired warm repeat did not
+reproduce it:
+
+```text
+compact source, qid 20261124_105635_00044_59q7y: 4.296 s, 232.8K rows/s
+  destination IDs 305000000001..305001000000
+compact source, qid 20261124_105816_00051_59q7y: 4.623 s, 216.3K rows/s
+  destination IDs 306000000001..306001000000
+original source, qid 20261124_105913_00057_59q7y: 4.611 s, 217.0K rows/s
+  destination IDs 307000000001..307001000000
+```
+
+All three arms returned 1M rows; the checked arms had exact distinct and
+contiguous IDs plus 1M `U111` and `111.0000` values. The compact and original
+repeat were effectively tied, so compaction is **not promoted as a proven
+throughput fix** yet. It remains a sound operational layout recommendation for
+scan efficiency, but the current E2E bottleneck is still the combined source
+scan, 68-column conversion, and table-writer path. The derived compact table is
+kept on cds20 as a diagnostic fixture, not as a replacement for the original
+main test source.
