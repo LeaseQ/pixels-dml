@@ -4311,3 +4311,46 @@ engineering conclusion is firm: the value-buffer hoist is rejected and must
 not be merged. The original per-entry buffer preparation is restored in both
 the source tree and the running Retina; the failed overlay is retained only as
 forensic evidence.
+
+## Rejected ThreadLocal value-buffer lookup (2026-11-24)
+
+The failed hoist was narrowed to a safer candidate: retain the original
+per-entry `position(0)`/`limit(8)` preparation, but replace the per-entry
+`ConcurrentHashMap<ThreadId, ByteBuffer>.computeIfAbsent` lookup with a
+`ThreadLocal<ByteBuffer>`. The candidate compiled and was deployed as an
+isolated Retina overlay after recovery from checkpoint `670188`.
+
+On `e2e68_page_fresh_20261124`, the candidate appended a disjoint 1M-row slice
+from `e2e68_fresh_candidate86_20261124` successfully:
+
+```text
+query=20261124_001909_00021_mb5ng
+elapsed=11.33 s
+physicalWrittenDataSize=291,107,949 B
+```
+
+The target check was exact at 4M rows:
+
+```text
+count=4,000,000
+distinct(id)=4,000,000
+min(id)=10,000,000,001
+max(id)=410,001,000,000
+tag_1_type='U111'=4,000,000
+tag_1_para min=max=111.0000
+```
+
+The stable overlay was then restored from checkpoint `670194` and ran the same
+1M-row INSERT shape on the same target, starting at 4M existing rows:
+
+```text
+query=20261124_002358_00025_mb5ng
+elapsed=10.77 s
+physicalWrittenDataSize=291,112,064 B
+```
+
+This is not a perfectly paired benchmark because the stable arm started with
+one million more existing rows, but the candidate was slower despite the
+smaller index. The result provides no evidence of an INSERT gain, so the
+ThreadLocal lookup change is rejected and was not committed. The remote source
+and running Retina were restored to the original implementation.
