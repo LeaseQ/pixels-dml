@@ -19,6 +19,14 @@ INSERT候选仍是固定32 writers加关闭redistribution；当前观测到的Tr
 随后在清理远端候选源码后，纯 `StringStatsRecorder` 解码缓存也完成了独立新表
 对照：warm SQL 4.31秒，对照4.12秒，完整2M行/全标签读回通过但仍略慢，已撤回。
 
+本轮继续验证了写入端 RLE 常量字符串的批量填充候选：候选只把
+`PixelsPageSink` 中逐行 `BinaryColumnVector.setRef` 改为一次性填充引用数组，
+通过 JVM 开关启用，不改变默认路径。两个候选臂的客户端 wall 为9.405/7.257秒，
+两个稳定对照为11.407/6.755秒；四个1M目标均通过行数、唯一键、范围及
+`U111`/`111.0000`标签门禁，但warm臂候选反而较慢，故判定为交叉波动并撤回。
+这进一步说明单点字符串填充不是当前可证明的E2E瓶颈，后续应先确认RLE是否穿过
+投影并定位更大的Exchange/block分配路径。
+
 本轮现场状态（2026-11-25）：8191已恢复stable connector/core与默认args，
 `starting=false`；共享8090未重启。JFR有效样本、候选query ID、拒绝原因与最终jar哈希
 见RFC末尾；本轮推送前远端`PROGRESS.md`版本为
