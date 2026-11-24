@@ -199,3 +199,13 @@ E2E 门禁淘汰。候选进程内可读出 1M 行和精确标签聚合；恢复
 应转向只读 instrumentation 或 Exchange/block copy 的上游路径，并继续保留完整产物读回门禁。
 本轮提交前检查的远端 `PROGRESS.md` blob 为
 `639fa112af9fbaa25b61e1294060f4697219f639`。
+
+2026-11-25 uniform dictionary-ID RLE reuse候选已完成严格冷/热交叉：候选
+`3ad542a27a73cf6a58afa0a0be8b528e533e22e63ec59a17ca67d502bfde728f`冷态
+8.480秒、稳定版8.560秒，热追加候选8.502秒、稳定版8.139秒；四个目标均通过
+1M/2M行、distinct-ID、范围和完整标签门禁，候选未形成可复现收益，已拒绝，8191
+已恢复stable core。该轮还确认Retina重启后的非首次部署会停在RECOVERING，手动调用
+现有markReady RPC后恢复READY并重新提供19989；共享8090未触碰。下一步继续聚焦
+VariableWidthBlock/Exchange上游分配与完整双路径总体成本，不再重复窄RLE缓存变体。
+本轮提交前检查的远端 `PROGRESS.md` blob 为
+`7229cf51c6b298ad6cc036f1a110c488e24a3295`。

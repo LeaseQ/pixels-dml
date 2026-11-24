@@ -7207,3 +7207,63 @@ over another direct vector-state shortcut.
 
 Before this documentation push, the remote `PROGRESS.md` was fetched at
 `639fa112af9fbaa25b61e1294060f4697219f639`.
+
+## Rejected uniform dictionary-ID RLE reuse in `StringColumnWriter` (2026-11-25)
+
+The JFR sample showed UTF-8 decoding and string writer/RLE code on the INSERT
+path, so an isolated `pixels-core` candidate cached the encoded byte sequence
+for a consecutive uniform dictionary-ID pixel with the same ID and length.
+The candidate changed only the sink-side encoding path; dictionary contents,
+null bitmap, statistics, and file format were unchanged. Candidate core SHA
+was `3ad542a27a73cf6a58afa0a0be8b528e533e22e63ec59a17ca67d502bfde728f`;
+the stable control was
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`.
+
+The test used the materialized 68-column source
+`validationfresh.e2e68_fresh_candidate86_20261124`, independent indexed
+targets, the isolated 8191 endpoint, `task_concurrency=64`, fixed 16 writers,
+writer scaling disabled, `redistribute_writes=false`, and the same grouped
+primary-write/default connector profile. Both cold arms were run first after
+an isolated Trino restart:
+
+```text
+candidate  e2e68_rle_cache_dest_c_20261125
+  query=20261124_233153_00000_qjqm7  SQL=8.480 s  ~=117.9K rows/s
+  client wall=10.282 s
+stable     e2e68_rle_cache_dest_d_20261125
+  query=20261124_233320_00000_qjarj  SQL=8.560 s  ~=116.8K rows/s
+  client wall=10.555 s
+```
+
+Both cold targets passed the 1M-row count, 1M distinct-ID count, exact
+`10000000001..10001000000` range, and one million `U111/111.0000` tag values.
+The 0.9% candidate lead is below cold-start noise, so it is not evidence of a
+gain. A second crossed check appended one disjoint million to each already
+materialized target:
+
+```text
+candidate append  query=20261124_233512_00000_p5wub  SQL=8.502 s  ~=117.6K rows/s
+stable append     query=20261124_233635_00000_ef2f5  SQL=8.139 s  ~=122.9K rows/s
+```
+
+The candidate target ended at 2M rows and 2M distinct IDs with the appended
+range beginning at `1010000000001`; the stable target ended at 2M rows and 2M
+distinct IDs with the appended range beginning at `2000000000001`. Both passed
+the full count, distinct-ID, range, and tag checks. The candidate was 4.5%
+slower in this warm/append pair and is rejected. The local candidate source
+remains uncommitted for traceability and must not be promoted or pushed as an
+optimization; future work should target the upstream
+`VariableWidthBlock.copyPositions`/Exchange allocation boundary instead of
+repeating narrow RLE-cache variants.
+
+During this run, the isolated Retina restart exposed an operational lifecycle
+gap: after replaying 8,208 baseline files it stayed in `RECOVERING` with a
+valid recovery epoch and did not publish transaction port 19989. Calling the
+existing local `markReady` RPC on 19990 transitioned it to `READY`, after
+which 19989 appeared and 8191 resumed normal table queries. This was isolated
+to the validation runtime; shared 8090 was not restarted or changed. The
+daemon auto-ready behavior is a separate follow-up and was not mixed into this
+code A/B.
+
+Before this documentation push, the remote `PROGRESS.md` was fetched at
+`7229cf51c6b298ad6cc036f1a110c488e24a3295`.
