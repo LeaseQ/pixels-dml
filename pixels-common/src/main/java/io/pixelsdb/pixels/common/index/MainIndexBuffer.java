@@ -50,6 +50,14 @@ public class MainIndexBuffer implements Closeable
      * fileId -> {tableRowId -> rowLocation}.
      */
     private final Map<Long, Map<Long, IndexProto.RowLocation>> indexBuffer;
+    /**
+     * Reverse lookup for buffered row locations.  INSERT, UPDATE, and COMPACT
+     * all share the relocation-safe insert path; scanning every file buffer to
+     * find an older row location makes that path grow with the number of open
+     * files.  Keep the existing per-file maps for flush/layout behavior, but
+     * use this map to locate a prior row in constant time.
+     */
+    private final Map<Long, Long> rowIdToFileId;
     private final MainIndexCache indexCache;
     private boolean populateCache = false;
 
@@ -96,6 +104,7 @@ public class MainIndexBuffer implements Closeable
     {
         this.indexCache = requireNonNull(indexCache, "indexCache is null");
         this.indexBuffer = new HashMap<>();
+        this.rowIdToFileId = new HashMap<>();
     }
 
     /**
@@ -125,18 +134,19 @@ public class MainIndexBuffer implements Closeable
             this.indexBuffer.put(location.getFileId(), fileBuffer);
         }
 
-        for (Iterator<Map.Entry<Long, Map<Long, IndexProto.RowLocation>>> it =
-                this.indexBuffer.entrySet().iterator(); it.hasNext(); )
+        Long previousFileId = this.rowIdToFileId.get(rowId);
+        if (previousFileId != null && previousFileId != location.getFileId())
         {
-            Map.Entry<Long, Map<Long, IndexProto.RowLocation>> entry = it.next();
-            if (entry.getKey() != location.getFileId() && entry.getValue().remove(rowId) != null &&
-                    entry.getValue().isEmpty())
+            Map<Long, IndexProto.RowLocation> previousFileBuffer = this.indexBuffer.get(previousFileId);
+            if (previousFileBuffer != null && previousFileBuffer.remove(rowId) != null &&
+                    previousFileBuffer.isEmpty())
             {
-                it.remove();
+                this.indexBuffer.remove(previousFileId);
             }
         }
 
         fileBuffer.put(rowId, location);
+        this.rowIdToFileId.put(rowId, location.getFileId());
         // A lookup may have admitted an older persistent range into the cache.
         // A point entry must win over that range, while avoiding population of
         // every relocated row when cache population is disabled.
@@ -178,6 +188,7 @@ public class MainIndexBuffer implements Closeable
         {
             return false;
         }
+        this.rowIdToFileId.put(rowId, location.getFileId());
         // Newly allocated row ids cannot overlap an older persistent range.
         // Deliberately avoid per-row cache eviction/admission on this hot path;
         // lookup still finds the entry in the active file buffer.
@@ -310,6 +321,10 @@ public class MainIndexBuffer implements Closeable
         {
             throw new MainIndexException("FileBuffer changed before committed flush discard");
         }
+        for (Long rowId : fileBuffer.keySet())
+        {
+            this.rowIdToFileId.remove(rowId);
+        }
         fileBuffer.clear();
         this.indexBuffer.remove(snapshot.getFileId());
         if (this.indexBuffer.size() <= CACHE_POP_ENABLE_THRESHOLD)
@@ -328,6 +343,7 @@ public class MainIndexBuffer implements Closeable
     public void close() throws IOException
     {
         this.indexBuffer.clear();
+        this.rowIdToFileId.clear();
         this.indexCache.close();
     }
 }

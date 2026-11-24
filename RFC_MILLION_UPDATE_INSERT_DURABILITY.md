@@ -6184,3 +6184,56 @@ The warm cap-32 result is materially slower than the matched cap-24 results
 near 4.02 s, so increasing grouped RPC concurrency is rejected. The isolated
 Trino process was restored to `default-cap24-trino.args`; shared port `8090`
 was not changed.
+
+## JFR-confirmed MainIndex reverse-lookup candidate (2026-11-25)
+
+The next probe was selected from a clean indexed INSERT profile rather than
+another broad concurrency sweep.  A fresh target
+`validationfresh.e2e68_profile_idx_20261125` was created with an isolated
+storage root and `pk='id', pk_scheme='rocksdb'`.  It received one million rows
+from the previously validated `e2e68_fresh_candidate86_20261124` source using
+the strict session:
+
+```text
+task_concurrency=64
+task_min_writer_count=32
+task_max_writer_count=32
+task_scale_writers_enabled=false
+```
+
+The query was `20261124_162513_00025_663j4`.  The SQL timeline was `6.625 s`
+(the CLI wall included client startup), and the complete readback passed:
+
+```text
+count=1000000 distinct_id=1000000
+min=3010000000001 max=3010001000000
+tag_check=1000000
+```
+
+The same-run host sample had machine CPU peak about 39% and disk wait at 0--2%.
+The isolated JFRs are retained at:
+
+```text
+runtime/e2e-fresh-20261122/jfr/insert-profile-freshidx-20261124162511-retina.jfr
+runtime/e2e-fresh-20261122/jfr/insert-profile-freshidx-20261124162511-trino.jfr
+```
+
+Retina's hot-method view was led by `HashMap.removeNode` (30.30%),
+`HashMap.resize` (10.30%), `ComparableTimSort.binarySort` (7.27%), and
+`HashMap.getNode` (6.67%), with `SqliteMainIndex.putEntries` also visible.
+Trino's profile was led by `PixelsPageSink.appendValue` (14.44%),
+`VariableWidthBlock.copyPositions` (10.50%), UTF-8 decoding (5.69%), and
+dictionary/hash work.  This confirms two real cost centers while showing no
+host-level CPU or disk saturation.  The previously selected
+`e2e68_visibility_1m_20261124` source is excluded from new performance runs:
+full-column reads can hit an old DECIMAL file that fails in
+`DecimalColumnReader.readSelected`; `count(*)` alone does not detect it.
+
+The source candidate adds a reverse `rowId -> fileId` map to
+`MainIndexBuffer`.  The existing relocation semantics remain unchanged, but
+`insert()` no longer scans every other file buffer for each row.  Both
+`insert()` and `insertNew()` maintain the map, and committed flush discard and
+`close()` remove its entries.  This is an experimental candidate only; it has
+not yet been deployed or promoted.  The required next gate is a matched fresh
+indexed A/B with exact count, distinct-ID, contiguous range, all tag checks,
+and an UPDATE/relocation regression test before any default change.
