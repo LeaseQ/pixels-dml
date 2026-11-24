@@ -6329,3 +6329,98 @@ after the probe.  The remaining indexed INSERT ceiling is therefore not
 addressed by simply allowing more concurrent grouped RPCs; the next probe
 should target the Trino finish/exchange coordination or reduce per-writer
 serialization with a correctness-preserving design.
+
+## Paired overall UPDATE control and materialization (2026-11-25)
+
+This run follows `PROGRESS.md` at commit
+`08cbf38bcd5f2ddba0ba3b1ef759f64490cff89e` (the progress file was fetched and
+read immediately before this record was prepared).  The purpose was to move
+from connector-internal evidence to a comparable SQL-wall control while
+retaining the tagging-first semantics.
+
+The isolated endpoint was Trino `8191`, environment
+`leaseq_validation_fresh`; the pre-existing `8090` process was not touched.
+Both arms used the same deployed connector jar
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`, the
+stable daemon jar
+`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`,
+`task_concurrency=64`, one shared primary-key RPC, and one million-row exact
+primary-key ranges.  Only the Trino JVM property
+`pixels.update.primary-key-resolve-parallelism` changed between the control
+and optimized arms.
+
+The first cross-table pair was:
+
+```text
+serial, parallelism=1:
+  target=e2e68_profile_idx_20261125
+  range=3010000000001..3010001000000
+  query=20261124_173820_00016_xe8h3
+  SQL timeline=9.937 s ~= 100.6K rows/s
+  primary_key_resolve_ms=9057.442, total_ms=9763.476
+
+parallel, parallelism=16:
+  target=e2e68_stable32_recheck_20261125
+  range=10010000000001..10010001000000
+  query=20261124_173932_00000_hpsmh
+  SQL timeline=3.921 s ~= 255.0K rows/s
+  primary_key_resolve_ms=1508.277, total_ms=2253.519
+```
+
+The order was then crossed on the same two populated targets.  Serial
+parallelism=1 on `e2e68_stable32_recheck_20261125` took `11.567 s` with
+`primary_key_resolve_ms=9172.510` (query
+`20261124_174045_00000_yk8yq`); parallelism=16 on
+`e2e68_profile_idx_20261125` took `3.989 s` with
+`primary_key_resolve_ms=1501.287` (query
+`20261124_174200_00000_fvikv`).  All four UPDATE statements returned
+`1,000,000 rows`, retained `1,000,000` distinct primary keys, and had one RPC.
+
+The paired SQL result is therefore approximately `87--101K rows/s` for the
+serial control versus `251--255K rows/s` for parallelism 16, or about a
+`2.5--2.9x` SQL-wall improvement on this exact-key workload.  The connector
+resolver metric explains the change, but the accepted headline is the SQL
+timeline, not the internal resolver rate.  Before COMPACT, ordinary physical
+reads still showed the old tag values, as required by the versioned UPDATE
+contract.
+
+Both final states were then materialized independently with the current CLI
+build.  The first target produced a compact file and the final predicate
+returned exactly `1,000,000` rows with `P2/222.0000`.  The second target's
+COMPACT retained the following stage evidence:
+
+```text
+[PIXELS_TAG_INDEX_METRIC]
+  tagged_rows=1000000 resolve_rows=1000000 resolve_rpc_count=62
+  resolve_ms=13417.656672
+[PIXELS_COMPACTION_RESOLVE_METRIC]
+  rows=1000000 resolve_rpc_count=62 resolve_ms=12631.392393
+[PIXELS_COMPACTION_STAGE_METRIC]
+  physical_rewrite outputs=1 worker_ms=19710.446123
+[PIXELS_COMPACTION_INDEX_METRIC]
+  relocated_rows=1000000 relocation_rpc_count=128
+[PIXELS_COMPACTION_STAGE_METRIC]
+  publish outputs=1 publish_ms=9115.082981
+```
+
+The CLI completed successfully and reported the compaction operation as
+`28 s`; stage metrics are reported separately because their worker intervals
+are not to be added as if they were a single serial wall clock.  The final
+materialized query on `e2e68_stable32_recheck_20261125` returned
+`count=1000000`, `distinct_id=1000000`, the exact expected ID range, and
+`tag_1_type='S2' AND tag_1_para=122.0000 = 1000000`.
+
+One earlier COMPACT invocation used the older installed CLI and failed while
+looking up a directory URI; it did not alter the table.  The run above used
+the freshly built `pixels-cli-0.2.0-SNAPSHOT-full.jar`, which includes the
+directory filtering fix.  The profile target's compact command was completed
+with that same build; its compact file and final readback are accepted, but
+its CLI stage timings were not retained by the SSH session and are not used
+for a compaction-cost comparison.
+
+This establishes the current UPDATE result in the correct two-part form:
+about `250K rows/s` for the SQL UPDATE route with parallel resolver, followed
+by a separately measured, materially more expensive COMPACT/materialization
+stage.  It does not claim million-row throughput, and it does not promote a
+new code change; the next optimization decision should account for the full
+UPDATE-to-queryable cost rather than optimize resolver milliseconds alone.
