@@ -3921,6 +3921,27 @@ tag_1_type='U111'=100000
 tag_1_para min=max=111.0000
 ```
 
+## Trino writer floor 32: rejected (2026-11-24)
+
+With the stable Retina runtime and the same benchmark session properties, a
+probe forced the local writer range to exactly 32:
+
+```text
+task_concurrency=64
+task_min_writer_count=32
+task_max_writer_count=32
+task_scale_writers_enabled=false
+```
+
+The two warm INSERT arms measured 4.94 s and 4.58 s
+(`20261124_012259_00032_txdru` and `20261124_012308_00033_txdru`). The paired
+24--32 writer baseline was 3.93 s. For this unpartitioned table shape, forcing
+all 32 writers adds overhead rather than increasing throughput, so the probe
+is rejected and the benchmark remains on the 24--32 writer range.
+
+The post-probe correctness check remained exact at 29M rows with unique IDs
+and complete `U111`/`111.0000` tags.
+
 The normal GC cycle then published `recovery_cds20_670080.bin`. Retina was
 stopped and restarted from that body with the 64 GiB configuration, and the
 normal recovery-epoch handshake completed (`RECOVERING -> READY`). The
