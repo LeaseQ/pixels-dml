@@ -4696,3 +4696,31 @@ tuning toward source string/dictionary decoding, PageSink conversion, and
 Stage-1 exchange scheduling. Any further candidate must retain the hidden
 timestamp, wide-decimal handling, tag columns, primary-index write, and exact
 table-to-table semantics.
+
+## Fixed 32-writer control after strict recheck (2026-11-24)
+
+To test whether the 24-writer result was leaving throughput on the table, a
+disjoint strict table-to-table arm was run with
+`task_min_writer_count=32`, `task_max_writer_count=32`, and writer scaling
+disabled. Query `20261124_041927_00053_67tdy` inserted the destination range
+`69,000,000,001..69,001,000,000` and finished in `6.20 s`, approximately
+`161K rows/s`. The exact readback passed:
+
+```text
+count=1000000
+distinct(id)=1000000
+min=69000000001
+max=69001000000
+tag_1_type='U111' AND tag_1_para=111.0000 = 1000000
+```
+
+The query stats identify the long tail rather than a metadata commit issue:
+Stage 1 `ExchangeOperator` used `2.70 s` of output wall and `2.56 s` CPU,
+while the 32-writer `TableWriterOperator` accumulated `11.71 s` wall and
+`7.62 s` CPU across its drivers. A neighboring fixed-24 control,
+`20261124_042121_00059_67tdy`, inserted
+`70,000,000,001..70,001,000,000` in `4.22 s`, approximately `237K rows/s`,
+and passed the same exact check. This pair rejects 32 writers as a current
+default for this one-node wide fixture; 24 writers remains the better
+reproducible point. The next optimization target is the Stage-1 exchange and
+source-to-writer scheduling path, not another primary-index-only change.
