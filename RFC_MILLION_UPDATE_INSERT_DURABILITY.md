@@ -4920,6 +4920,27 @@ therefore **rejected as a tuning conclusion** and was not added to the normal
 runtime configuration. The 8191 instance was restored to the default args and
 passed `SELECT 1`; the temporary candidate config was not promoted.
 
+## Rejected exchange.concurrent-request-multiplier=6 check (2026-11-24)
+
+The remaining Exchange backpressure knob was tested after the buffer-size,
+compression, partition-count, and client-thread probes. A temporary restart
+set `exchange.concurrent-request-multiplier=6`; the normal runtime uses the
+default value 3. The source, 68-column projection, 24--32 writer session,
+grouped primary route, and cap-24 connector path were unchanged. Both arms of
+each configuration inserted one million rows and passed exact count,
+contiguous min/max, distinct-ID, tag, and decimal checks:
+
+```text
+multiplier=6: 10.751 s, 7.171 s   mean 8.961 s ~= 111.6K effective rows/s
+default=3:     10.682 s, 7.030 s   mean 8.856 s ~= 112.9K effective rows/s
+```
+
+The candidate is slightly slower and does not reduce the scheduling or
+finishing tail. It is therefore **rejected** and was not added to the normal
+configuration. The 8191 instance was restored to the default args and passed
+`SELECT 1`. At this point the remaining Exchange evidence points to runtime
+state and writer scheduling variance, not a single numeric Exchange setting.
+
 ## Rejected adaptive write partition-count session property (2026-11-24)
 
 Trino exposes `determine_partition_count_for_write_enabled`, which can derive
