@@ -5882,3 +5882,68 @@ The current blocker is a post-recovery new-file visibility publication or
 lookup lifecycle defect. Until a fresh INSERT can pass
 `count/distinct/min/max/tag` readback after the normal recovery handshake,
 performance A/B results must not be compared or promoted.
+
+## Runtime artifact mismatch fixed; fresh visibility gate and 1M baseline (2026-11-24)
+
+The previous conclusion above was caused by an incomplete runtime diagnosis.
+The active Trino connector jar was older than the `pixels-trino-dml`
+validation branch and its `PixelsMetadata.class` did not contain the
+`RetinaService.addVisibility` publication call or the
+`PIXELS_INSERT_PUBLISH_METRIC` marker. Replacing only that jar exposed a
+second packaging mismatch (`TransService.markTransReadOnly(long)`), and the
+first 10K retry then exposed a third mismatch in `pixels-core`
+(`LongDecimalColumnVector.add(long,long)`). The running plugin directory was
+therefore a mixture of artifacts from different source revisions. No
+performance result from that mixed runtime is valid.
+
+The connector was rebuilt from the current validation source and deployed as
+an atomic Pixels artifact set. Every existing `pixels-*.jar` in the Trino
+plugin directory was backed up with the suffix
+`before-20261124-atomic-pixels-build`; the active connector now contains the
+visibility publication markers. The deployed hashes include:
+
+```text
+pixels-trino-connector-0.2.0-SNAPSHOT.jar  f8054a975ca754cc221c1ed4bca60133547183c9c9e0654d91946a0edd1a9f55
+pixels-common-0.2.0-SNAPSHOT.jar           20366fc0fb79e93ac0e20c9298479e5c047acb0cbe8e9644caef64498c66ab75
+pixels-core-0.2.0-SNAPSHOT.jar             9ead2f164c3fe110ee99d5e13394a58e654d1483908e28cde1a3edecd5fb1a48
+```
+
+The runtime was restarted with the normal `PIXELS_HOME` and IPv4 settings;
+both Trino and Retina reported healthy, non-starting states. The connector
+log recorded successful publication for the fresh writes, for example:
+
+```text
+table=validationfresh.e2e68_visibility_gate_20261124 fragments=4
+layout_ms=15.942 metadata_lookup_ms=20.735 metadata_update_ms=10.444
+retina_ms=19.225 total_ms=66.628
+```
+
+A new empty 68-column, no-primary-index table was created with an isolated
+path, then a 10K table-to-table INSERT was executed and read back. Query
+`20261124_144438_00007_kzy8t` finished in 2.196 s, and the exact readback
+returned:
+
+```text
+count=10000 distinct_id=10000 min=950000060001 max=950000070000 tag_check=10000
+```
+
+This is the first post-recovery run that passes the complete visibility gate.
+
+The strict 1M baseline was then run on another new empty 68-column table with
+the same isolated-path construction and standard 24--32 writer session.
+Query `20261124_144630_00013_kzy8t` finished in 3.531 s, physically wrote
+51,836,604 B, and its exact readback returned:
+
+```text
+count=1000000 distinct_id=1000000 min=960000000001 max=960001000000 tag_check=1000000
+```
+
+The accepted fresh-table INSERT throughput is therefore approximately
+`283.2K rows/s` (`1,000,000 / 3.531`). This is a valid no-primary-index
+table-to-table baseline, not yet the final indexed/tag-aware headline.
+
+For comparison, a 1M write into the older indexed diagnostic table completed
+in 8.526 s, but its readback encountered historical fileId `155318` with a
+missing visibility bitmap. That arm is rejected and its approximately 111K
+rows/s write rate must not be reported as a valid E2E result. A fresh indexed
+target is still required before making an indexed-path throughput claim.
