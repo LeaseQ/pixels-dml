@@ -5541,3 +5541,59 @@ representation (Pixels column decode, wide conversion, and table writer), not
 just the final dictionary block wrapper. The runtime is restored to stable
 connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`
 with no experimental property.
+
+## Corrected isolated indexed A/B for the latest connector (2026-11-24)
+
+The first rerun after the latest remote source update exposed two validation
+hazards that must be recorded explicitly. First, the remote `connector/target`
+directory still contained the rejected single-value-dictionary RLE jar even
+though the source had been reverted. A clean Maven rebuild with JDK 23 produced
+connector SHA `9da741bc00acd86598c4d9e018747e5681fd32fcfc820b1630364854f387593c`
+and the rebuilt class contained no RLE probe marker. Second, the historical
+`e2e68_page_fresh_20261124` target is shared with other users on cds20. Its ID
+distribution changed during the run and included unrelated ranges such as
+`332B..335B`; therefore the contemporaneous `323B..325B` arms are runtime
+observations only and are not accepted as correctness evidence.
+
+The corrected A/B used a new target table and root directory. The first
+`LIKE`-based diagnostic target was intentionally discarded as a performance
+case because it did not carry the primary-index metadata (`pk='id',
+pk_scheme='rocksdb'`) and emitted `index_ms=0`. The accepted target was created
+with the full 68-column schema and the supported indexed metadata:
+
+```sql
+WITH (
+  storage = 'file',
+  paths = 'file:///.../e2e68_codex_idx_ab_20261124',
+  pk = 'id',
+  pk_scheme = 'rocksdb'
+)
+```
+
+Two fresh, non-overlapping 1M-row table-to-table INSERTs used the same source,
+session settings, and 24-writer runtime. Each passed count, distinct-ID,
+contiguous min/max, `tag_1_type='U111'`, and `tag_1_para=111.0000` checks:
+
+```text
+stable 730000000001..730001000000:
+  QueryMonitor 20261124_121010_00005_ysq2m: 8.371 s ~= 119.5K rows/s
+  CLI wall: about 10.50 s
+  primary-index metrics present; 24 fragments published
+
+latest connector 731000000001..731001000000:
+  QueryMonitor 20261124_121211_00005_dgefw: 7.045 s ~= 141.9K rows/s
+  CLI wall: about 9.19 s
+  primary-index metrics present; 24 fragments published
+```
+
+The latest connector is about 15.8% faster in this one strict indexed pair,
+but this is not sufficient to replace the established multi-arm baseline: the
+absolute runtime remains variable and the ByteString change is small relative
+to source scan, 68-column conversion, writer, Exchange, and primary-index
+work. The result supports retaining the low-risk ByteString ownership change
+and the split `writer_close_ms`/`index_finish_ms` instrumentation on the
+validation branch, while requiring another matched pair or soak before
+promoting a new headline rate. The active 8191 runtime was restored to stable
+connector SHA
+`4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4` after the
+run.
