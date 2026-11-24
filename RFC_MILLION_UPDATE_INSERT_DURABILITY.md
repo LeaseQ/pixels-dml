@@ -6670,3 +6670,66 @@ stable end-to-end win in this crossed experiment.  The corrected conclusion is
 that writer count affects finish-lifecycle accumulation, while Trino/source
 warm-up currently dominates SQL wall time.  No writer-count default change is
 accepted; further work must control or report warm-up state explicitly.
+
+## `redistribute_writes=false` exchange bypass probe (2026-11-25)
+
+The distributed plan for the fixed wide table exposed a second runtime-level
+candidate.  With the normal `redistribute_writes=true` setting, Trino created a
+separate writer fragment and a `100`-partition ROUND_ROBIN exchange before the
+Pixels table writer.  With `redistribute_writes=false`, the source scan and
+table writer stayed in one SOURCE fragment.  The plan still contained a local
+ROUND_ROBIN exchange, so this is not a claim that all buffering or writer
+parallelism disappears; it specifically removes the cross-fragment exchange.
+
+The probe used the stable grouped-primary route, the isolated endpoint `8191`,
+the materialized 68-column source
+`validationfresh.e2e68_fresh_candidate86_20261124`,
+`task_concurrency=64`, fixed 16 writers, and writer scaling disabled.  Two
+order-reversed pairs were run against independent indexed targets.  Each arm
+returned one million rows and passed the exact gate
+`count=1,000,000`, `count(DISTINCT id)=1,000,000`, IDs
+`10000000001..10001000000`, and one million `U111`/`111.0000` tag values:
+
+```text
+redistribute_writes=false  e2e68_redist_off16_20261125  20261124_191341_00012_4pjcb  5.02 s  ~=199K/s
+redistribute_writes=true   e2e68_redist_on16_20261125   20261124_191348_00013_4pjcb  5.91 s  ~=169K/s
+
+redistribute_writes=true   e2e68_redist_on16b_20261125  20261124_191447_00016_4pjcb  5.57 s  ~=179K/s
+redistribute_writes=false  e2e68_redist_off16b_20261125 20261124_191454_00017_4pjcb  3.96 s  ~=252K/s
+```
+
+The operator split supports the mechanism: the no-redistribution arm had no
+stage-2 `TaskOutput`/stage-1 `Exchange` pair, while the normal arm paid about
+`3.47 s` of stage-1 exchange output and about `0.75 s` of stage-2 task output
+in the first pair.  The no-redistribution writer still had a long accumulated
+`finishWall`, so the setting is a scheduling/backpressure candidate rather than
+a complete sink fix.
+
+The first 16-writer pair was a valid normal-run readback, but a later
+exploratory attempt created several additional indexed targets and exhausted
+the isolated Retina heap while allocating another write buffer.  The 8-writer
+attempts were cancelled or failed and are excluded.  Retina was restarted from
+checkpoint `recovery_cds20_860063.bin`, recovered with `baselineFiles=8208` and
+`retired=385`, rejoined the hash ring, and passed a one-row indexed/tagged
+smoke test.  Because the checkpoint predates the probe targets, those targets
+were empty after recovery; the same two existing target tables were then
+repopulated after recovery to verify that the candidate was not dependent on
+the pre-failure state:
+
+```text
+redistribute_writes=true   e2e68_redist_on16b_20261125  20261124_192607_00039_4pjcb  11.03 s  ~=90.7K/s
+redistribute_writes=false  e2e68_redist_off16b_20261125 20261124_192620_00040_4pjcb   7.86 s  ~=127.2K/s
+```
+
+Both post-recovery targets again passed the full gate.  The post-recovery
+numbers are a health/repeatability check, not a new headline because recovery
+warm-up dominates them.  Across the three usable paired comparisons,
+`redistribute_writes=false` is a strong session-level benchmark candidate, but
+it is not installed as a Trino or production default: the sample is one-node
+and one wide table shape, the writer finish tail remains, and the 8-writer
+crossed arm was invalidated by the Retina OOM.  Future INSERT headline runs
+should report this setting explicitly and add a clean 24/32-writer pair before
+any default change.
+
+Before this documentation push, the remote progress file was fetched and
+checked at `3b772a903309ff83923127e1f040433059c64edf`.
