@@ -5515,3 +5515,29 @@ remains a separate floor. The result is **diagnostic, not promoted**: the next
 valid candidate must preserve arbitrary tag values and prove its safety from
 storage metadata or a general low-cardinality representation, rather than
 hard-code this fixture's constants.
+
+## Rejected single-value dictionary to RLE block (2026-11-24)
+
+The connector already receives dictionary-encoded string vectors from the
+Pixels reader and already has a sink fast path for Trino
+`RunLengthEncodedBlock`. An opt-in candidate changed only the loader: a
+non-null dictionary with exactly one value was exposed as an RLE block instead
+of a `DictionaryBlock`; all multi-value and nullable dictionaries kept the
+existing path. The switch was
+`-Dpixels.trino.single-dictionary-rle=true`.
+
+The candidate connector was compiled and deployed to the 8191 validation
+runtime. Its first 1M-row arm used destination IDs
+`309000000001..309001000000` and returned exact count, distinct-ID, contiguous
+range, `U111`, and `111.0000` checks. QueryMonitor reported
+`20261124_112524_00006_ejcrf: 7.712 s`. The stable connector was restored and a
+fresh, prechecked non-overlapping control used IDs
+`321000000001..321001000000`; it passed the same checks and reported
+`20261124_112947_00012_rdz4x: 4.849 s`.
+
+The candidate was not faster and was **rejected and reverted**. The result is
+consistent with the dominant cost being below or beside the Trino block
+representation (Pixels column decode, wide conversion, and table writer), not
+just the final dictionary block wrapper. The runtime is restored to stable
+connector SHA `4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`
+with no experimental property.
