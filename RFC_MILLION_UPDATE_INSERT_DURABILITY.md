@@ -5947,3 +5947,67 @@ in 8.526 s, but its readback encountered historical fileId `155318` with a
 missing visibility bitmap. That arm is rejected and its approximately 111K
 rows/s write rate must not be reported as a valid E2E result. A fresh indexed
 target is still required before making an indexed-path throughput claim.
+
+## Clean indexed baseline and primary-key resolution A/B (2026-11-24)
+
+To establish the indexed path without historical files, a new target was
+created with the explicit metadata required by the UPDATE route:
+`storage='file'`, an isolated `paths` root, `pk='id'`, and
+`pk_scheme='rocksdb'`. The 1M table-to-table INSERT used the same materialized
+68-column source and standard 24--32 writer session. Query
+`20261124_145016_00016_kzy8t` finished in 13.775 s, physically wrote
+51,802,738 B, and passed exact readback:
+
+```text
+count=1000000 distinct_id=1000000 min=980000000001 max=980001000000 tag_check=1000000
+```
+
+This is the accepted clean indexed INSERT baseline: approximately `72.6K
+rows/s`. The no-primary-index baseline of `283.2K rows/s` is therefore not a
+proxy for the UPDATE-capable path; the current indexed primary-index tail is
+the dominant INSERT gap.
+
+The same clean indexed target then ran a 1M exact-key UPDATE. The cold arm
+(`20261124_145106_00018_kzy8t`) returned 1,000,000 updated rows in 11.800 s
+(about `84.7K rows/s`), and an immediate ID-range readback remained exact.
+The connector metric identified the bottleneck:
+
+```text
+encoding_ms=73.319 primary_key_resolve_ms=10000.458
+request_build_ms=424.893 rpc_count=1 rpc_ms=1074.809 total_ms=11585.681
+```
+
+A warm repeat without code changes reduced the primary-key resolution to
+8.267 s and total connector time to 9.075 s, but it remained the dominant
+cost. The source already exposes bounded resolution settings, with a default
+65,536-key batch and default parallelism of one.
+
+An isolated Trino-JVM A/B set only
+`-Dpixels.update.primary-key-resolve-parallelism=8`. The 1M UPDATE
+(`20261124_145433_00000_6dxt6`) completed with connector metrics:
+
+```text
+encoding_ms=66.442 primary_key_resolve_ms=2217.706
+request_build_ms=248.507 rpc_count=1 rpc_ms=413.964 total_ms=2959.836
+```
+
+The SQL elapsed time was 4.931 s, approximately `203K rows/s`. Raising the
+same setting to 16 (`20261124_145601_00000_bjhmn`) improved the metrics again:
+
+```text
+encoding_ms=70.617 primary_key_resolve_ms=1386.585
+request_build_ms=206.139 rpc_count=1 rpc_ms=404.423 total_ms=2080.930
+```
+
+Its SQL elapsed time was 4.144 s, approximately `241K rows/s`. A contrasting
+large-batch arm using 262,144 keys/batch and parallelism four
+(`20261124_145730_00000_7ktg2`) regressed to 3.072 s primary-key resolution
+and 5.857 s SQL elapsed (about `171K rows/s`). It is rejected.
+
+The parallelism-16 result is retained as a strong runtime-only candidate, but
+is not yet made the connector default: it needs a matched repeat and a
+concurrent-update/IndexServer soak before promotion. The Trino runtime was
+restored to the default no-property command line after the probe. This A/B
+also changes the optimization priority: UPDATE is currently bottlenecked by
+primary-index resolution, while indexed INSERT is bottlenecked by primary
+index maintenance during file publication.
