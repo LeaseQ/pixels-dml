@@ -4775,6 +4775,38 @@ current Trino Exchange/PagesSerde path. The constant-tag diagnostic still
 shows that reduced input width helps, but the representation change must be
 made at a layer that does not introduce an Exchange or writer long tail.
 
+## Rejected batched fixed-width decimal writes (2026-11-24)
+
+The current wide fixture contains three `decimal(38,2)` columns and thirty
+`decimal(18,4)` columns. The Java decimal writers previously emitted each
+fixed-width long through a separate `OutputStream.write` call. Commit
+`03a1668f` added a reusable 64-byte little-endian buffer for contiguous,
+non-null pixel segments in `DecimalColumnWriter` and
+`LongDecimalColumnWriter`; NULL and big-endian paths were left unchanged.
+The candidate was built with JDK 23 and loaded only into the actual 8191
+runtime plugin. Candidate `pixels-core` SHA was
+`3def5addd93b8113d16c9c227ee00d3e79427760fe11d38d8fed73941cdec75b`.
+
+Two disjoint strict table-to-table arms used destination ranges
+`91,000,000,001..91,001,000,000` and
+`92,000,000,001..92,001,000,000`. Query
+`20261124_054545_00005_wnkdn` took `8.847 s` (about `113K rows/s`), and warm
+query `20261124_054711_00012_wnkdn` took `5.200 s` (about `192K rows/s`).
+Both arms passed the exact count, distinct-ID, contiguous-range, and
+representative tag checks. The warm result is below the stable neighboring
+result of `4.22 s` (about `237K rows/s), so this is rejected as an INSERT
+throughput optimization. The runtime was restored to the stable
+`pixels-core` SHA
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`, with
+8191 now served by PID `1474165` from the required args file.
+
+The result narrows the bottleneck: reducing Java `OutputStream.write` call
+count in the decimal writers is not sufficient and appears to add enough
+scan/branch and buffer overhead to hurt this end-to-end path. The next useful
+work should target the measured Stage-1 exchange and writer/index scheduling,
+or a format-level decimal representation that reduces bytes before the
+writer, rather than another local serialization micro-optimization.
+
 ## Rejected native decimal block fast path (2026-11-24)
 
 The wide fixture contains three `decimal(38,2)` columns and thirty
