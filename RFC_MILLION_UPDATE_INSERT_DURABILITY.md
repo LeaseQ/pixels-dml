@@ -4432,3 +4432,45 @@ enabled by default or claimed as a throughput optimization. The runtime is
 back on the stable daemon configuration. After the complete probe sequence,
 the target check remained exact at 12M rows with unique IDs and complete
 `U111`/`111.0000` tags.
+
+## High-scale paired recheck of `insertNew`: rejected as a default change (2026-11-24)
+
+The earlier switch probe did not use a sufficiently paired state. A further
+check first corrected the benchmark command itself: the headline INSERT
+baseline uses these Trino session properties and omitting them changes the
+execution regime materially:
+
+```text
+task_concurrency=64
+task_min_writer_count=24
+task_max_writer_count=32
+task_scale_writers_enabled=false
+```
+
+At roughly 22M existing rows, the stable default path (`putEntries` /
+`MainIndexBuffer.insert`) measured 14.28 s for the cold post-restart arm and
+4.42 s for the warm arm (`20261124_011413_00022_txdru` and
+`20261124_011432_00023_txdru`). The same target was then restarted with only
+`pixels.index.grouped.primary.write.new-main-index=true` enabled. Its cold arm
+measured 14.27 s and its two warm arms measured 4.10 s and 3.94 s
+(`20261124_011715_00025_txdru`, `20261124_011733_00026_txdru`, and
+`20261124_011827_00027_txdru`).
+
+The stable daemon was restored and run again at the same scale. Its first arm
+after restart was 18.30 s (cold and excluded), followed by a 3.93 s warm arm
+(`20261124_012054_00030_txdru`). Thus the apparent 7--11% candidate gain did
+not reproduce against the final warm control; it is within the observed
+restart/cache and batch variance. The switch remains useful for diagnostics,
+but it is rejected as a default optimization and is not used for the headline
+throughput claim. The runtime ended on the stable 32-thread configuration.
+
+The final correctness check after this sequence remained exact at 27M rows:
+
+```text
+count=27,000,000
+distinct(id)=27,000,000
+min(id)=10,000,000,001
+max(id)=2,710,001,000,000
+tag_1_type='U111'=27,000,000
+tag_1_para min=max=111.0000
+```
