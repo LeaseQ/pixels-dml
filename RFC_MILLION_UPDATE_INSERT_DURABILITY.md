@@ -4836,6 +4836,40 @@ working branch and the runtime was restored to stable `pixels-core` SHA
 `baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`, with
 8191 served by PID `1479376`.
 
+## Provisional flush/index overlap candidate (2026-11-24)
+
+The measured INSERT path serialized two independent operations in
+`PixelsPageSink.flush()`: `PixelsWriter.addRowBatch()` completed before
+`PixelsInsertIndexWriter.appendBatch()` started. The row batch is read-only
+during this phase, so commit `7d531598e6908c2d002bc0560cbd6b38a10f5aa3b19eaf6bef3f2f4505fb1b5a`
+starts the index append asynchronously, waits for both operations, and keeps
+the existing error propagation and commit ordering. The candidate was tested
+on the actual 8191 runtime; stable connector SHA was
+`4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`.
+
+Candidate arms used destination ranges `95,000,000,001..95,001,000,000`,
+`96,000,000,001..96,001,000,000`,
+`99,000,000,001..99,001,000,000`, and
+`100,000,000,001..100,001,000,000`. Their query elapsed times were:
+
+```text
+20261124_060626_00004_t7wea  8.731 s  cold
+20261124_060736_00009_t7wea  4.039 s  warm
+20261124_061133_00004_h7zbn  8.599 s  cold
+20261124_061218_00009_h7zbn  4.520 s  warm
+```
+
+The 96B and 100B ranges passed exact count, distinct contiguous IDs, and
+representative tag checks. Matched stable controls on 97B and 98B took
+`9.128 s` cold (`20261124_060949_00004_in76p`) and `4.839 s` warm
+(`20261124_061031_00009_in76p`). The candidate warm pair averaged `4.280 s`
+versus `4.839 s` for the fresh stable warm control, a provisional improvement
+of about `11.6%`; this is a scheduling improvement, not a format or index
+semantic change. The validation runtime was restored to stable connector SHA
+`4c33d82daa12de8c7572dbf3aaf25eab8f9d551061c42d06598cc712430da8a4`, now
+served by PID `1490369` from the required args file. Further soak and failure
+injection are still required before calling this the final default.
+
 ## Rejected native decimal block fast path (2026-11-24)
 
 The wide fixture contains three `decimal(38,2)` columns and thirty
