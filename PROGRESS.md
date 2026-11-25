@@ -1,38 +1,28 @@
 # Pixels DML 研究进度
 
 更新时间：2026-11-25（Asia/Shanghai）。本文件是两个DML仓库的统一进度入口。
-前半部分依据远端提交、源码和仓库实验记录；文末新增的exchange探针包含本轮现场
-核验，具体版本、端口、query ID和排除原因以RFC为准。
+本次核对截止Pixels `8b873086`（2026-11-25 10:45:06 +08:00）、Trino `6b56954`。
+依据fetch后的提交、源码及实验RFC核对，未独立复跑或连接部署环境。下文保留的
+“现场”“本轮”等历史补记属于原执行端记录，不能理解为本次核对重新验收。
 
-**当前结论：** 原型与局部优化已有运行证据，但INSERT、UPDATE相对可比原路径的
-总体收益尚未证明。当前阶段仍以双路径总体成本为主；新增的
-`redistribute_writes=false` 在空目标上有跨writer收益迹象；同目标soak进一步显示，
-32 writers下收益可复现，24 writers下基本持平。clean Trino crossover及预热交错
-复测也已完成；追加到两张目标各900万行的更长交错soak中，关闭redistribution的
-client wall time均值约3.990秒、开启约4.823秒，且内存采样未见增长异常。因此当前
-INSERT候选仍是固定32 writers加关闭redistribution；当前观测到的Trino SQL elapsed
-吞吐约350K--508K行/秒，最近三次false样本约350K--400K行/秒，客户端wall（含CLI
-开销）约201K--260K行/秒，尚未达到百万行/秒，也尚未改变默认配置。正确指向8191
-的JFR已把剩余成本定位到UTF-8解码、VariableWidthBlock复制、字符串读写与高对象分配；
-重复字符串统计批处理候选未获E2E收益，且候选混合目标的后续完整读回出现
-DecimalColumnReader越界，因此已撤回，不得推广为默认优化。常量字符串RLE候选此前的
-计时因JVM属性误放在主类之后而未真正启用，已作废；修正参数后，主测例在PageSink
-入口观测到string_blocks=0、string_rows=0，证明该RLE sink路径不适用于当前主测例。
-随后在清理远端候选源码后，纯 `StringStatsRecorder` 解码缓存也完成了独立新表
-对照：warm SQL 4.31秒，对照4.12秒，完整2M行/全标签读回通过但仍略慢，已撤回。
+**当前结论：** INSERT分组主键写入与UPDATE并行解析已各有内部SQL对照，
+比仅有局部热点证据更进一步；但原Retina整行回放对照、UPDATE完整周期配对和
+独立多轮实验仍未完成，不能把内部参数/路由收益写成整体架构或外部竞争优势。
 
-本轮修正并完成了RLE sink探针：一次完整1M行主测例在PageSink入口的
-`string_blocks=0`、`string_rows=0`，说明字符串列已经以普通Block到达写入端，
-因此此前RLE sink候选的计时全部作废，不能作为负优化证据。探针已撤回；后续应转向
-上游投影/Exchange的Block构造和`VariableWidthBlock.copyPositions`分配路径。
-对应分布式计划显示源TableScan为ROUND_ROBIN、100个输入分区，随后经
-`LocalExchange[partitioning=SINGLE]`进入TableWriter；因此当前优先级已转向该
-重布局边界，而不是PageSink的RLE分支。
+本轮主要变化：
 
-本轮现场状态（2026-11-25）：8191已恢复stable connector/core与默认args，
-`starting=false`；共享8090未重启。JFR有效样本、探针query ID、作废原因与最终jar哈希
-见RFC末尾。本次修正推送前已核对当前远端文件版本为
-`a79addbcb33997b15e95c4cd78aeb556aa915112`。
+- UPDATE串行SQL为9.937/11.567秒，并行16为3.921/3.989秒（百万行），有两表
+  交叉顺序对照。两表最终物化和指定标签读回通过，但只有一表保留约28秒COMPACT
+  及阶段计时；不能据此计算完整周期加速比。
+- INSERT非grouped为21.509/19.608秒，grouped为10.524/5.681秒，四个独立空目标
+  正常读回通过。该比较同时涉及RPC组织和flush并行参数，是组合路由对照。
+- 最新固定32-writer交错追加中，`redistribute_writes=false`的SQL均值2.784秒，
+  true为3.238秒，耗时减少约14%，对应约35.9万/30.9万行每秒；单臂仍有波动，
+  尚未改变默认。早期SQL最好值约50.8万不等于稳定水平，更不等于客户端吞吐。
+- 多个reader/Block/RLE候选因无收益、类型不兼容或候选产物被stable reader读出
+  decimal错误而撤回。修改Trino-core的私有classpath探针仍未证明热态收益，
+  不能直接升级为新的架构主线。最新DictionaryBlock预解引用候选在第二轮热态对照中
+  为2.943/2.954秒，未复现首轮约7%的差异，已撤回；没有新代码被推广。
 
 ## 1. 已确认的目标与边界
 
@@ -51,7 +41,7 @@ DecimalColumnReader越界，因此已撤回，不得推广为默认优化。常�
 
 | 仓库 | 本次核对SHA | 主要变化 |
 | --- | --- | --- |
-| pixels-dml | [`e5946aa2`](https://github.com/LeaseQ/pixels-dml/commit/e5946aa2) | 反向映射惰性版本及位置迁移测试；修正固定writer数对照，拒绝INSERT候选与并发上调 |
+| pixels-dml | [`8b873086`](https://github.com/LeaseQ/pixels-dml/commit/8b873086b870aef0343234cb1cfdfcfaee4fb17f) | 新增29条文档提交：内部双路径对照、物化记录、redistribution交错复测及候选否决；本轮仓库增量没有新运行时代码 |
 | pixels-trino-dml | [`6b56954`](https://github.com/LeaseQ/pixels-trino-dml/commit/6b569544b7579ac3b0482941027b5e89e6b06534) | 主键解析默认并行度由1改为16；新增INSERT收尾计时 |
 | 已确认研究范围 | [`93d98a51`](https://github.com/LeaseQ/pixels-dml/commit/93d98a517ab66da5403a7dc647b92e14ade3b3e4) | INSERT/UPDATE双目标、收窄实验范围及基线验证顺序 |
 
@@ -63,8 +53,8 @@ DecimalColumnReader越界，因此已撤回，不得推广为默认优化。常�
 | 工作项 | 当前状态 | 已有证据 | 尚缺证据 |
 | --- | --- | --- | --- |
 | 运行包一致性 | 记录有修正与读回 | 混用Connector/common/core后出现方法缺失及可见性错误；整体重建部署后新表读回通过 | 后续每臂继续固定全套jar与实际端口；不能沿用混包运行的性能结论 |
-| INSERT | grouped对照完成；32-writer exchange候选有clean crossover和更长soak证据 | 带主键索引、grouped写入及完整标签门禁已完成；追加到12M/10M行后，false最新三臂约2.50--2.86s、true近邻对照2.94s；encoded-column-vector opt-out严格A/B反而慢约10%，已拒绝 | 更长采样或组件级instrumentation；默认化前仍需受控对照；8-writer臂因Retina OOM排除 |
-| UPDATE | 代码默认值已改；记录有重复实测 | 主键解析由串行约8.27～10秒降至并行16下约1.39～1.45秒；新默认SQL elapsed 4.215秒，约23.7万行/秒 | 对应正常运行物化、最终标签与完整周期配对；并发负载表现尚不能推断 |
+| INSERT | 内部分组路由SQL对照完成；redistribution有条件性收益 | 非grouped 21.509/19.608秒，grouped 10.524/5.681秒；最新固定32-writer false/true均值2.784/3.238秒，约14%耗时改善 | 同口径更多重复、客户端持续连接计时；原Retina整行路径与外部方案尚非本次对照对象 |
+| UPDATE | 内部SQL配对完成，物化证据不完整 | parallelism=1为9.937/11.567秒，16为3.921/3.989秒；两表最终指定标签正确，只有一表保留COMPACT约28秒 | 两臂从相同初始状态到可查询的完整计时、独立多轮扩展；不能把SQL约2.5～2.9倍收益推广至全周期 |
 | MainIndexBuffer反向映射 | 记录有测试与对照；INSERT优化未采纳 | 惰性版本记录3项测试通过；同32 fragments配对为稳定版5.759秒、候选6.446秒，未获收益，运行包已恢复稳定版本 | UPDATE/COMPACT收益及内存代价仍待证明；分支保留代码不等于默认部署采用 |
 | 原Retina对照 | 已识别语义缺口 | 现有测试“更新”为删除旧键并插入新键 | 保留主键、相同标签赋值及完成边界的对照适配；INSERT也需对齐输入准备及发布成本 |
 | Hudi/StarRocks/Iceberg | 计划阶段 | 已列选型与语义核验要求 | 本次所读记录未见可比外部实测闭环，不能宣称领先 |
@@ -72,14 +62,16 @@ DecimalColumnReader越界，因此已撤回，不得推广为默认优化。常�
 
 读数限制：
 
-- 4.02秒是特定实验配置下的带索引结果；后续新表剖析为6.625秒，不能将前者视为
-  所有初始状态下的稳定成绩。最新固定32-writer稳定臂为5.759秒；不能把不同轮次
-  直接合成加速比。无主键索引的3.531秒不是支持UPDATE路径的替代结果。
-- 上述SQL数字为Trino elapsed，不自动等于客户端wall time，也未包含UPDATE后续
-  COMPACT。不能直接与旧环境约59万行/秒的结果计算回退或提升比例。
-- 已有读回主要列出行数、主键和指定标签，不能自动推广为所有列、全部SQL语义
-  均已验证。最新候选必须补与其修改相关的完整结果检查。
-- RFC中的历史恢复门槛不增加当前研究范围；本阶段正常运行物化与读回仍然必要。
+- 最新redistribution交错臂为false 2.077/3.491秒、true 3.155/3.320秒；收益方向
+  有信号但样本少、状态敏感，不能宣称通用默认值已找到。
+- 早期9M追加序列SQL均值2.10/2.96秒，client wall均值3.990/4.823秒，后者包含
+  CLI启动/连接成本。两个口径分列，后续可加持续连接客户端以分离固定调用开销。
+- UPDATE物化约28秒是单臂CLI报告；worker/RPC累计时间存在重叠，不能直接求和，
+  也不能与任意一条SQL样本拼成未经测量的全周期加速比。
+- “完整标签门禁”需看具体谓词：多数记录核对全体行的tag_1或tag_1/tag_30，
+  不等于68列全值正确；候选曾通过这些聚合后仍被stable reader发现decimal错误。
+- RFC的历史恢复过程作为运行背景保留，不增加本阶段研究范围；正常物化与读回
+  仍是结果可用的必要验证。部署记录代表对应时刻，不代表本次已核实当前运行态。
 
 ## 4. 下一步与完成条件
 
@@ -87,10 +79,10 @@ DecimalColumnReader越界，因此已撤回，不得推广为默认优化。常�
 
 | 优先级 / ID | 当前状态 | 下一项工作 | 完成条件 |
 | --- | --- | --- | --- |
-| P0 / BASE-01 | UPDATE/INSERT路由对照完成 | 确定INSERT、UPDATE各自可比的原路径或优化前版本 | UPDATE已完成parallelism=1/16控制；INSERT已完成grouped与非grouped路由对照；原Retina删旧键/插新键路径仍不可直接等价 |
-| P0 / ENV-01 | 现场核验完成（两条路由） | 固定匹配版本、有效参数、源数据及每臂初始状态 | 两条路由的jar哈希、端口、schema、独立空目标、输入及最终校验已写入RFC |
-| P1 / INS-01 | 已有总体配对；32-writer exchange候选已完成clean crossover和9M-row soak | 完整表到表INSERT对照，并验证 `redistribute_writes=false` 的计划、client wall time和标签正确性；两目标均9M行/9M distinct/全标签通过 | 重复clean-run并观察内存后，再决定是否改默认；当前不要把201K--260K行/秒推广为百万行/秒 |
-| P1 / UPD-01 | 已有总体配对，待多轮扩展 | 主键常量赋值及独立多轮UPDATE对照 | 已完成两目标交叉顺序的SQL UPDATE与COMPACT/标签读回；独立多轮打标及重启不属于本轮新增门槛 |
+| P0 / BASE-01 | 内部参数/路由基线已有；原Retina仍缺 | 区分并行解析、分组写入的内部收益与原架构收益 | 保留现有内部对照；补原Retina同主键标签赋值及输入/发布适配，不能以路由对照替代整行回放比较 |
+| P0 / ENV-01 | 原执行端有现场记录；本会话未复验 | 继续固定实际运行包、参数与隔离端口 | 每臂重新核验；晚间/早晨记录出现etcd端口纠错，当前配置不得由旧文字推断 |
+| P1 / INS-01 | 内部路由SQL配对完成；候选未默认化 | 固定状态复核grouped及redistribution收益，再解释关键路径 | 原始全部样本、输入状态、客户端与Trino时间分列；保持指定标签与全列类型校验，不能混用最好值 |
+| P1 / UPD-01 | SQL配对完成；完整周期配对待补 | 补齐两臂COMPACT/发布计时与独立多轮任务 | 当前一表约28秒，另一表物化日志未保留；重新从等价基表测全周期，不相加跨实验样本；故障恢复不新增为门槛 |
 | P2 / OPT-01 | INSERT候选未采纳 | 保留反向映射负结果；按总体成本证据决定是否继续研究定位开销 | 不将其作为已成立的INSERT优化；如另评估UPDATE/COMPACT，需独立位置迁移、内存和端到端配对证据 |
 | 后续 / EXT-01 | 待平台与接口核验 | 外部基线与鲲鹏实验 | 按既有方案推进；正常运行语义与计时可比，实际结果留证 |
 
@@ -109,12 +101,19 @@ BASE-01与ENV-01可以并行推进；INS-01与UPD-01需要对应基线和环境�
 
 - 本文件：当前状态、下一步、阻塞与证据入口。每次同步新提交或取得实验结果后更新，
   即使结果无收益或撤回也要记录；未检查的新变化不推断为完成。
+- 用户要求更新进度时，核对后将本文件的修订提交并推送到共享million分支，再报告
+  提交链接；不只保留本地修改。推送前同步远端、保留其他工作，正常执行Git hook。
 - [开题报告](docs/thesis-proposal-20261123.md)：研究问题、相关工作、贡献候选与实验设计。
 - [执行方案](docs/superpowers/plans/2026-11-23-tagging-research-roadmap.md)：对照步骤、配置要求与决策条件。
 - [实验RFC](RFC_MILLION_UPDATE_INSERT_DURABILITY.md)：完整样本、运行配置、query ID及候选接受/拒绝原因。
 - 更新性能结论必须带对应版本、输入/状态、完成边界、正确性检查与全部重复样本；
   不把单次最好值改写为稳定水平，不以组件速率替代SQL或全周期速率。
 - 本文件保留当前状态及最近关键变化；更早进度通过Git历史追踪，不复制全部commit日志。
+
+## 7. 历史执行端补记（按原记录保留）
+
+以下为累计实验经过；当前结论以第2节版本对应的摘要与状态表为准。完整参数及样本
+以RFC为准，旧的候选接受/否决及端口说明需结合后续纠正阅读。
 
 最近关键变化：2026-11-24确认双目标与收窄范围；11月24日晚记录产物一致性修正、
 并行解析默认值及32-writer实验；11月25日修正反向映射A/B的writer数差异，惰性
@@ -187,7 +186,7 @@ stable true对照为6.22/2.32秒；候选约慢10%，已撤回且没有pixels-tr
 connector与默认args。本次提交前检查的远端进度文件版本为
 `5cf8f3a78d4489984382721824ea8b0c886eb518`。
 
-[runs]: https://github.com/LeaseQ/pixels-dml/blob/e5946aa2/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
+[runs]: https://github.com/LeaseQ/pixels-dml/blob/8b873086b870aef0343234cb1cfdfcfaee4fb17f/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283
 
 2026-11-25 reader-side single-entry dictionary fast path：主测例的 tag 列确实是单值字典，
