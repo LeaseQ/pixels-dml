@@ -647,7 +647,6 @@ offset,8)`生成切片，避免每行分配独立短`byte[]`；编码字节、pr
 [insert-classification]: https://github.com/LeaseQ/pixels-dml/blob/d407414101519abf554d5af246cc5a9155862a11/RFC_MILLION_UPDATE_INSERT_DURABILITY.md#correction-the-historical-476ks-soak-was-not-an-indexed-insert-2026-11-25
 [bucket-candidate]: https://github.com/LeaseQ/pixels-dml/blob/d407414101519abf554d5af246cc5a9155862a11/RFC_MILLION_UPDATE_INSERT_DURABILITY.md#rejected-reuse-grouped-bucket-ranges-for-abort-bookkeeping-2026-11-25
 [key-candidate]: https://github.com/LeaseQ/pixels-dml/blob/d407414101519abf554d5af246cc5a9155862a11/RFC_MILLION_UPDATE_INSERT_DURABILITY.md#rejected-batch-backed-long-primary-key-bytestring-slices-2026-11-25
-
 2026-11-25 继续探测 grouped primary 路径的 daemon 聚合开销。候选把
 `List<Boolean>` 结果改为 `boolean` 聚合返回，试图消除每行 Boolean 列表；候选 daemon
 构建SHA为`664f1ce6485930f08453b4a962b6d0f71ad25d690117f5873c06f6e73b4883d6`。
