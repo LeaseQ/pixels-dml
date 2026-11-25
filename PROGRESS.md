@@ -422,3 +422,16 @@ encoding=109.157ms，primary-key resolve=7148.172ms；独立稳定控制目标
 后续完整E2E必须使用single-root目标。8191已恢复稳定并通过ready/SELECT 1，共享8090未触碰。
 本轮推送同步记录本轮结果；本次提交前检查的远端`PROGRESS.md` blob为
 `7e655401692721aa9c9bda7e534fd092156dd79e`。
+
+2026-11-25 做了不改源码的UPDATE resolver并发探针：保持stable daemon
+SHA`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc`，只在
+隔离8191重启时改变`pixels.update.primary-key-resolve-parallelism`，同一个
+1M indexed precreate目标各跑冷/暖两臂。p16的connector total为2706.168/1563.407ms，
+p24为2225.275/1477.153ms，p32为2401.190/1263.357ms，p48为2035.988/1459.271ms；
+对应暖轮primary resolve分别为999.658/895.359/726.503/826.353ms。当前交叉点集的
+暖轮最低点是p32，约比p16快19%，p24和p48没有超过p32。该目标是历史双path
+precreate负例，不能做tag-aware COMPACT，所以只记录为resolver方向性证据，不能当作
+完整UPDATE吞吐或正确性结论。8191已恢复stable p16并通过ready检查，daemon SHA未变，
+共享8090未触碰；下一步仍需在single-root目标上完成UPDATE->COMPACT->readback交叉后，
+再考虑是否提升默认并发。本次推送前检查的远端`PROGRESS.md` blob为
+`5ee444a979185b8acc51efdd3c7bc37684635e0b`。

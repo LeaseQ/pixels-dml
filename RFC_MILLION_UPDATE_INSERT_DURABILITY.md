@@ -8220,3 +8220,35 @@ target because the precreate fixture remains non-compactable.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `a86609c395b4040309035c13466876ae7f9468c4`.
+
+## Resolver parallelism exploration: p16/p24/p32/p48 (2026-11-25)
+
+The active UPDATE route already uses the batched primary resolver and the
+stable daemon jar (`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc`).
+To separate resolver concurrency from source changes, the isolated Trino
+runtime was restarted with only
+`pixels.update.primary-key-resolve-parallelism` changed. The same indexed
+precreate target and the same one-million-row range were used for all arms;
+each setting had a post-restart arm followed by a warm arm:
+
+```text
+setting  cold total_ms  warm total_ms  cold resolve_ms  warm resolve_ms
+p16      2706.168       1563.407       1990.904         999.658
+p24      2225.275       1477.153       1426.923         895.359
+p32      2401.190       1263.357       1576.892         726.503
+p48      2035.988       1459.271       1265.845         826.353
+```
+
+The warm p32 point is about 19% faster in connector total time than the warm
+p16 point and has the lowest warm primary-resolve time in this crossed point
+set. p24 and p48 do not beat p32. This is directional evidence that the
+existing resolver bound can be raised on this host, not a default-change
+decision: the target is a historical precreate fixture whose two direct paths
+cannot pass tag-aware COMPACT, so no materialized correctness claim is attached
+to these rows/s points. The runtime was restored to stable p16, the stable
+daemon SHA, and passed the Trino readiness check. Shared Trino 8090 was not
+touched. A fresh standard-root UPDATE -> COMPACT -> readback matrix is still
+required before promoting p32.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`5ee444a979185b8acc51efdd3c7bc37684635e0b`.
