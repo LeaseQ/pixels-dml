@@ -7673,3 +7673,41 @@ changing the Pixels file representation.
 
 Before this documentation push, the remote `PROGRESS.md` blob was fetched and checked at
 `1a0c36ebba0ddffe296b846df9949c403bd9cea8`.
+
+## Correction: first DictionaryBlock deployment used the wrong plugin path (2026-11-25)
+
+The preceding DictionaryBlock section contains an operational qualification that must be
+made explicit. Its first two “candidate” and “stable” pairs replaced a jar under
+`/home/pixels/opt/leaseq-dml-env/trino-server-466/plugin`, while the isolated 8191 process
+loads `/home/pixels/validation-million-update/runtime/trino/plugin`. Consequently those
+four query IDs were all stable-runtime appends and are invalid as a candidate A/B. They
+remain valid data-integrity checks, but their performance labels are withdrawn.
+
+The candidate was then installed in the actual 8191 plugin directory and the test was
+repeated with stable SHA `62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`
+as control and candidate SHA
+`d6cf03381fdce4df014f539320994c2e6acc32234f0aee7623a3f609aee87a16`:
+
+```text
+correct pair 1, candidate: q=20261125_024650_00000_wv7nf  cold 6.992 s, warm 2.948 s
+correct pair 1, stable:    q=20261125_024746_00000_bmpqj  cold 6.877 s, warm 3.079 s
+
+correct pair 2, candidate: q=20261125_024846_00000_tx9rs  cold 7.342 s, warm 3.358 s
+correct pair 2, stable:    q=20261125_024939_00000_98up5  cold 7.374 s, warm 3.317 s
+```
+
+The two valid warm means are 3.153s for the candidate and 3.198s for stable, only about
+1.4% apart; the candidate is slower in the reversed second pair. Cold means are 7.167s
+and 7.126s respectively, also favoring stable slightly. The DictionaryBlock pre-resolution
+candidate is therefore rejected. The final correctness gate after all valid appends was:
+
+```text
+candidate-side target e2e68_matrix16a_20261125: 13M rows, 13M distinct, tag_1/tag_30 = 13M
+stable-side target    e2e68_matrix16b_20261125: 12M rows, 12M distinct, tag_1/tag_30 = 12M
+```
+
+8191 was restored to the stable connector and the `/opt` jar modified during the mistaken
+first deployment was restored to its pre-test file. Shared 8090 was never restarted.
+
+Before this correction push, the remote `PROGRESS.md` blob was fetched and checked at
+`298c33d55812588bb13a63dede825f3515f4ebd7`.

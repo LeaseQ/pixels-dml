@@ -290,3 +290,17 @@ smoke test。本次提交前检查的远端 `PROGRESS.md` blob 为
 均通过完整标签门禁。候选已撤回，stable connector恢复，未提交代码。完整证据和query
 ID见RFC末尾。本次提交前检查的远端`PROGRESS.md` blob为
 `1a0c36ebba0ddffe296b846df9949c403bd9cea8`。
+
+更正：上一段DictionaryBlock候选的首轮部署曾误替换`/opt`下的插件；8191实际加载
+的是`runtime/trino/plugin`，因此上一段列出的candidate/stable query不能作为候选A/B，
+只能视为stable追加，现以本段覆盖。随后在正确的8191 plugin目录完成有效交叉：
+candidate热臂为2.948/3.358秒，stable热臂为3.079/3.317秒；candidate两次冷臂
+6.992/7.342秒，stable为6.877/7.374秒。有效热均值仅约1.4%差异，冷均值candidate
+略慢，故候选仍拒绝。有效query为`20261125_024650_00000_wv7nf`、
+`20261125_024658_00001_wv7nf`、`20261125_024746_00000_bmpqj`、
+`20261125_024754_00001_bmpqj`以及第二组
+`20261125_024846_00000_tx9rs`、`20261125_024853_00001_tx9rs`、
+`20261125_024939_00000_98up5`、`20261125_024947_00001_98up5`。8191最终恢复
+connector SHA `62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`；
+两张目标最终为13M/12M行，distinct、范围、tag_1/tag_30全量通过。本次提交前检查的
+远端`PROGRESS.md` blob为`298c33d55812588bb13a63dede825f3515f4ebd7`。
