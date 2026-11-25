@@ -487,3 +487,30 @@ UPDATE->COMPACT->readback门禁。
 
 本次推送前重新检查的远端`PROGRESS.md` blob为
 `7231a67475b2314c21fe2045353bb58d76aa13a6`。
+
+2026-11-25 补做了当前稳定runtime上的table-to-table INSERT基线，使用同一物化
+68列源表`e2e68_fresh_candidate86_20261124`、single-root indexed目标、stable
+connector/daemon、grouped-primary和`task_concurrency=64`。16 fixed writers的默认
+`redistribute_writes=true`目标`e2e68_insert_probe_20261125`，query
+`20261125_074108_00012_9kijf`，Trino elapsed为6.821秒（约146.6K rows/s）；1M行、
+1M distinct、ID范围`10000000001..10001000000`全部通过。其timeline为
+planning/waiting/scheduling/running/finishing=`71/74/250/3644/2856ms`；16个sink的
+`index_finish_ms`总和28.083秒、最大2.395秒，publish只有159ms。
+
+同配置强制32 writers的目标`e2e68_insert_probe_32_20261125`，query
+`20261125_074440_00015_9kijf`，elapsed为6.929秒（约144.3K rows/s），同样通过1M
+行完整性门禁。32 writer使`finishing`升到3.774秒，`main_flush_ms`总和从16 writer
+的0.858秒升到20.370秒，`index_finish_ms`最大值升到3.223秒；因此在该机器状态下
+增加writer进入main-index/RocksDB flush争用，writer=32被否定。
+
+随后在新的single-root目标`e2e68_insert_probe_off16_20261125`以16 writers打开
+session级`redistribute_writes=false`，query`20261125_074719_00018_9kijf`，elapsed
+为4.353秒（约229.7K rows/s），并通过同一1M行/1M distinct/精确ID范围门禁。该臂的
+`finishing`仅184ms，16个sink的`main_flush_ms`总和0.663秒、`index_finish_ms`总和
+30.679秒，publish为134ms。它是当前强候选，但因为执行顺序和热身状态仍不完全对称，
+只记录为session级方向性证据，不修改默认值；下一步应做反向顺序的严格交叉，确认
+exchange bypass收益是否稳定，再考虑代码级收尾调度实验。共享8090未触碰，8191仍为
+stable runtime。
+
+本次推送前重新检查的远端`PROGRESS.md` blob为
+`e16e36d0857cc68d7b90d04518599964d45a46a9`。

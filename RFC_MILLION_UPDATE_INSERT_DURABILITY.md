@@ -8406,3 +8406,64 @@ UPDATE -> COMPACT -> readback gates.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `7231a67475b2314c21fe2045353bb58d76aa13a6`.
+
+## Current table-to-table INSERT baseline and exchange-bypass probe (2026-11-25)
+
+After the resolver E2E, the stable isolated Trino `8191` runtime was used for a
+fresh table-to-table INSERT baseline. The source was the materialized 68-column
+one-million-row table `validationfresh.e2e68_fresh_candidate86_20261124`; every
+target was a new single-root indexed table with `pk='id', pk_scheme='rocksdb'`.
+The connector and daemon were unchanged, grouped primary writes were enabled,
+and all arms used `task_concurrency=64` with writer scaling disabled.
+
+The default route with 16 fixed writers and `redistribute_writes=true` was:
+
+```text
+target  e2e68_insert_probe_20261125
+query   20261125_074108_00012_9kijf
+elapsed 6.821 s  ~=146.6K rows/s
+```
+
+The readback was exact: 1,000,000 rows, 1,000,000 distinct IDs, and the range
+`10000000001..10001000000`. The Trino timeline was
+`planning/waiting/scheduling/running/finishing = 71/74/250/3644/2856 ms`.
+The 16 sink metrics had an `index_finish_ms` sum of 28.083 s and a maximum of
+2.395 s; publish was 159 ms. These per-sink sums overlap and are diagnostic,
+not additional wall time.
+
+Forcing 32 fixed writers on an independent target did not help:
+
+```text
+target  e2e68_insert_probe_32_20261125
+query   20261125_074440_00015_9kijf
+elapsed 6.929 s  ~=144.3K rows/s
+```
+
+The exact million-row gate also passed. The 32-writer arm increased Trino
+finishing to 3.774 s; aggregate per-sink `main_flush_ms` grew from 0.858 s at
+16 writers to 20.370 s at 32, and the largest `index_finish_ms` grew to
+3.223 s. This is consistent with main-index/RocksDB flush contention, so 32
+writers is rejected for this shape and runtime state.
+
+Finally, a fresh 16-writer target used the session-level
+`redistribute_writes=false` setting:
+
+```text
+target  e2e68_insert_probe_off16_20261125
+query   20261125_074719_00018_9kijf
+elapsed 4.353 s  ~=229.7K rows/s
+```
+
+The exact million-row gate passed again. This arm reduced `finishing` to 184 ms;
+the aggregate `main_flush_ms` was 0.663 s and publish was 134 ms. The result is
+promising because it removes the cross-fragment redistribution exchange, but
+it followed the default-route arm in the same runtime epoch. It is therefore a
+strong session-level candidate, not a stable default-selection result. Earlier
+crossed measurements point in the same direction but also show material warmup
+variance. The next accepted step is a reversed-order crossed pair using fresh
+targets, followed by a decision on whether the setting can be made an explicit
+benchmark profile. No connector/default change was made; shared Trino `8090`
+was untouched.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`e16e36d0857cc68d7b90d04518599964d45a46a9`.
