@@ -566,3 +566,23 @@ profile，不修改Trino/connector默认。共享8090未触碰。
 [compact-timer]: https://github.com/LeaseQ/pixels-dml/blob/272d4560caed9c03d3c0d85a293e33d0992386d3/pixels-cli/src/main/java/io/pixelsdb/pixels/cli/executor/CompactExecutor.java#L267
 [rocks-lookup]: https://github.com/LeaseQ/pixels-dml/blob/272d4560caed9c03d3c0d85a293e33d0992386d3/pixels-index/pixels-index-rocksdb/src/main/java/io/pixelsdb/pixels/index/rocksdb/RocksDBIndex.java#L138
 [resolve-metrics]: https://github.com/LeaseQ/pixels-dml/blob/272d4560caed9c03d3c0d85a293e33d0992386d3/pixels-daemon/src/main/java/io/pixelsdb/pixels/daemon/index/IndexServiceImpl.java#L1255
+
+2026-11-25 继续在同一已验证目标上做INSERT组合矩阵，均保持
+`redistribute_writes=false`，每臂追加1M平移ID并做完整标签读回。8 writers +
+`task_concurrency=32`的query`20261125_080141_00034_9kijf` elapsed为5.836秒
+（约171.3K rows/s），低于16/24 writers。24 writers使用合法的
+`min=24,max=32`，实际publish fragments=24；其task32 query
+`20261125_080420_00036_9kijf` elapsed为3.812秒（约262.3K rows/s），优于此前
+16/task32的3.989秒。相同24 writers切换task64，query
+`20261125_080513_00038_9kijf` elapsed为4.755秒（约210.3K rows/s），说明task32
+确实是当前较好的并发点。
+
+对24/task32做warm repeat，query`20261125_080605_00040_9kijf` elapsed为4.330秒
+（约230.9K rows/s）。9M累计目标最终通过9M rows、9M distinct、完整ID范围
+`10000000001..8010001000000`，`tag_1`和`tag_30`全量标签均正确。两次24/task32
+平均约245.6K rows/s；仍未达到百万级，因此不把单次262K当作稳定上限，也不修改
+Trino/connector默认。当前下一步转向代码级减少finish/main-index flush等待；共享8090
+未触碰。
+
+本次推送前重新检查的远端`PROGRESS.md` blob为
+`e3c3157abb60a9115578ae84bcdae2ae27fddf06`。

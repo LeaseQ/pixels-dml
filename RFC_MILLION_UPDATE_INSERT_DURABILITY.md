@@ -8533,3 +8533,30 @@ runtime profile rather than a default change.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `95fc7b81c6b02c05685d3168ed328fb22cbbe772`.
+
+### Writer/task matrix on the exchange-bypass route
+
+The same correctness target was extended with disjoint shifted ID ranges to
+test the remaining session-level combination. All arms used
+`redistribute_writes=false` and completed the full row/distinct/range/tag gate:
+
+```text
+writers  task_concurrency  query                         elapsed   rows/s
+8        32                20261125_080141_00034_9kijf    5.836 s  ~=171.3K
+16       32                20261125_075752_00030_9kijf    3.989 s  ~=250.7K
+24       32                20261125_080420_00036_9kijf    3.812 s  ~=262.3K
+24       64                20261125_080513_00038_9kijf    4.755 s  ~=210.3K
+24       32                20261125_080605_00040_9kijf    4.330 s  ~=230.9K
+32       32                20261125_075520_00028_9kijf    4.983 s  ~=200.7K
+```
+
+The 24-writer arms used the legal Trino setting `min=24,max=32` and produced
+24 fragments. The two 24/task32 arms averaged about 245.6K rows/s, so task32 is
+the current local sweet spot, but the spread is still large enough that it is a
+benchmark profile rather than a stable production setting. The accumulated
+target reached 9M rows and 9M distinct IDs with all checked `U111/111.0000` and
+`AAA/3.1400` tags preserved. The next work moves from session tuning to the
+finish/main-index flush boundary; no Trino or connector default was changed.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`e3c3157abb60a9115578ae84bcdae2ae27fddf06`.
