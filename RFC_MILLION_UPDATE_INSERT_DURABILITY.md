@@ -8596,3 +8596,35 @@ throughput.
 
 Before this correction, the fetched remote `PROGRESS.md` blob was
 `90dfeabcee9820313052e49d27894d8cca19f3d5`.
+
+### Rejected: reuse grouped bucket ranges for abort bookkeeping (2026-11-25)
+
+The grouped INSERT path already partitions entries by bucket before issuing
+the primary-index RPC. After a successful grouped RPC, the connector used to
+recompute the SHA-256 bucket for each entry only to populate
+`insertedKeysByBucket`, which is needed if a later failure requires abort
+cleanup. A candidate reused the known bucket ranges instead. It changed no RPC
+payloads, primary-index semantics, normal read path, or abort key contents.
+
+The candidate was built with JDK 23, deployed only to isolated Trino `8191`,
+and compared on the already validated indexed target
+`e2e68_insert_probe_reverse_20261125`. Both candidate arms passed the complete
+gate; the target reached 19M rows and 19M distinct IDs with full tag checks:
+
+```text
+candidate cold  20261125_085308_00000_usju3  8.540 s
+candidate warm  20261125_085403_00002_usju3  4.951 s  ~=202K rows/s
+stable cold     20261125_085522_00000_vkwnd  9.171 s
+stable warm     20261125_085617_00002_vkwnd  4.667 s  ~=214K rows/s
+```
+
+The comparable warm candidate was approximately 6% slower. The candidate is
+therefore rejected and the stable connector was restored; the source change is
+not part of the pushed branch. The result is still useful diagnostically:
+repeated bucket hashing exists in the profile, but it is not the dominant
+indexed INSERT bottleneck. The next work should stay on the primary-index/main-
+index finish boundary and Trino-to-writer scheduling rather than optimize this
+abort-only bookkeeping loop.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`c9229cd50b9bb13a3ddf554b65a9fe20105728e7`.

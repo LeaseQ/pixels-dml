@@ -608,3 +608,18 @@ table-to-table INSERT吞吐，也不能用来证明百万行目标已接近。�
 
 本次修订前重新检查的远端`PROGRESS.md` blob为
 `90dfeabcee9820313052e49d27894d8cca19f3d5`。
+
+2026-11-25 对grouped primary INSERT做了一个低风险候选：RPC成功后的abort
+bookkeeping不再对每行重复计算SHA-256 bucket，而是复用flatten时的bucket分段。
+候选只部署到隔离8191，stable daemon/Retina、共享8090均未改变；候选在已通过15M
+门禁的`e2e68_insert_probe_reverse_20261125`上追加两轮，query
+`20261125_085308_00000_usju3`冷轮8.540s、`20261125_085403_00002_usju3`暖轮4.951s，
+均保持distinct、精确范围、`tag_1`/`tag_30`全量正确。恢复stable connector后同目标
+追加的交叉轮`20261125_085522_00000_vkwnd`冷轮9.171s、
+`20261125_085617_00002_vkwnd`暖轮4.667s；可比暖轮候选约202K/s、stable约214K/s，
+候选慢约6%。因此该候选不进入分支源码或默认配置；它证明重复hash存在，但不是当前
+indexed INSERT的主导瓶颈。8191已恢复stable connector并`starting=false`，目标累计
+19M rows/19M distinct、范围和两组标签门禁均通过。
+
+本次修订前重新检查的远端`PROGRESS.md` blob为
+`c9229cd50b9bb13a3ddf554b65a9fe20105728e7`。
