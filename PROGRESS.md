@@ -667,3 +667,17 @@ daemon/connector 已恢复，Retina 已通过现有 `get status -> markReady(rec
 使用独立daemon路径，Retina保持stable jar；checkpoint recovery后必须先完成
 `markReady`，再开始任何性能测试。本次推送前重新检查的远端`PROGRESS.md` blob为
 `5de9596bf16b53d93010b18079e8d96d50fbe417`。
+
+2026-11-25 对配置中已存在但源码未接通的`index.rocksdb.enable.pipelined.write`
+做了一个默认关闭的隔离候选。候选 daemon SHA为
+`127f1ed0e6f1ba208a87e2590e7fae9b63e463ee0b8efd1a9ee0e43786d62c72`，只在独立
+daemon jar和候选配置中打开；WAL仍保持开启，Retina使用stable jar。候选新建标准根
+索引目标后，首写 query`20261125_100827_00030_f48rh`为6.903s（约144.9K/s），
+热追加`20261125_100918_00033_f48rh`为4.711s（约212.3K/s）。stable独立控制目标
+首写`20261125_101105_00035_f48rh`为5.236s（约191.0K/s），热追加
+`20261125_101146_00037_f48rh`为4.704s（约212.6K/s）。两目标均完成2M rows、2M
+distinct、精确范围与tag_1/tag_30全量门禁；候选热态与stable无差异，首写反而较慢，
+因此拒绝，不进入源码或默认配置。8191已恢复stable daemon/connector，active jar
+SHA为`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`，共享8090
+未触碰。本次推送前重新检查的远端`PROGRESS.md` blob为
+`370f5689ecd8c357e6566180b41ea34d0acbfd4b`。

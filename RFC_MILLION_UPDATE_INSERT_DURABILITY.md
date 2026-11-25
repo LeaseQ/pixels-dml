@@ -8692,3 +8692,40 @@ the full row, distinct, range, tag, and readback gates.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `5de9596bf16b53d93010b18079e8d96d50fbe417`.
+
+### Rejected: opt-in RocksDB pipelined write (2026-11-25)
+
+The runtime configuration already contained
+`index.rocksdb.enable.pipelined.write=false`, but `RocksDBFactory` did not
+apply it to `DBOptions`. I wired the option as an isolated, default-off
+candidate only. The candidate used RocksDB 10.2.1's
+`DBOptions.setEnablePipelinedWrite(true)` while retaining the existing WAL
+configuration; it was deployed in a separate daemon jar and configuration,
+while Retina continued to use the stable jar. Candidate daemon SHA:
+`127f1ed0e6f1ba208a87e2590e7fae9b63e463ee0b8efd1a9ee0e43786d62c72`.
+
+The candidate and stable control each used a fresh indexed 68-column target,
+the same source, 32 fixed writers, `task_concurrency=64`, writer scaling
+disabled, and `redistribute_writes=false`. The candidate target passed the
+complete 2M-row gate (distinct IDs, exact range, and all-row `tag_1` and
+`tag_30` predicates):
+
+```text
+candidate cold  20261125_100827_00030_f48rh  6.903 s  ~=144.9K rows/s
+candidate warm  20261125_100918_00033_f48rh  4.711 s  ~=212.3K rows/s
+stable cold     20261125_101105_00035_f48rh  5.236 s  ~=191.0K rows/s
+stable warm     20261125_101146_00037_f48rh  4.704 s  ~=212.6K rows/s
+```
+
+The warm comparison is effectively identical and the candidate cold arm is
+slower. The option is therefore rejected as a throughput optimization and is
+not enabled by default. The source was restored and the isolated runtime is
+back on the stable daemon/connector; active daemon SHA is
+`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`.
+Shared port 8090 was untouched. This result narrows the next work further:
+RocksDB's standard grouped write path, server-side request parsing/hash, and
+main-index finish overlap need investigation; merely enabling the write
+pipeline does not remove the observed end-to-end ceiling.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`370f5689ecd8c357e6566180b41ea34d0acbfd4b`.
