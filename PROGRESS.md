@@ -250,3 +250,21 @@ Retina 可见性过滤时跳过全量 Bitmap 并调用已有 `read`。候选冷/
 8090 未触碰。该轮说明普通全选优化必须增加全列类型、跨 stable core 读回和
 物理输出等价门禁，不能只看 count/distinct/tag_1/tag_30。完整证据见 RFC
 末尾。本次提交同步记录本轮结果和进度文件版本。
+
+2026-11-25 完成 grouped-primary 线程、Trino writer 和 index flush 并行度的
+隔离扫参。当前 branch connector 仅用于埋点，未推广代码；稳定 core/connector
+已恢复，8191 与共享 8090 的隔离边界保持不变。Retina/index-service 实际是
+grouped primary executor 所在进程，因此线程参数必须注入 Retina，而不是只改
+coordinator/worker。32/64/16 grouped threads 的代表性 SQL 分别为
+7.237s/11.868s/6.601s，64 线程因 RocksDB 竞争退化；16 threads + 16 writers
+的 warm 追加为 4.671s，即约 214.1K rows/s，完整 3M 行门禁通过。16 threads
++ 8 writers 为 5.015s（约199.4K），不如 writer=16。flush.parallelism=8
+冷/热为8.721s/4.873s，仍略慢于默认4.671s，拒绝默认化。完整记录见
+`RFC_MILLION_UPDATE_INSERT_DURABILITY.md` 末尾。
+
+本轮还纠正了运行环境记录：独立 e2e etcd 实际为 12389，共享 runtime etcd
+为12379；独立 pixels.properties 已恢复12389。Retina 重启可能清除尚未进入
+checkpoint 的临时可见性，因此跨重启累计行数不作为吞吐证据；本轮每个性能臂
+均在当次成功提交后完成正确性门禁。独立服务最终恢复稳定参数和 SELECT 1
+smoke test。本次提交前检查的远端 `PROGRESS.md` blob 为
+`55cbfbd9b1c5aef8166500a071b59619ad083735`。

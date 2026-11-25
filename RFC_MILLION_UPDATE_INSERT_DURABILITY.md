@@ -7489,3 +7489,79 @@ The final isolated runtime is on stable core SHA
 
 Before this documentation push, the remote `PROGRESS.md` was fetched at
 `bc87b5843376649b8f4f6c84aa0e0330903914f2`.
+
+## Grouped-primary thread and writer/flush sweep (2026-11-25)
+
+The next bounded INSERT probe used the current `codex/million-update-validation`
+connector build only for observability (`pixels-trino-dml` HEAD `6b56954`,
+runtime connector SHA
+`f905a4e87c64c84706b562994bfd0e6a17d6210cc2588a7ea8430532a877802c`), with
+stable Pixels core SHA
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`.
+The source was the validated materialized
+`validationfresh.e2e68_fresh_candidate86_20261124` (1,000,000 rows). The
+isolated endpoint was Trino `8191`; shared `8090` was not touched. Every
+successful arm used the same 68-column projection, `pk='id', pk_scheme='rocksdb'`,
+grouped primary writes, `task_concurrency=64`, writer scaling disabled, and
+`redistribute_writes=false`. Each appended slice used a disjoint ID offset and
+was checked for row count, distinct IDs, exact range, and all-row
+`tag_1_type='U111' AND tag_1_para=111.0000` plus
+`tag_30_type='AAA' AND tag_30_para=3.1400`.
+
+The first observation also corrected the thread-placement assumption: grouped
+primary writes execute in the Retina/index-service JVM, not only in the
+coordinator/worker JVMs. The Retina argument file therefore had to be changed
+for a thread-count arm; changing coordinator/worker `-D` values alone leaves
+the index executor at its old value.
+
+The observed SQL timelines were:
+
+```text
+index threads  writers       query                         elapsed   rows/s
+32              24--32        20261125_014431_00018_jxpr6    7.237 s   138.2K
+64              24--32        20261125_014745_00026_jxpr6   11.868 s    84.3K
+16              24--32        20261125_015059_00035_jxpr6    6.601 s   151.5K
+16              24--32 warm   20261125_015208_00042_jxpr6    5.473 s   182.7K
+16              16 warm       20261125_015301_00049_jxpr6    4.671 s   214.1K
+16               8 warm       20261125_015347_00056_jxpr6    5.015 s   199.4K
+```
+
+The 16-thread/writer-16 arm reached 3,000,000 rows on its target and the
+writer-8 follow-up reached 4,000,000 rows; both passed the full correctness
+gate. The daemon evidence explains the crossover: with 64 grouped threads,
+`primary_ms` rose to roughly `5.5--6.7 s` per writer request, while the
+32-thread arm was roughly `1.4--3.1 s`; increasing the shared RocksDB executor
+therefore increased contention instead of removing the queue. The preferred
+next benchmark profile is consequently grouped primary threads `16` with
+Trino writer count `16`, not `64`.
+
+The connector flush-parallelism probe then changed only
+`pixels.insert.index.flush.parallelism` from `4` to `8` in an isolated Trino
+args copy. After a Trino-only restart, the cold arm
+`20261125_015801_00006_ms69q` took `8.721 s` (`114.7K rows/s`); its warm
+follow-up `20261125_015909_00013_ms69q` took `4.873 s` (`205.2K rows/s`). The
+same-target flush-4 writer-16 result was `4.671 s` (`214.1K rows/s`), so
+flush-parallelism `8` is rejected as a default change. The runtime was restored
+to the default flush-4 args and stable connector SHA
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`.
+
+Two operational facts are recorded because they affected experiment handling.
+First, restarting Retina before a fresh checkpoint can remove temporary ingest
+visibility from the pre-checkpoint append; one 64-thread target therefore
+showed only the post-restart batch on readback. That arm is retained as a
+thread-contention sample, not as a durability claim. Second, the isolated and
+shared etcd endpoints were re-verified from their actual config files: the
+isolated `e2e-fresh-20261122/etcd.conf.yml` listens on `12389` (PID `578811`),
+while the shared runtime etcd listens on `12379` (PID `3815287`). The isolated
+`pixels.properties` was restored to `12389`; earlier documentation that called
+`12379` the isolated endpoint was incorrect. The isolated coordinator, worker,
+Retina, and Trino were finally restored to their stable 32-thread/default-args
+runtime, and a `SELECT 1` smoke test passed.
+
+This sweep establishes an observed `214K rows/s` INSERT point and a concrete
+contention explanation, but not a durable 300K or 1M rows/s claim. The 16/16
+profile is a session/runtime benchmark candidate only; it is not installed as
+a production default and requires a crossed repeated soak before promotion.
+
+Before this documentation push, the remote `PROGRESS.md` blob was fetched at
+`55cbfbd9b1c5aef8166500a071b59619ad083735`.
