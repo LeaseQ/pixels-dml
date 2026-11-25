@@ -514,3 +514,21 @@ stable runtime。
 
 本次推送前重新检查的远端`PROGRESS.md` blob为
 `e16e36d0857cc68d7b90d04518599964d45a46a9`。
+
+为排除session顺序偏差，随后在新目标`e2e68_insert_probe_reverse_20261125`做了
+反向顺序：先16 writers + `redistribute_writes=false`，query
+`20261125_075100_00022_9kijf` elapsed 4.499秒（约222.3K rows/s）；再使用同一
+目标、同一源表和16 writers + `redistribute_writes=true`，仅将id平移
+`+1000000000000`避免主键冲突，query`20261125_075205_00024_9kijf` elapsed
+4.867秒（约205.5K rows/s）。两臂均返回1M rows；最终目标为2M rows、2M distinct、
+ID范围`10000000001..1010001000000`。标签保真也通过：`tag_1_type='U111'`且
+`tag_1_para=111.0000`为2M，`tag_30_type='AAA'`且`tag_30_para=3.1400`为2M。
+
+结合上一组`true->false`的6.821->4.353秒，当前两组的false平均约4.426秒、true
+平均约5.844秒；但每组仍有冷/暖状态差异，不把这个均值当成全局默认收益。当前结论
+收紧为：`redistribute_writes=false`是可重复方向一致的session级benchmark候选，
+下一步若要推广必须在更多相同生命周期的交叉/soak中确认；默认仍不改。8191和
+shared 8090均未改变。
+
+本次推送前重新检查的远端`PROGRESS.md` blob为
+`86eda394564942e6cab01384a29e6ad454e0e25b`。

@@ -8467,3 +8467,33 @@ was untouched.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `e16e36d0857cc68d7b90d04518599964d45a46a9`.
+
+### Reversed-order confirmation
+
+To separate route direction from the warmup position, a second new target
+`e2e68_insert_probe_reverse_20261125` ran the opposite order. The first arm
+used 16 writers with `redistribute_writes=false` and the second used 16 writers
+with `redistribute_writes=true`; the second arm shifted only `id` by
+`+1000000000000` so both arms appended disjoint primary keys to the same target:
+
+```text
+route                         query                         elapsed   rows/s
+false, first                  20261125_075100_00022_9kijf    4.499 s  ~=222.3K
+true, second                  20261125_075205_00024_9kijf    4.867 s  ~=205.5K
+```
+
+The target ended with 2,000,000 rows and 2,000,000 distinct IDs across
+`10000000001..1010001000000`. Tag-preservation checks also passed for all rows:
+`tag_1_type='U111' AND tag_1_para=111.0000`, and
+`tag_30_type='AAA' AND tag_30_para=3.1400` each matched 2,000,000 rows.
+
+Together with the preceding true-then-false pair (6.821 s then 4.353 s), both
+orderings point in the same direction. The two-pair means are approximately
+4.426 s for false and 5.844 s for true, but this is not a clean cold/warm
+experiment: the first arm in each pair pays a different process/table state.
+The result is therefore promoted only to a repeatable session-level benchmark
+candidate. No connector or global Trino default was changed; a longer matched
+soak is still required before using it as a universal setting.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`86eda394564942e6cab01384a29e6ad454e0e25b`.
