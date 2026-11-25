@@ -7426,3 +7426,66 @@ change and regression/benchmark coverage, not a private classpath override.
 
 Before this documentation push, the remote `PROGRESS.md` was fetched at
 `ad74a9859427de269923e11d3d3b29524d82d79f`.
+
+## Rejected all-selected reader fast path (2026-11-25)
+
+The normal table-to-table INSERT path has no hidden timestamp column and no
+Retina visibility bitmap. The existing reader nevertheless constructed a full
+`Bitmap` and called `readSelected` for every row. A narrowly scoped
+`pixels-core` candidate skipped that bitmap and used the existing `read`
+method only when both conditions were absent; filtered and UPDATE-related
+paths were unchanged. Candidate core SHA:
+`c9d2f23a447a0b8542c99272436e30aae4639f983664a857a5da1d9a1da3344f`;
+stable core SHA:
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`.
+
+The isolated E2E used the materialized 68-column source
+`validationfresh.e2e68_fresh_candidate86_20261124`, `task_concurrency=64`,
+24--32 fixed writers, writer scaling disabled, and
+`redistribute_writes=false`:
+
+```text
+candidate cold  e2e68_allselected_candidate_20261125
+  query=20261125_010002_00009_zuxui  SQL=7.69 s  ~=130.0K rows/s
+  client wall=9.865 s
+candidate warm  same target, second 1M append
+  query=20261125_010207_00019_zuxui  SQL=4.54 s  ~=220.3K rows/s
+  client wall=6.611 s
+
+stable cold   e2e68_allselected_control_20261125
+  query=20261125_010322_00007_4db85  SQL=8.44 s  ~=118.5K rows/s
+  client wall=16.798 s
+stable warm   same target, second 1M append
+  query=20261125_010403_00013_4db85  SQL=6.78 s  ~=147.5K rows/s
+  client wall=8.949 s
+```
+
+The candidate appeared faster, but its physical output was only about 103 MB
+for 2M rows versus about 582 MB for the stable control. The initial candidate
+process checks were too shallow: row count, distinct ID, range-per-append,
+`tag_1=U111/111.0000`, and `tag_30=AAA/3.1400` passed. Cross-version readback
+with the stable core then exposed the actual defect. Reading `tag_1_para`
+from the candidate target repeatedly failed with:
+
+```text
+java.lang.IndexOutOfBoundsException
+  at io.pixelsdb.pixels.core.reader.DecimalColumnReader.readSelected(DecimalColumnReader.java:295)
+  at io.pixelsdb.pixels.core.reader.PixelsRecordReaderImpl.readBatch(PixelsRecordReaderImpl.java:1193)
+```
+
+Integer, timestamp, decimal `dim_4..dim_6`, and string tag columns could be
+read in isolation, but the decimal parameter columns could not. This proves
+that the apparent throughput lead was not acceptable E2E evidence; the
+candidate changed the decimal representation/metadata contract even though a
+limited same-process gate passed. The candidate was removed from the runtime
+and its remote source was restored to the pre-candidate version. No code was
+committed or promoted. Future reader optimizations must include every column
+type, stable-core cross-readback, and physical-output equivalence checks before
+any timing is considered.
+
+The final isolated runtime is on stable core SHA
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`, with
+8191 `starting=false`; shared 8090 was not changed.
+
+Before this documentation push, the remote `PROGRESS.md` was fetched at
+`bc87b5843376649b8f4f6c84aa0e0330903914f2`.

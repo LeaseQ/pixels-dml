@@ -238,3 +238,15 @@ Trino-core源码改动、block级回归测试和交错冷/热矩阵，而不是�
 8191 已恢复默认 classpath、stable connector/core 且 `starting=false`，共享 8090 未触碰。
 本轮提交前检查的远端 `PROGRESS.md` blob 为
 `ad74a9859427de269923e11d3d3b29524d82d79f`。
+
+2026-11-25 对普通 INSERT 的 reader 全选路径做了隔离候选：无隐藏列、无
+Retina 可见性过滤时跳过全量 Bitmap 并调用已有 `read`。候选冷/热 SQL 为
+7.69/4.54 秒，稳定对照为 8.44/6.78 秒；候选初看约 130K/220K rows/s，
+但 2M 行候选物理输出约 103MB，稳定对照约 582MB。稳定 core 跨版本读取
+候选产物时，`tag_1_para` 等 decimal 列稳定复现
+`DecimalColumnReader.readSelected` 的 `IndexOutOfBoundsException`，所以
+候选被否决，未提交代码；远端源码和 8191 已恢复 stable core，SHA
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`，共享
+8090 未触碰。该轮说明普通全选优化必须增加全列类型、跨 stable core 读回和
+物理输出等价门禁，不能只看 count/distinct/tag_1/tag_30。完整证据见 RFC
+末尾。本次提交同步记录本轮结果和进度文件版本。
