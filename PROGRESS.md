@@ -40,6 +40,11 @@
   COMPACT后读回1M行、1M distinct和全量`U444/444.0000`通过；历史多次嵌套布局的
   stable32表重复COMPACT仍读回旧`S2/122.0000`，该臂按布局问题记失败，不计入优化收益。
   本次推送前远端`PROGRESS.md` blob为`750d66b1dd9b645b0266b7004be5ebb90ad2b000`。
+- 追加p32点测：query `20261125_032616_00000_88nps` 的1M行UPDATE为4.351秒，约230K
+  rows/s，`primary_key_resolve_ms=1609.623`；在同一标准根`profile_idx`目标上再次
+  COMPACT后，1M行、1M distinct、范围及全量`U666/666.0000`读回通过。p8/p16/p32
+  的SQL点分别约215K/235K/230K，当前p16略优；8191已恢复p16，源码默认仍未改动。
+  本次推送前远端`PROGRESS.md` blob为`da48d76515ace1e7bac2969eeca3577ca911c552`。
 
 ## 1. 已确认的目标与边界
 

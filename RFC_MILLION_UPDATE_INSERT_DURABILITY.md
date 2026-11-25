@@ -7840,3 +7840,23 @@ targets, capture service queue depth rather than only per-request `bucketMs`, an
 move the concurrency bound or scheduling fix into the daemon/connector only if the
 crossed result survives. The p64 setting has been removed from the active isolated
 runtime; it was an experiment configuration, not a code change.
+
+## Follow-up p32 point and final isolated-runtime state (2026-11-25)
+
+A p32 point was added on the same standard-root indexed target after the p16 arm. The
+UPDATE assigned `U666/666.0000` to the same one-million-row range:
+
+```text
+query=20261125_032616_00000_88nps
+SQL elapsed=4.351 s, client wall=4.744 s, ~=229.8K rows/s
+primary_key_resolve_ms=1609.623, encoding_ms=70.871
+request_build_ms=295.376, rpc_ms=408.649, total_ms=2400.895
+```
+
+The p32 arm was then compacted with the accepted CLI snapshot resolver setting and
+passed the final one-million-row, one-million-distinct-id, exact-range, and full
+`U666/666.0000` readback gate. Across the current directional point set, p16 remains
+slightly ahead of p32 and p8 in SQL wall time (approximately 234.7K, 229.8K, and
+215.3K rows/s respectively), while all three avoid the severe p64 queueing observed
+earlier. The isolated Trino endpoint was restored to p16 after the point test; no
+repository default or shared 8090 process was changed.
