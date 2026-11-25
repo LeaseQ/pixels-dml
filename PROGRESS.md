@@ -544,3 +544,16 @@ query`20261125_075520_00028_9kijf` elapsed为4.983秒（约200.7K rows/s），�
 
 本次推送前重新检查的远端`PROGRESS.md` blob为
 `3d9186b8b01c8c81c9985ce4bf7ef348550567ef`。
+
+在同一3M正确性目标继续做`task_concurrency`探针，保持16 writers和
+`redistribute_writes=false`，每次平移1M ID。`task_concurrency=32`的query
+`20261125_075752_00030_9kijf` elapsed为3.989秒（约250.7K rows/s），而
+`task_concurrency=16`的query`20261125_075912_00032_9kijf` elapsed为4.866秒
+（约205.5K rows/s）。后者的scheduling升到613ms，说明并发继续降低并不能消除
+尾部。累计目标达到5M rows、5M distinct、范围`10000000001..4010001000000`，
+`tag_1`和`tag_30`两组全量标签均保持正确。当前隔离benchmark候选收敛为：
+16 writers + `redistribute_writes=false` + `task_concurrency=32`；这是运行时
+profile，不修改Trino/connector默认。共享8090未触碰。
+
+本次推送前重新检查的远端`PROGRESS.md` blob为
+`95fc7b81c6b02c05685d3168ed328fb22cbbe772`。

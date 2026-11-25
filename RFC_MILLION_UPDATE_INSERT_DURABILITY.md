@@ -8516,3 +8516,20 @@ profile, not a global default, and no source/runtime default was changed.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `3d9186b8b01c8c81c9985ce4bf7ef348550567ef`.
+
+### Task concurrency on the bypass profile
+
+The 3M-row target was reused for a small task-concurrency probe, retaining 16
+writers and `redistribute_writes=false`; each arm appended a disjoint shifted
+million-row range. With `task_concurrency=32`, query
+`20261125_075752_00030_9kijf` took 3.989 s (`~=250.7K rows/s`). Reducing it to
+16 made query `20261125_075912_00032_9kijf` take 4.866 s
+(`~=205.5K rows/s`); scheduling alone rose to 613 ms. The accumulated target
+passed 5M rows, 5M distinct IDs, the complete range
+`10000000001..4010001000000`, and all `U111/111.0000` and `AAA/3.1400` tag
+checks. Thus the current isolated benchmark profile is 16 writers,
+`redistribute_writes=false`, and `task_concurrency=32`. This is still a
+runtime profile rather than a default change.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`95fc7b81c6b02c05685d3168ed328fb22cbbe772`.
