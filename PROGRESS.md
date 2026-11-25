@@ -1,58 +1,40 @@
 # Pixels DML 研究进度
 
 更新时间：2026-11-25（Asia/Shanghai）。本文件是两个DML仓库的统一进度入口。
-本次核对截止Pixels `8b873086`（2026-11-25 10:45:06 +08:00）、Trino `6b56954`。
+本次核对截止Pixels `6108b702`（2026-11-25 14:44 +08:00）、Trino `6b56954`。
 依据fetch后的提交、源码及实验RFC核对，未独立复跑或连接部署环境。下文保留的
 “现场”“本轮”等历史补记属于原执行端记录，不能理解为本次核对重新验收。
 
-**当前结论：** INSERT分组主键写入与UPDATE并行解析已各有内部SQL对照，
-比仅有局部热点证据更进一步；但原Retina整行回放对照、UPDATE完整周期配对和
-独立多轮实验仍未完成，不能把内部参数/路由收益写成整体架构或外部竞争优势。
+**当前结论：** INSERT分组写入、UPDATE并行解析已有内部SQL对照，新增六张标准根
+新表的UPDATE→COMPACT→读回记录，正常物化证据有所加强。但尚未证明两条路径的
+总体成本收益：原Retina对照、UPDATE完整周期配对计时和独立多轮实验仍缺。
+本轮13条新增提交均为实验/进度文档，没有新的运行时代码或默认参数改动。
 
 本轮主要变化：
 
-- UPDATE串行SQL为9.937/11.567秒，并行16为3.921/3.989秒（百万行），有两表
-  交叉顺序对照。两表最终物化和指定标签读回通过，但只有一表保留约28秒COMPACT
-  及阶段计时；不能据此计算完整周期加速比。
-- INSERT非grouped为21.509/19.608秒，grouped为10.524/5.681秒，四个独立空目标
-  正常读回通过。该比较同时涉及RPC组织和flush并行参数，是组合路由对照。
-- 最新固定32-writer交错追加中，`redistribute_writes=false`的SQL均值2.784秒，
-  true为3.238秒，耗时减少约14%，对应约35.9万/30.9万行每秒；单臂仍有波动，
-  尚未改变默认。早期SQL最好值约50.8万不等于稳定水平，更不等于客户端吞吐。
-- 多个reader/Block/RLE候选因无收益、类型不兼容或候选产物被stable reader读出
-  decimal错误而撤回。修改Trino-core的私有classpath探针仍未证明热态收益，
-  不能直接升级为新的架构主线。最新DictionaryBlock预解引用候选在第二轮热态对照中
-  为2.943/2.954秒，未复现首轮约7%的差异，已撤回；没有新代码被推广。
-- 在当前stable运行态完成了一个真实的 `UPDATE -> COMPACT -> query readback` 闭环：
-  `e2e68_profile_idx_20261125` 上更新1M行的Trino elapsed为14.892秒、客户端墙钟
-  15.332秒，约65.3K rows/s；`primary_key_resolve_ms=13262.014`，而编码仅
-  62.891ms、RPC约854.750ms。COMPACT使用`primary-resolve-parallelism=8`，tag
-  snapshot约2.900秒、physical rewrite约7.292秒、publish约7.507秒；最终1M行、
-  1M distinct id、范围完整，更新范围`P2/222.0000`为1M行且旧`U111/111.0000`为0。
-  这轮把此前只分开测量的SQL阶段和最终物化阶段连起来，也确认当前完整周期的首要瓶颈
-  是primary-index resolve服务端排队，而不是宽列编码。完整记录见RFC末尾；本次推送
-  前远端`PROGRESS.md` blob为`43ce45b86f95361a2f0425f94e0a733807551201`。
-- 沿该瓶颈做了隔离的resolver并发点测：同类1M索引目标上，p64 UPDATE为18.188秒
-  （约55K rows/s，`primary_key_resolve_ms=17386.358`），p16为4.261秒（约235K，
-  `1772.346ms`），p8为4.644秒（约215K，`2106.350ms`）。daemon日志同时从
-  p64约16.7秒`bucketMs`降到p16/p8约10--20ms，说明p64会制造服务端排队；p16暂为
-  当前隔离运行态的首选，但这还是跨目标、单轮方向性证据，不改源码默认值。p16臂再次
-  COMPACT后读回1M行、1M distinct和全量`U444/444.0000`通过；历史多次嵌套布局的
-  stable32表重复COMPACT仍读回旧`S2/122.0000`，该臂按布局问题记失败，不计入优化收益。
-  本次推送前远端`PROGRESS.md` blob为`750d66b1dd9b645b0266b7004be5ebb90ad2b000`。
-- 追加p32点测：query `20261125_032616_00000_88nps` 的1M行UPDATE为4.351秒，约230K
-  rows/s，`primary_key_resolve_ms=1609.623`；在同一标准根`profile_idx`目标上再次
-  COMPACT后，1M行、1M distinct、范围及全量`U666/666.0000`读回通过。p8/p16/p32
-  的SQL点分别约215K/235K/230K，当前p16略优；8191已恢复p16，源码默认仍未改动。
-  本次推送前远端`PROGRESS.md` blob为`da48d76515ace1e7bac2969eeca3577ca911c552`。
-- 在六个全新标准table-root、带primary index的目标上完成了交叉验证。统一的
-  table-to-table INSERT均为1M行、固定32 writers并通过完整源数据门禁；随后每张表
-  做UPDATE、COMPACT和最终读回。连续双臂的SQL elapsed为：p16 4.122/1.847s、
-  p8 4.654/2.390s、p32 4.159/1.984s；对应resolve指标也随第二个同进程query
-  明显下降，证明warm/cache和Trino调度状态不可忽略。六张表最终均为1M rows、
-  1M distinct、精确范围，最后一次tag全量正确且旧U111为0。当前结论是p16/p32
-  都能达到约500K级warm SQL点，p16默认更保守；尚不足以宣称稳定百万或完成跨重启
-  的最终参数选择。本次推送前远端`PROGRESS.md` blob为`f43b5ff318dcb4f2f1d9fc8752a184ea37a9fcaa`。
+- UPDATE六张新表的百万行SQL：p16为4.122/1.847秒，p8为4.654/2.390秒，
+  p32为4.159/1.984秒。记录称六表均完成COMPACT，行数、唯一键、范围、最终标签
+  及旧标签清零检查通过。p16第二臂约54.1万行/秒，只是热态单点；各设置第二次
+  查询都明显更快，不能据此宣称稳定百万、确定最佳并行度或证明全周期收益。
+- 六表记录没有各臂COMPACT墙钟，早期串行/并行对照也只有一臂保留约28秒COMPACT。
+  另一个“完整闭环”记录有SQL 14.892秒、client wall 15.332秒和约35秒CLI COMPACT，
+  但SQL赋值`U222`、最终校验`P2`存在未解释的不一致，暂不认可该条正确性结论。
+  已检查的赋值编码路径按UTF-8编码字符串，未找到该标签转换依据；需核对原始SQL、
+  query日志与后续覆盖顺序，不能直接判定运行时代码有错，也不能认可其自动映射解释。
+- INSERT新增标准根交错实验固定16 writers，grouped threads按16→32→16→32切换，
+  SQL为7.410/7.432/6.561/7.979秒，finishing为4.574/4.911/4.091/5.297秒，
+  占约六成至三分之二。32 writers补测为7.976/8.240秒。瓶颈范围已收窄到收尾及
+  索引flush协调；这些样本中planning/scheduling不是主要耗时，具体排队原因仍待追踪。
+  新表交错及32-writer补测约12.1～15.2万行/秒，与此前热态追加35～50万不可混用。
+- 最新p16/p24/p32/p48探索中，p32热态connector total为1263.357ms，较p16的
+  1563.407ms少约19%。这是组件内部计时，且目标为无法COMPACT的历史双路径表；
+  不属于SQL/完整周期收益，记录已恢复p16，当前无理由据此推广p32默认值。
+- DictionaryBlock首轮候选部署目录错误，原A/B性能标签已撤回。修正后候选热态
+  2.948/3.358秒、stable 3.079/3.317秒，均值仅差约1.4%，不足以证明收益。
+  primitive sort和precreate快路径也未获采纳。UPDATE ordinal cache修改的是
+  MergeSink，主键精确更新记录却对应executeUpdate路径，尚未证明命中被改代码；
+  strict-resolve候选更已确认未命中本负载的`ignoreMissing=true`分支。
+  后续先证明候选路径实际执行，再解释性能，避免继续投入未命中热点的微优化。
 
 ## 1. 已确认的目标与边界
 
@@ -66,13 +48,14 @@
 
 ## 2. 本次核对的版本
 
-两个仓库分支均为 `codex/million-update-validation`。下列SHA是证据截止点，
+两个仓库研究分支均为 `codex/million-update-validation`。下列SHA是证据截止点，
 不代表所有实验都在同一版本执行；具体运行以RFC中的部署哈希、参数和query ID为准。
+Pixels本地已快进至下列版本；Trino按fetch后的远端引用核对，未用落后的本地HEAD代表最新代码。
 
 | 仓库 | 本次核对SHA | 主要变化 |
 | --- | --- | --- |
-| pixels-dml | [`8b873086`](https://github.com/LeaseQ/pixels-dml/commit/8b873086b870aef0343234cb1cfdfcfaee4fb17f) | 新增29条文档提交：内部双路径对照、物化记录、redistribution交错复测及候选否决；本轮仓库增量没有新运行时代码 |
-| pixels-trino-dml | [`6b56954`](https://github.com/LeaseQ/pixels-trino-dml/commit/6b569544b7579ac3b0482941027b5e89e6b06534) | 主键解析默认并行度由1改为16；新增INSERT收尾计时 |
+| pixels-dml | [`6108b702`](https://github.com/LeaseQ/pixels-dml/commit/6108b7029d79d2abbdb574130f17a2d13b7830f1) | 自上次进度提交4a73ae76新增13条文档提交，仅修改PROGRESS与实验RFC；无新运行时代码 |
+| pixels-trino-dml | [`6b56954`](https://github.com/LeaseQ/pixels-trino-dml/commit/6b569544b7579ac3b0482941027b5e89e6b06534) | 与上次核对相同；主键解析默认并行度16，已有INSERT收尾计时 |
 | 已确认研究范围 | [`93d98a51`](https://github.com/LeaseQ/pixels-dml/commit/93d98a517ab66da5403a7dc647b92e14ade3b3e4) | INSERT/UPDATE双目标、收窄实验范围及基线验证顺序 |
 
 ## 3. 已有什么证据，还缺什么
@@ -82,26 +65,28 @@
 
 | 工作项 | 当前状态 | 已有证据 | 尚缺证据 |
 | --- | --- | --- | --- |
-| 运行包一致性 | 记录有修正与读回 | 混用Connector/common/core后出现方法缺失及可见性错误；整体重建部署后新表读回通过 | 后续每臂继续固定全套jar与实际端口；不能沿用混包运行的性能结论 |
-| INSERT | 内部分组路由SQL对照完成；redistribution有条件性收益 | 非grouped 21.509/19.608秒，grouped 10.524/5.681秒；最新固定32-writer false/true均值2.784/3.238秒，约14%耗时改善 | 同口径更多重复、客户端持续连接计时；原Retina整行路径与外部方案尚非本次对照对象 |
-| UPDATE | 内部SQL配对完成，物化证据不完整 | parallelism=1为9.937/11.567秒，16为3.921/3.989秒；两表最终指定标签正确，只有一表保留COMPACT约28秒 | 两臂从相同初始状态到可查询的完整计时、独立多轮扩展；不能把SQL约2.5～2.9倍收益推广至全周期 |
-| MainIndexBuffer反向映射 | 记录有测试与对照；INSERT优化未采纳 | 惰性版本记录3项测试通过；同32 fragments配对为稳定版5.759秒、候选6.446秒，未获收益，运行包已恢复稳定版本 | UPDATE/COMPACT收益及内存代价仍待证明；分支保留代码不等于默认部署采用 |
-| 原Retina对照 | 已识别语义缺口 | 现有测试“更新”为删除旧键并插入新键 | 保留主键、相同标签赋值及完成边界的对照适配；INSERT也需对齐输入准备及发布成本 |
-| Hudi/StarRocks/Iceberg | 计划阶段 | 已列选型与语义核验要求 | 本次所读记录未见可比外部实测闭环，不能宣称领先 |
+| 运行包与路径一致性 | 记录有修正，仍需逐臂核验 | 混包曾导致方法缺失及读回错误；DictionaryBlock首轮改错插件目录；部分候选未命中被改代码 | 固定实际加载的jar、端口与执行路径，排除无效A/B标签 |
+| INSERT | 内部分组SQL对照已有；新表热点收窄 | 非grouped 21.509/19.608秒，grouped 10.524/5.681秒；新表交错finishing占约六成至三分之二，指定标签读回通过 | 相同输入/状态的更多重复，收尾关键路径与队列追踪，原Retina及外部同口径对照 |
+| UPDATE | 内部SQL配对已有；新增六表正常物化记录 | 串行9.937/11.567秒，对应并行16为3.921/3.989秒；另六张新表完成物化及指定标签读回，p16热态单点1.847秒 | 两臂从等价初态到可查询的完整计时、独立多轮扩展；U222/P2单条正确性记录待核实 |
+| MainIndexBuffer反向映射 | 记录有测试与对照；INSERT优化未采纳 | 惰性版本记录3项测试通过；同32 fragments稳定版5.759秒、候选6.446秒，运行包已恢复稳定版本 | UPDATE/COMPACT收益及内存代价；分支保留代码不等于默认部署采用 |
+| 原Retina对照 | 已识别语义缺口 | 现有测试“更新”为删除旧键并插入新键 | 保留主键、相同标签赋值及完成边界的适配；INSERT需对齐输入准备及发布成本 |
+| Hudi/StarRocks/Iceberg | 计划阶段 | 已列选型与语义核验要求 | 本次记录未见可比外部实测闭环，不能宣称领先 |
 | 鲲鹏 | 计划阶段 | 已列平台兼容性与实验设计 | 机器规格、部署与同平台实验结果尚未核验 |
 
 读数限制：
 
-- 最新redistribution交错臂为false 2.077/3.491秒、true 3.155/3.320秒；收益方向
-  有信号但样本少、状态敏感，不能宣称通用默认值已找到。
-- 早期9M追加序列SQL均值2.10/2.96秒，client wall均值3.990/4.823秒，后者包含
-  CLI启动/连接成本。两个口径分列，后续可加持续连接客户端以分离固定调用开销。
-- UPDATE物化约28秒是单臂CLI报告；worker/RPC累计时间存在重叠，不能直接求和，
-  也不能与任意一条SQL样本拼成未经测量的全周期加速比。
+- 此前32-writer追加redistribution交错false为2.077/3.491秒，true为3.155/3.320秒，
+  均值2.784/3.238秒，约14%耗时差异。最新新表实验的源表、标签和目标状态不同，
+  不能把其较慢的结果直接当作性能回退，也不能用旧追加最好值代表新表导入。
+- Trino elapsed、包含CLI启动的client wall、connector total分别报告。多RPC及worker
+  累计时间可能重叠，不能相加为墙钟；约35秒COMPACT与单次SQL也不是连续计时或配对加速比。
+- UPDATE 14.892秒样本中primary resolve约13.262秒，encoding仅62.891ms，支持先查
+  主键解析。服务端bucketMs偏大和高并发退化支持排队假设，但仅凭方法总时长不能区分
+  executor等待、锁竞争与RocksDB执行，应补相应分段及队列数据。
 - “完整标签门禁”需看具体谓词：多数记录核对全体行的tag_1或tag_1/tag_30，
   不等于68列全值正确；候选曾通过这些聚合后仍被stable reader发现decimal错误。
-- RFC的历史恢复过程作为运行背景保留，不增加本阶段研究范围；正常物化与读回
-  仍是结果可用的必要验证。部署记录代表对应时刻，不代表本次已核实当前运行态。
+- RFC历史恢复过程作为运行背景保留，不增加研究范围。部署记录代表对应时刻，
+  不代表本次已核实当前运行态；单条证据存在问题也不自动否定另外六张表的独立记录。
 
 ## 4. 下一步与完成条件
 
@@ -109,23 +94,26 @@
 
 | 优先级 / ID | 当前状态 | 下一项工作 | 完成条件 |
 | --- | --- | --- | --- |
-| P0 / BASE-01 | 内部参数/路由基线已有；原Retina仍缺 | 区分并行解析、分组写入的内部收益与原架构收益 | 保留现有内部对照；补原Retina同主键标签赋值及输入/发布适配，不能以路由对照替代整行回放比较 |
-| P0 / ENV-01 | 原执行端有现场记录；本会话未复验 | 继续固定实际运行包、参数与隔离端口 | 每臂重新核验；晚间/早晨记录出现etcd端口纠错，当前配置不得由旧文字推断 |
-| P1 / INS-01 | 内部路由SQL配对完成；候选未默认化 | 固定状态复核grouped及redistribution收益，再解释关键路径 | 原始全部样本、输入状态、客户端与Trino时间分列；保持指定标签与全列类型校验，不能混用最好值 |
-| P1 / UPD-01 | SQL配对完成；完整周期配对待补 | 补齐两臂COMPACT/发布计时与独立多轮任务 | 当前一表约28秒，另一表物化日志未保留；重新从等价基表测全周期，不相加跨实验样本；故障恢复不新增为门槛 |
-| P2 / OPT-01 | INSERT候选未采纳 | 保留反向映射负结果；按总体成本证据决定是否继续研究定位开销 | 不将其作为已成立的INSERT优化；如另评估UPDATE/COMPACT，需独立位置迁移、内存和端到端配对证据 |
+| P0 / EVID-01 | 单条正确性证据冲突 | 核对U222/P2记录的原始SQL、query日志、读回谓词和中间覆盖 | 解释并修正文档；如仍无法解释，在新标准根复测相同赋值；此前不把该条算作正确性通过 |
+| P0 / BASE-01 | 内部基线已有；原Retina仍缺 | 区分并行解析、分组写入收益与原架构收益 | 补原Retina同主键标签赋值及输入/发布适配，不以内部路由对照替代整行回放比较 |
+| P0 / ENV-01 | 运行记录已有；本会话未复验 | 每臂固定实际加载的包、参数、隔离端口及候选执行路径 | 保留部署哈希与路径命中证据；排除改错插件目录、未执行候选代码和历史多路径表的无效对照 |
+| P1 / INS-01 | 新表finishing热点已有 | 在等价新表上追踪finish/index_finish与primary/main-index flush依赖及等待 | 保留全样本、队列/分段证据、SQL与客户端时间及读回；不能只用线程调参单点晋升默认 |
+| P1 / UPD-01 | 六表物化记录已有；全周期配对缺失 | 补齐等价标准根两臂的SQL→COMPACT/发布计时，再做独立多轮 | 连续记录各臂总时间与阶段时间，最终指定标签正确；p32需同口径复测，故障恢复不新增为门槛 |
+| P2 / OPT-01 | 多个候选未采纳或未证明命中 | 先验证候选路径覆盖，再按总体热点选择改动 | 不把未命中路径的波动解释为算法效果；编码/排序改动需总体配对收益与类型正确性证据 |
 | 后续 / EXT-01 | 待平台与接口核验 | 外部基线与鲲鹏实验 | 按既有方案推进；正常运行语义与计时可比，实际结果留证 |
 
-BASE-01与ENV-01可以并行推进；INS-01与UPD-01需要对应基线和环境就绪。
-单个候选测试通过不能直接把总体收益标为“已证明”。
+证据核对与基线适配可以并行推进。当前优先收敛可比总体实验及两个已识别热点，
+不因多次微优化失败就推翻整体架构，也不将候选测试通过视为总体收益已证明。
 
 ## 5. 当前阻塞与已知风险
 
 | 项目 | 事实与影响 | 解除条件 |
 | --- | --- | --- |
-| 本地执行端到验证机器 | 2026-11-24从本会话环境连接此前指定机器的SSH 22端口超时，未进入认证；11月25日未重试。其他执行端有运行记录，不能推断机器整体不可用 | 从实际执行环境重新核验连通性、身份及隔离实例 |
-| 原路径基线不可直接复用 | [Retina测试][retina-test]的删旧键/插新键负载不等价于保留主键的标签更新 | 完成BASE-01的适配或选定可比对照 |
-| 输入与运行状态不等价 | RFC记录过旧源文件decimal读取错误、查询发往共享端口、插件混包；`count(*)`不能发现所有列读取问题 | 每臂核验端口和产物，完整投影检查输入，使用等价独立目标；无效样本保留排除原因 |
+| 本地执行端到验证机器 | 2026-11-24从本会话环境连接此前指定机器的SSH 22端口超时，未进入认证；11月25日未重试。其他执行端有运行记录，不能推断机器整体不可用 | 从实际执行环境核验连通性、身份及隔离实例 |
+| 单条标签证据冲突 | RFC的Full UPDATE-to-queryable段赋值U222却校验P2；[赋值编码][update-executor]与[字符串转换][string-conversion]未提供该映射依据 | 完成EVID-01，不能沿用该条“正确性通过”解释 |
+| 历史目标无法物化 | 最新p32探索及部分候选使用双路径目标，COMPACT报path metadata not found；旧嵌套布局也记录过读回旧标签 | 用标准根等价目标完成物化与读回，组件计时不能替代验收 |
+| 原路径基线不可直接复用 | [Retina测试][retina-test]的删旧键/插新键负载不等价于保留主键的标签更新 | 完成BASE-01适配或选定可比对照 |
+| 输入与运行状态不等价 | 旧源文件decimal错误、共享端口、插件混包和错误目录均曾干扰判断 | 每臂核验端口、实际产物及完整投影输入；无效样本保留排除原因 |
 
 ## 6. 文档分工与更新规则
 
@@ -216,7 +204,7 @@ stable true对照为6.22/2.32秒；候选约慢10%，已撤回且没有pixels-tr
 connector与默认args。本次提交前检查的远端进度文件版本为
 `5cf8f3a78d4489984382721824ea8b0c886eb518`。
 
-[runs]: https://github.com/LeaseQ/pixels-dml/blob/8b873086b870aef0343234cb1cfdfcfaee4fb17f/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
+[runs]: https://github.com/LeaseQ/pixels-dml/blob/6108b7029d79d2abbdb574130f17a2d13b7830f1/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283
 
 2026-11-25 reader-side single-entry dictionary fast path：主测例的 tag 列确实是单值字典，
@@ -435,3 +423,6 @@ precreate负例，不能做tag-aware COMPACT，所以只记录为resolver方向�
 共享8090未触碰；下一步仍需在single-root目标上完成UPDATE->COMPACT->readback交叉后，
 再考虑是否提升默认并发。本次推送前检查的远端`PROGRESS.md` blob为
 `5ee444a979185b8acc51efdd3c7bc37684635e0b`。
+
+[update-executor]: https://github.com/LeaseQ/pixels-trino-dml/blob/6b569544b7579ac3b0482941027b5e89e6b06534/connector/src/main/java/io/pixelsdb/pixels/trino/PixelsUpdateExecutor.java
+[string-conversion]: https://github.com/LeaseQ/pixels-dml/blob/6108b7029d79d2abbdb574130f17a2d13b7830f1/pixels-core/src/main/java/io/pixelsdb/pixels/core/TypeDescription.java#L1801
