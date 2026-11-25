@@ -7789,3 +7789,54 @@ earlier 250K rows/s parallel-resolver pair because the current daemon/index serv
 was heavily queued. The next optimization should therefore instrument and reduce
 primary-index resolve queueing/concurrency (including why this run's 16,384-key
 batches accumulated ~12 s of bucket time) before more Block or string micro-tuning.
+
+## Primary-resolve concurrency point test (2026-11-25)
+
+The full-cycle run above exposed an unexpectedly bad result with the isolated Trino
+argument `pixels.update.primary-key-resolve-parallelism=64`. A focused point test was
+therefore run before changing any source default. The tests used two already materialized
+one-million-row indexed 68-column targets with exact one-million-row ranges. The first
+target was `e2e68_stable32_recheck_20261125`, and the second was the standard-root
+`e2e68_profile_idx_20261125`; the different target names and crossed order mean this is
+directional evidence, not a final multi-round benchmark.
+
+The observed UPDATE SQL points were:
+
+```text
+resolver p64: query=20261125_031114_00051_98up5
+  SQL elapsed=18.188 s, client wall=18.554 s, ~=55.0K rows/s
+  primary_key_resolve_ms=17386.358, total_ms=18028.964
+
+resolver p16: query=20261125_031442_00000_pk864
+  SQL elapsed=4.261 s, client wall=4.736 s, ~=234.7K rows/s
+  primary_key_resolve_ms=1772.346, total_ms=2509.252
+
+resolver p8: query=20261125_031851_00000_z7qqp
+  SQL elapsed=4.644 s, client wall=5.180 s, ~=215.3K rows/s
+  primary_key_resolve_ms=2106.350, total_ms=2902.181
+```
+
+The p64 connector log reported only 22.760 ms of encoding and 457.998 ms of RPC
+transport, so its 17.386 s resolve phase was not caused by wide-column encoding or
+request transfer. The daemon log showed the corresponding 16,384-key requests with
+approximately 16.7 s of `bucketMs`. Under p16, the same request shape reported mostly
+10--20 ms `bucketMs` and the aggregate resolve phase fell to 1.772 s. The p8 arm was
+also healthy but slightly behind p16. This is strong evidence that the previous p64
+setting over-subscribed a service-side queue; p16 is the current isolated-runtime
+candidate, while the repository/default behavior remains unchanged until a crossed
+multi-round test and a service-side fix are completed.
+
+The p16 arm was then materialized on the standard-root `e2e68_profile_idx_20261125`
+target with a second tag update to `U444/444.0000`. COMPACT completed and the final
+readback passed with one million rows, one million distinct ids, the exact original
+range, and `U444/444.0000` on all one million rows. The p8 arm used a historical target
+that already contained nested layout paths from repeated exploratory compactions. Its
+repeat COMPACT generated another nested output and ordinary Trino readback still showed
+the old `S2/122.0000` physical tag; this is recorded as a layout/metadata failure, not
+as p8 correctness evidence or an optimization result.
+
+The immediate next work is to reproduce p8/p16/p32 on fresh standard-root indexed
+targets, capture service queue depth rather than only per-request `bucketMs`, and then
+move the concurrency bound or scheduling fix into the daemon/connector only if the
+crossed result survives. The p64 setting has been removed from the active isolated
+runtime; it was an experiment configuration, not a code change.
