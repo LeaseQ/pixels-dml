@@ -754,3 +754,28 @@ writers、`task_concurrency=64`、`redistribute_writes=false`，并完成行数/
 
 本次推送前重新检查的远端`PROGRESS.md` blob为
 `e60dba0c735c475490b5b432d94c213fbe2a715a`。
+
+2026-11-25 重新核对 daemon 聚合返回候选时发现上一轮失败并不等于性能结论，
+因此按正确 overlay 重新启动了候选。候选 daemon fat jar SHA 为
+`664f1ce6485930f08453b4a962b6d0f71ad25d690117f5873c06f6e73b4883d6`，实际只
+overlay `IndexServiceImpl`、`MainIndex` 和 `SqliteMainIndex`；但本轮同时显式打开了
+`pixels.index.grouped.primary.write.new-main-index=true`，所以它不是只检验
+“不构造每行 `List<Boolean>`”的单变量实验。候选目标
+`e2e68_aggregate_valid_candidate_20251125` 的 query
+`20261125_113125_00003_5krz7` 成功完成，Trino elapsed 26.535s，且通过
+1M rows、1M distinct、范围和 `U111/111.0000/AAA/3.1400` 四项标签门禁；但该读数
+不能拆分归因于 aggregate check 或 new-main-index。
+
+随后 stable control 首次因 coordinator 启动参数错误而无效；修复后，新的 control
+`e2e68_aggregate_valid_control2_20251125` query
+`20261125_113901_00009_ezt95` 在 0 input positions、97 blocked drivers 处等待并被
+取消。再次创建 `e2e68_aggregate_valid_control3_20251125` 后，query
+`20261125_114817_00016_ezt95` 仍未形成样本；隔离 Retina 日志显示
+`addWriteBuffer` 触发 `OutOfMemoryError: Java heap space`，随后 stable coordinator
+因 Retina 节点不可用将 `cds20` 移出 hash ring。两次 control 均不计入吞吐，也不把
+候选的 26.535s 与它们比较。共享 8090 和活动 Retina 未重启或替换，分支源码及默认
+配置没有变化。下一次需先在不触碰共享服务的前提下获得健康的隔离 Retina，再使用
+`new-main-index=false` 单独验证 aggregate check；否则不应继续扩大该候选结论。
+
+本次推送前重新检查的远端 `PROGRESS.md` blob 为
+`e60dba0c735c475490b5b432d94c213fbe2a715a`。

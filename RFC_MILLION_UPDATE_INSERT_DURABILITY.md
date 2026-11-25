@@ -8831,3 +8831,47 @@ and finish tail rather than this hint.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `e60dba0c735c475490b5b432d94c213fbe2a715a`.
+
+### Aggregate primary-index result check: confounded candidate and invalid control (2026-11-25)
+
+The earlier daemon aggregate candidate had failed during E2E setup, so it was
+rechecked with a correct class overlay. The candidate fat jar was
+`664f1ce6485930f08453b4a962b6d0f71ad25d690117f5873c06f6e73b4883d6`; the
+isolated daemon overlaid only `IndexServiceImpl`, `MainIndex`, and
+`SqliteMainIndex`. Its implementation adds `putEntriesAndCheck` and
+`putNewEntriesAndCheck`, allowing the successful result to avoid materializing
+the per-row `List<Boolean>` when the caller only needs an all-success result.
+
+The run also enabled `pixels.index.grouped.primary.write.new-main-index=true`.
+That changes the path from `MainIndexBuffer.insert` to `insertNew`, so the run
+is not a single-variable test of the aggregate check itself. It therefore must
+not be compared as evidence that either optimization is faster.
+
+The candidate target was a fresh 68-column indexed root:
+
+```text
+target  e2e68_aggregate_valid_candidate_20251125
+query   20261125_113125_00003_5krz7
+elapsed 26.535 s  ~=37.7K rows/s
+gate    1M rows, 1M distinct, exact range, U111/111.0000/AAA/3.1400 all passed
+```
+
+The candidate completed the full correctness gate, but its `new-main-index`
+setting and the aggregate-return change are inseparable in this run. A stable
+control was then attempted under the same isolated Trino. The first retry,
+`20261125_113901_00009_ezt95`, stayed at zero input positions with 97 blocked
+drivers and was canceled after 296 seconds. After a fresh target was created,
+`20261125_114817_00016_ezt95` reproduced the wait and was canceled. The stable
+coordinator log shows the isolated Retina `addWriteBuffer` path throwing
+`OutOfMemoryError: Java heap space`, followed by removal of `cds20` from the
+hash ring. Neither control is a throughput sample.
+
+Conclusion: this round is a harness/runtime finding, not a slowdown result and
+not a correctness failure. No source or default change is retained. The next
+valid experiment must restore a healthy isolated Retina without touching the
+shared 8090 service, keep the stable dependency closure, and run the aggregate
+candidate with `new-main-index=false`; only then can the `List<Boolean>` removal
+be judged independently.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`e60dba0c735c475490b5b432d94c213fbe2a715a`.
