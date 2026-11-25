@@ -346,3 +346,16 @@ SQL elapsed 为8.218/7.166秒（约121.7K/139.5K rows/s），16线程臂为7.275
 线程稳定配置，共享8090未触碰。Retina重启后的`RECOVERING -> READY`使用既有
 `markReady(recoveryEpoch)`本地流程完成。本轮提交前检查的远端`PROGRESS.md` blob
 为`353b26305b1e738bff794ece8a4f834a8db88efa`。
+
+2026-11-25 继续完成交错 fresh-root INSERT 和路由分解。固定16个Trino writer时，
+按16→32→16→32 Retina grouped threads交错的SQL elapsed为7.410/7.432/6.561/7.979秒，
+约135.0K/134.5K/152.4K/125.3K rows/s；四臂均通过1M行、distinct、精确范围和
+全量`U666/666.0000`标签门禁。Trino日志显示planning/waiting/scheduling仅约100--240ms，
+finishing为4.091--5.297秒；Retina grouped聚合日志显示32线程臂的main-index耗时汇总
+更高，支持“索引finish/队列竞争”是当前主要瓶颈的判断，但不把16线程写成全局最优。
+
+随后固定32个Trino writer再交叉16/32 Retina线程：7.976秒（125.4K）对8.240秒
+（121.4K），仅约3.3%差异，说明线程收益依赖writer组合。两臂也都通过完整门禁。
+最终隔离运行态恢复Retina 32线程、Trino p16，`SELECT 1`通过，共享8090未触碰。
+当前仍不修改生产默认，下一步转向connector `index_finish`/flush边界的JFR或队列深度
+证据。本轮提交前检查的远端`PROGRESS.md` blob为`8f9d573fd0be43540747736714df2dfc5fcd8d08`。

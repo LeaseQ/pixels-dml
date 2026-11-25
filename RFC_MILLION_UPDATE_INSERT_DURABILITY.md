@@ -7964,3 +7964,72 @@ scheduling, exchange, and finish costs. The current conclusion is to retain the
 candidate profile `grouped threads=16, Trino writers=16` for the next interleaved
 multi-range run, while leaving the isolated runtime restored to the stable
 `grouped threads=32` profile and making no source-default change.
+
+## Interleaved fresh-root INSERT crossover and route decomposition (2026-11-25)
+
+The crossed recheck was extended to four fresh-root targets in the order
+`16 -> 32 -> 16 -> 32` Retina grouped-primary threads. Trino was held at exactly
+16 writers for all four arms, with the same 68-column source,
+`task_concurrency=64`, writer scaling disabled, and `pk='id', pk_scheme='rocksdb'`:
+
+```text
+Retina threads  target                         query                         SQL elapsed  rows/s
+16              e2e68_cross_16a_20261125       20261125_041638_00030_bwk6b  7.410 s      135.0K
+32              e2e68_cross_32a_20261125       20261125_041746_00034_bwk6b  7.432 s      134.5K
+16              e2e68_cross_16b_20261125       20261125_041854_00038_bwk6b  6.561 s      152.4K
+32              e2e68_cross_32b_20261125       20261125_042002_00042_bwk6b  7.979 s      125.3K
+```
+
+Every target passed `count=1000000`, `distinct(id)=1000000`, the exact
+`3010000000001..3010001000000` range, and one million `U666/666.0000` rows. The
+Trino timelines show that planning/waiting/scheduling were small and similar,
+while finishing dominated:
+
+```text
+query                         planning waiting scheduling running finishing
+20261125_041638_00030_bwk6b       44ms     56ms       139ms    2653ms      4574ms
+20261125_041746_00034_bwk6b       49ms     57ms       125ms    2347ms      4911ms
+20261125_041854_00038_bwk6b       37ms     48ms       116ms    2317ms      4091ms
+20261125_042002_00042_bwk6b       36ms     48ms       111ms    2535ms      5297ms
+```
+
+The daemon grouped metrics were aggregated across the 16 writer RPCs (the sums are
+not wall-clock time, but expose queueing pressure):
+
+```text
+target suffix  threads  primary_ms sum  main_index_ms sum  total_ms sum
+16a             16           34855.2             4597.2          39452.7
+32a             32           36957.5             5244.5          42202.3
+16b             16           33555.5             3985.2          37540.9
+32b             32           36993.2             8795.8          45789.2
+```
+
+The route log also shows the expected grouped shape: one primary RPC per file,
+`primary_flush_parallelism=4`, and connector flush max concurrency 24. The
+interleaving removes most of the earlier ordering concern: 16 threads are only
+0.3% faster in the first pair but 17.8% lower in SQL elapsed in the second pair.
+This is evidence for lower index-finish contention, not proof that 16 is a universal
+best setting.
+
+To test the writer interaction directly, a second crossed pair fixed Trino at 32
+writers:
+
+```text
+Retina threads  target                         query                         SQL elapsed  rows/s
+16              e2e68_cross_16w32_20261125     20261125_042734_00046_bwk6b  7.976 s      125.4K
+32              e2e68_cross_32w32_20261125     20261125_042843_00050_bwk6b  8.240 s      121.4K
+```
+
+Both passed the same exact gate. The 16-thread advantage at writer=32 is only about
+3.3%; the daemon sums show a tradeoff (lower `main_index_ms`, but higher grouped
+`primary_ms`), so it is not a reliable promotion signal. Across these clean
+post-restart fresh-root arms, the observed throughput remains in the 121--152K
+rows/s range; earlier warm appended points above 200K are not interchangeable with
+these cold fresh-root numbers.
+
+The current bottleneck hypothesis is now narrower: Trino plan and scheduling are
+not dominant, while connector `index_finish` and Retina grouped primary/main-index
+queueing consume most of the timeline. The next code investigation should target
+the finish/flush boundary and collect a JFR or queue-depth trace there before any
+default change. The isolated runtime was restored to Retina grouped threads=32,
+Trino p16; `SELECT 1` passed and shared 8090 was untouched.
