@@ -8123,3 +8123,24 @@ gates passed. Shared Trino `8090` was untouched.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `8fb0e75dbee2b8b6f27cf4c605f39aa4c1cb3847`.
+
+### Timeline correction for the same A/B
+
+The Trino server timeline was collected after the first documentation push from
+the isolated server log. It removes CLI startup overhead from the comparison:
+
+```text
+arm       query                         SQL elapsed  planning waiting scheduling running finishing
+candidate 20261125_051345_00081_bwk6b     7.521 s      27ms    64ms       239ms   2682ms   4573ms
+candidate 20261125_051436_00084_bwk6b     5.290 s      34ms    55ms       171ms   2230ms   2855ms
+control   20261125_051938_00090_bwk6b     7.246 s      36ms    55ms       183ms   2404ms   4623ms
+control   20261125_052016_00092_bwk6b     4.725 s      41ms    44ms       163ms   1896ms   2625ms
+```
+
+The sink metrics also show that the candidate did not reduce the finish tail: the
+largest candidate/control `index_finish_ms` values were about 4.02/4.08 s on the
+cold arms and 2.46/2.39 s on the warm arms. The SQL timeline therefore confirms
+the original rejection rather than changing it.
+
+Before this follow-up documentation edit, the fetched remote `PROGRESS.md` blob
+was `7e655401692721aa9c9bda7e534fd092156dd79e`.
