@@ -23,6 +23,15 @@
   decimal错误而撤回。修改Trino-core的私有classpath探针仍未证明热态收益，
   不能直接升级为新的架构主线。最新DictionaryBlock预解引用候选在第二轮热态对照中
   为2.943/2.954秒，未复现首轮约7%的差异，已撤回；没有新代码被推广。
+- 在当前stable运行态完成了一个真实的 `UPDATE -> COMPACT -> query readback` 闭环：
+  `e2e68_profile_idx_20261125` 上更新1M行的Trino elapsed为14.892秒、客户端墙钟
+  15.332秒，约65.3K rows/s；`primary_key_resolve_ms=13262.014`，而编码仅
+  62.891ms、RPC约854.750ms。COMPACT使用`primary-resolve-parallelism=8`，tag
+  snapshot约2.900秒、physical rewrite约7.292秒、publish约7.507秒；最终1M行、
+  1M distinct id、范围完整，更新范围`P2/222.0000`为1M行且旧`U111/111.0000`为0。
+  这轮把此前只分开测量的SQL阶段和最终物化阶段连起来，也确认当前完整周期的首要瓶颈
+  是primary-index resolve服务端排队，而不是宽列编码。完整记录见RFC末尾；本次推送
+  前远端`PROGRESS.md` blob为`43ce45b86f95361a2f0425f94e0a733807551201`。
 
 ## 1. 已确认的目标与边界
 

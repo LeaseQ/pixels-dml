@@ -7711,3 +7711,81 @@ first deployment was restored to its pre-test file. Shared 8090 was never restar
 
 Before this correction push, the remote `PROGRESS.md` blob was fetched and checked at
 `298c33d55812588bb13a63dede825f3515f4ebd7`.
+
+## Full UPDATE-to-queryable E2E on the stable runtime (2026-11-25)
+
+The preceding paired UPDATE evidence measured the SQL phase and only one retained
+COMPACT phase. To close that gap, the current stable isolated runtime was exercised
+end-to-end on the indexed 68-column target
+`validationfresh.e2e68_profile_idx_20261125`. The target contained one million rows
+with ids `3010000000001..3010001000000` and the original physical tag
+`U111/111.0000`. The first attempted UPDATE against the larger matrix table was
+rejected during analysis because that table intentionally had no primary index; it
+committed no rows and is not part of this result.
+
+The accepted E2E UPDATE was:
+
+```sql
+UPDATE pixels.validationfresh.e2e68_profile_idx_20261125
+SET tag_1_type='U222', tag_1_para=222.0000
+WHERE id BETWEEN 3010000000001 AND 3010001000000
+```
+
+The exact query was `20261125_030340_00040_98up5` under the stable connector
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`, with
+`task_concurrency=64` and the accepted parallel primary-key resolver. It returned
+`1,000,000` updated rows. The Trino timeline was 14.892 s and the client wall clock
+was 15.332 s, or about 65.3K rows/s. Connector metrics were:
+
+```text
+[PIXELS_UPDATE_METRIC]
+rows=1000000 encoding_ms=62.891 primary_key_resolve_ms=13262.014
+request_build_ms=245.005 rpc_count=1 request_bytes=10000061
+rpc_ms=854.750 total_ms=14454.423
+```
+
+The daemon log shows the primary resolve batches queuing behind the index service:
+the 16,384-key requests reported roughly 11.8--12.7 s of `bucketMs`, while the
+location-response portion was only tens to hundreds of milliseconds. This is the
+strongest current evidence that this run is index-service scheduling/queueing bound,
+not wide-column encoding bound. Immediately before COMPACT, the ordinary physical
+read retained the expected pre-materialization state: one million rows remained,
+but neither the old nor the new tag predicate was visible as a materialized tag.
+
+The same target was then compacted with the current CLI and
+`-Dpixels.compact.primary-resolve-parallelism=8`:
+
+```text
+[PIXELS_TAG_INDEX_METRIC]
+tagged_rows=1000000 resolve_rows=1000000 resolve_rpc_count=62 resolve_ms=2900.389961
+[PIXELS_COMPACTION_ROW_METRIC]
+rows=1000000 batches=977 read_ms=2208.116601 primary_key_ms=397.759204
+update_ms=134.967105 writer_ms=3202.558317
+[PIXELS_COMPACTION_STAGE_METRIC]
+physical_rewrite outputs=1 worker_ms=7288.473697
+[PIXELS_COMPACTION_RESOLVE_METRIC]
+rows=1000000 resolve_rpc_count=61 resolve_ms=17802.528676
+[PIXELS_COMPACTION_STAGE_METRIC]
+publish outputs=1 publish_ms=7506.848654
+```
+
+The CLI process ran for approximately 35 s including startup and shutdown. Final
+readback passed:
+
+```text
+count=1000000
+distinct(id)=1000000
+min(id)=3010000000001
+max(id)=3010001000000
+updated-range P2/222.0000=1000000
+old U111/111.0000=0
+```
+
+`P2` is the persisted UPDATE tag type for this route; the SQL assignment uses
+`U222` as the input tag expression, so the final correctness predicate must use
+`P2/222.0000`, not `U222/222.0000`. This is a complete correctness E2E, but its
+throughput is not an accepted improvement: the UPDATE SQL point is far below the
+earlier 250K rows/s parallel-resolver pair because the current daemon/index service
+was heavily queued. The next optimization should therefore instrument and reduce
+primary-index resolve queueing/concurrency (including why this run's 16,384-key
+batches accumulated ~12 s of bucket time) before more Block or string micro-tuning.
