@@ -8657,3 +8657,38 @@ main-index finish tail.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `48891a065ffed2392523e08b8daded1f3532fae1`.
+
+### Rejected: daemon-side aggregate main-index result (2026-11-25)
+
+The grouped primary daemon path was given a narrow candidate intended to avoid
+allocating and iterating a per-row `List<Boolean>` after the main-index RPC.
+The candidate added an aggregate-success method to the main-index interface and
+used it from the grouped route. It was built on cds20 as daemon SHA
+`664f1ce6485930f08453b4a962b6d0f71ad25d690117f5873c06f6e73b4883d6`.
+
+The first end-to-end attempt was not a valid performance run. Query
+`20261125_091949_00005_f48rh` ended with Trino `GENERIC_INTERNAL_ERROR` and a
+client GOAWAY. The query had already created 32 writer files, but the failed
+path did not publish matching Retina visibility. A subsequent read therefore
+failed with `PIXELS_BAD_DATA` / `RGVisibility not found`. The 32 files were
+preserved and restored for recovery; no throughput number was recorded and the
+target is not used as an A/B result.
+
+The deployment also exposed an important harness constraint: the daemon full
+jar and Retina had been sharing the same active jar path. Replacing that path
+while Retina was alive caused class loading failures. The retry setup kept the
+stable jar for Retina and used a separate candidate daemon jar, but the
+candidate still had no passing E2E gate. The candidate source was reverted and
+is not part of the branch or runtime. Stable daemon/connector were restored;
+Retina was explicitly transitioned from `RECOVERING` to `READY` with the
+existing `get status -> markReady(recoveryEpoch)` RPC before validation resumed.
+Ports 8191, 19989, and 19990 were healthy and shared 8090 was untouched.
+
+This is rejected as an invalid E2E candidate, not as a measured slowdown. Future
+daemon candidates must use separate jar paths from Retina and must complete the
+recovery readiness handshake before any benchmark. The next valid optimization
+should return to the primary-index/finish critical path with a fresh target and
+the full row, distinct, range, tag, and readback gates.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`5de9596bf16b53d93010b18079e8d96d50fbe417`.

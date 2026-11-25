@@ -1,44 +1,45 @@
 # Pixels DML 研究进度
 
 更新时间：2026-11-25（Asia/Shanghai）。本文件是两个DML仓库的统一进度入口。
-本次核对截止Pixels `272d4560`（2026-11-25 16:00:33 +08:00）、Trino `6b56954`。
+本次核对截止Pixels `d4074141`（2026-11-25 17:08:28 +08:00）、Trino `6b56954`。
 依据fetch后的提交、源码及实验RFC核对，未独立复跑或连接部署环境。下文保留的
 “现场”“本轮”等历史补记属于原执行端记录，不能理解为本次核对重新验收。
 
-**当前结论：** UPDATE补充了标准根新表的正反顺序物化对照，p32优势未稳定复现，
-保留p16有依据；INSERT关闭写入重分布在两个顺序下都有改善信号，但目标生命周期
-仍不等价。两条路径都有可用的实验进展，尚未证明相对原Retina的完整任务成本收益。
-自上次进度提交`3466bc2f`新增7条实验/进度文档提交，无新运行时代码或默认参数改动。
+**当前结论：** INSERT历史约47.6万/33.9万行每秒高值已被执行端纠正为无主索引写入，
+不能作为带索引导入成绩。当前稳定带索引追加样本主要约20万至26万行/秒；两个新局部
+候选未显示收益，均未进入分支源码。UPDATE没有新增实验，保持p16的结论不变。
+两条路径相对原Retina的完整任务成本收益仍未证明，不据此改变整体研究方向。
+自上次进度摘要提交`ac73c1b0`新增4条实验/纠正文档提交，仅修改PROGRESS和实验RFC；
+无新运行时代码或默认参数改动。本次提交仅同步进度摘要，不是新增实测或优化实现。
 
 本轮主要变化：
 
-- UPDATE新增四张标准根新表的p16/p32正反顺序实验，最终标签、行数、唯一键及范围
-  读回均记录通过。正序热态SQL：p16 2.054秒、p32 1.852秒；反序：p32 1.809秒、
-  p16 1.639秒。p32的优势随顺序反转，不能称为稳定算法收益或据此更改默认。
-- p16随后在同一表连续两次百万行UPDATE，SQL为1.531/1.535秒，约65.3/65.1万行/秒；
-  connector total为1335.349/1350.100ms，对应约74.9/74.1万行/秒。RFC把两次
-  connector速率均写为约74.1万，存在小幅算术误差；更重要的是这不是SQL吞吐。
-  最新`JFR29`版本有COMPACT及指定标签读回记录，但同表热态重复不等于独立多轮总体评估。
-- 第一组p16/p32均补了COMPACT阶段指标和CLI报告17/16秒，较上一轮只有一侧记录更完整。
-  不过[CLI内部计时][compact-timer]在标签快照准备及文件枚举之后才开始，并将秒数截整，
-  不含进程启动；不能把它当作完整COMPACT墙钟或与SQL拼接成完整任务吞吐。反序组未列
-  对应物化时间，原串行/并行或原Retina基线的完整任务配对仍缺。
-- UPDATE新分段：62个RPC累计singlePoint 5.414秒，占累计service 8.593秒约63%，
-  支持优先调查本地主键查找。源码的[RocksDB批量接口][rocks-lookup]内部仍逐key seek；
-  但JFR未取得可靠RocksDB栈，分段含调用及调度影响，不能把63%当成端到端CPU占比，
-  也不能断言改线程池有效。旧顺序扫描候选曾漏行，修正版也记录变慢，不能只凭“批量”晋升。
-- INSERT 16 writers下，正序true→false为6.821→4.353秒；反序false→true为
-  4.499→4.867秒。关闭`redistribute_writes`两次方向一致，但反序在同一目标先首写、
-  后平移主键追加，目标大小/生命周期不同，不是严格配对。正序finishing从2.856秒降至
-  184ms，并不代表索引工作消失：index_finish累计时间仍约28.083/30.679秒，需核对重叠
-  及等待位置变化。增加到32 writers未改善，flush累计时间增加仅支持争用假设。
-- 新运行时候选为16 writers、`redistribute_writes=false`、`task_concurrency=32`。
-  后者单点3.989秒，约25.1万行/秒；降至16为4.866秒。是在不断增长的同一目标上
-  顺序追加、每设置一个样本，尚未证明最佳参数。最终5M行、5M唯一键及两组标签全量
-  读回通过；全局默认和源码均未改变，也不能用该追加点代替空表批量导入性能。
-- 上轮`U222`赋值却校验`P2`的单条正确性疑点仍未解释，继续保留EVID-01。
-  新表正确读回增强正常运行证据，但不能自动修复旧记录的矛盾。原Retina、外部基线
-  和鲲鹏结果仍未补齐；本阶段不新增故障恢复验收要求。
+- **纠正样本资格：** 历史两张matrix16目标的9M soak曾被标为indexed INSERT；最新
+  审核记录显示追加查询没有`PIXELS_INSERT_INDEX_METRIC`，SHOW CREATE未显示
+  `pk/pk_scheme`，且路径元数据重复。执行端将其重新归为无主索引观察。原行数与指定
+  标签读回仍可保留，但约476K/339K高值不能用于带索引性能结论；也不能据其直接算出
+  索引开销，因为两类目标的状态不等价。详见[分类纠正][insert-classification]。
+- 真正索引目标新增writer/task矩阵：24 writers（min=24,max=32，实际24 fragments）
+  配task32的两次百万追加为3.812/4.330秒，约262.3K/230.9K rows/s；两次合计吞吐
+  约245.6K。8/task32为5.836秒，24/task64为4.755秒。均是同一增长目标顺序追加，
+  不能把24/task32定为最佳默认或代替空表首写；此前“16 writers收敛”的结论应保留为
+  当时候选，不是最终结论。后续stable 32-writer追加也有4.103至4.790秒记录。
+- [复用grouped bucket分段的候选][bucket-candidate]避免abort bookkeeping重复hash，
+  热轮4.951秒，对照4.667秒，候选约慢6.1%。[批次共享主键字节数组候选][key-candidate]
+  热轮5.689秒，对照4.196秒，候选耗时约高35.6%。两候选均拒绝，记录称隔离8191已
+  恢复stable。两组只有少量顺序追加样本，不能据此严格排除hash或分配成本；只能说
+  这些具体实现未证明端到端收益。继续优先定位主索引与finish收尾，避免凭局部热点猜测。
+- 同一索引目标最新累计23M行/23M唯一键、范围及tag_1/tag_30指定谓词读回记录通过。
+  这是多个1M追加后的累计校验，不是单次23M批量导入性能，也不是68列全值正确性证明。
+- UPDATE仍以此前四张标准根新表的p16/p32正反顺序实验为依据：p32优势随顺序反转。
+  p16同表热态两次SQL为1.531/1.535秒（约65.3/65.1万行/秒），connector total为
+  1335.349/1350.100ms（约74.9/74.1万行/秒）。最新JFR29有物化与指定标签读回记录，
+  但同表短序列不是独立多轮总体评估；本轮没有补充新的UPDATE或总体基线证据。
+- [COMPACT内部计时][compact-timer]仍在标签快照准备、文件枚举之后才开始并截整秒数，
+  16至17秒不能当作完整物化墙钟。主键查找singlePoint占并发RPC累计service约63%，
+  [源码][rocks-lookup]确认逐key seek，但不能将此占比当成端到端CPU或线程池等待占比。
+- `U222`赋值却校验`P2`的单条疑点仍未解释，继续保留EVID-01。原Retina同语义总体
+  对照、外部基线和鲲鹏实测仍未补齐；不新增故障恢复验收条件。
 
 ## 1. 已确认的目标与边界
 
@@ -58,7 +59,7 @@ Pixels本地已快进至下列版本；Trino按fetch后的远端引用核对，�
 
 | 仓库 | 本次核对SHA | 主要变化 |
 | --- | --- | --- |
-| pixels-dml | [`272d4560`](https://github.com/LeaseQ/pixels-dml/commit/272d4560caed9c03d3c0d85a293e33d0992386d3) | 自上次进度提交3466bc2f新增7条文档提交，仅修改PROGRESS与实验RFC；无新运行时代码 |
+| pixels-dml | [`d4074141`](https://github.com/LeaseQ/pixels-dml/commit/d407414101519abf554d5af246cc5a9155862a11) | 自进度摘要ac73c1b0新增4条文档提交：矩阵、索引分类纠正及两个拒绝候选；无新运行时代码 |
 | pixels-trino-dml | [`6b56954`](https://github.com/LeaseQ/pixels-trino-dml/commit/6b569544b7579ac3b0482941027b5e89e6b06534) | 与上次核对相同；主键解析默认并行度16，已有INSERT收尾计时 |
 | 已确认研究范围 | [`93d98a51`](https://github.com/LeaseQ/pixels-dml/commit/93d98a517ab66da5403a7dc647b92e14ade3b3e4) | INSERT/UPDATE双目标、收窄实验范围及基线验证顺序 |
 
@@ -70,14 +71,18 @@ Pixels本地已快进至下列版本；Trino按fetch后的远端引用核对，�
 | 工作项 | 当前状态 | 已有证据 | 尚缺证据 |
 | --- | --- | --- | --- |
 | 运行包与路径一致性 | 记录有修正，仍需逐臂核验 | 混包曾导致方法缺失及读回错误；DictionaryBlock首轮改错插件目录；部分候选未命中被改代码 | 固定实际加载的jar、端口与执行路径，排除无效A/B标签 |
-| INSERT | 内部分组对照已有；新增重分布与并发探针 | 16 writers关闭重分布为4.353/4.499秒，两组方向一致；task_concurrency=32追加单点3.989秒，目标5M行及两组标签通过 | 首写与追加分别做同生命周期交错重复，追踪收尾重叠与flush等待；原Retina及外部同口径对照 |
-| UPDATE | 新增四表正反顺序物化；p32无稳定优势 | 早期串行/并行SQL对照已有；新增p16热态重复1.531/1.535秒、最新标签物化通过，首组两侧有CLI内部17/16秒记录 | 包含快照准备与发布的完整墙钟、相对既定基线的配对及独立多轮；U222/P2待核实 |
+| INSERT | 样本资格已纠正；新增两个候选负结果 | 带索引稳定追加主要约200K–260K rows/s；24/task32两点3.812/4.330秒；累计23M目标指定标签检查通过 | 首写与追加分别固定初态，逐臂证明索引路径，补收尾关键路径和原Retina同口径总体对照 |
+| UPDATE | 本轮无新实验；既有p32优势不稳定 | 早期串行/并行SQL对照已有；既有p16热态重复1.531/1.535秒、最新标签物化通过，首组两侧有CLI内部17/16秒记录 | 包含快照准备与发布的完整墙钟、相对既定基线的配对及独立多轮；U222/P2待核实 |
 | MainIndexBuffer反向映射 | 记录有测试与对照；INSERT优化未采纳 | 惰性版本记录3项测试通过；同32 fragments稳定版5.759秒、候选6.446秒，运行包已恢复稳定版本 | UPDATE/COMPACT收益及内存代价；分支保留代码不等于默认部署采用 |
 | 原Retina对照 | 已识别语义缺口 | 现有测试“更新”为删除旧键并插入新键 | 保留主键、相同标签赋值及完成边界的适配；INSERT需对齐输入准备及发布成本 |
 | Hudi/StarRocks/Iceberg | 计划阶段 | 已列选型与语义核验要求 | 本次记录未见可比外部实测闭环，不能宣称领先 |
 | 鲲鹏 | 计划阶段 | 已列平台兼容性与实验设计 | 机器规格、部署与同平台实验结果尚未核验 |
 
 读数限制：
+
+- 历史matrix16高值已重新归为无主索引观察；第7节保留原记录，仅作历史，不沿用其
+  indexed标签及默认候选判断。两个新候选的热轮差异不构成单因素因果证明，顺序追加
+  的目标大小、缓存与进程状态仍需控制。23M累计校验不等于23M单次导入测量。
 
 - INSERT早期热态追加最好值、新表导入、当前增长目标追加不是同一负载。正反顺序并不
   自动消除目标生命周期差异；均值4.426/5.844秒可描述样本，不能称为稳定24%收益。
@@ -100,9 +105,9 @@ Pixels本地已快进至下列版本；Trino按fetch后的远端引用核对，�
 | --- | --- | --- | --- |
 | P0 / EVID-01 | 单条正确性证据冲突 | 核对U222/P2记录的原始SQL、query日志、读回谓词和中间覆盖 | 解释并修正文档；如仍无法解释，在新标准根复测相同赋值；此前不把该条算作正确性通过 |
 | P0 / BASE-01 | 内部基线已有；原Retina仍缺 | 区分并行解析、分组写入收益与原架构收益 | 补原Retina同主键标签赋值及输入/发布适配，不以内部路由对照替代整行回放比较 |
-| P0 / ENV-01 | 运行记录已有；本会话未复验 | 每臂固定实际加载的包、参数、隔离端口及候选执行路径 | 保留部署哈希与路径命中证据；排除改错插件目录、未执行候选代码和历史多路径表的无效对照 |
-| P1 / INS-01 | bypass方向重复，目标状态不等价 | 分开固定首写/追加生命周期，交错复核16 writers + bypass + task_concurrency=32 | 同输入/初态多次配对与指定标签读回；保留索引等待/重叠证据，不将单点或finishing减少直接等同总成本改善 |
-| P1 / UPD-01 | 新增四表物化及首组双侧CLI内部时间 | 保留p16，补既定基线与候选的连续任务墙钟，解析singlePoint访问代价 | 包含SQL、快照准备、COMPACT/发布，明确读回计时边界；独立多轮正确；p32已反转，不再以单点推动默认变更 |
+| P0 / ENV-01 | 新增无索引样本误分类纠正；本会话未复验 | 每臂固定包、参数、端口、表DDL/元数据与索引路径 | 保留部署哈希和索引指标；不能只凭行数或表名认定带索引，缺失指标需查路径；历史无索引数据单列 |
+| P1 / INS-01 | 24/task32有新样本；两个代码候选拒绝 | 停止以顺序追加单点选最优；固定首写/追加初态，对16/24 writer代表组合做交错配对，追踪转换、索引和finish关键路径 | 逐臂真实索引证据、等价数据状态、重复SQL与可查询墙钟、指定标签读回；以净总体收益决定候选 |
+| P1 / UPD-01 | 既有四表物化；本轮总体计时未补 | 保留p16，补既定基线与候选的连续任务墙钟，解析singlePoint访问代价 | 包含SQL、快照准备、COMPACT/发布，明确读回计时边界；独立多轮正确；p32已反转，不再以单点推动默认变更 |
 | P2 / OPT-01 | primary lookup热点收窄，改进尚未成立 | 先确认路径覆盖及查找分段，再探索保序的本地索引访问 | 若排序/批量访问必须还原输入位置并保持可见性语义；旧漏行和变慢负结果不得忽略；最终以完整任务配对验收 |
 | 后续 / EXT-01 | 待平台与接口核验 | 外部基线与鲲鹏实验 | 按既有方案推进；正常运行语义与计时可比，实际结果留证 |
 
@@ -115,6 +120,7 @@ Pixels本地已快进至下列版本；Trino按fetch后的远端引用核对，�
 | --- | --- | --- |
 | 本地执行端到验证机器 | 2026-11-24从本会话环境连接此前指定机器的SSH 22端口超时，未进入认证；11月25日未重试。其他执行端有运行记录，不能推断机器整体不可用 | 从实际执行环境核验连通性、身份及隔离实例 |
 | 单条标签证据冲突 | RFC的Full UPDATE-to-queryable段赋值U222却校验P2；[赋值编码][update-executor]与[字符串转换][string-conversion]未提供该映射依据 | 完成EVID-01，不能沿用该条“正确性通过”解释 |
+| 索引负载资格误标 | 历史matrix16高值已更正为无主索引；行数和标签检查不能证明执行索引维护 | 核对表元数据及每臂索引指标，重新建立带索引基线，禁止混用两类headline |
 | 历史目标无法物化 | 早期p32和部分候选使用双路径目标而无法COMPACT；最新四张标准根新表已补正常物化，旧样本仍不能作为可查询结果 | 后续沿用等价标准根，旧失败记录不混入性能通过样本 |
 | 计时与目标生命周期 | 新CLI报告排除快照准备；INSERT反序及concurrency sweep混用首写/追加与增长目标 | 在实际执行脚本保留连续墙钟并固定目标初态，不能只汇总最好分段 |
 | 原路径基线不可直接复用 | [Retina测试][retina-test]的删旧键/插新键负载不等价于保留主键的标签更新 | 完成BASE-01适配或选定可比对照 |
@@ -209,7 +215,7 @@ stable true对照为6.22/2.32秒；候选约慢10%，已撤回且没有pixels-tr
 connector与默认args。本次提交前检查的远端进度文件版本为
 `5cf8f3a78d4489984382721824ea8b0c886eb518`。
 
-[runs]: https://github.com/LeaseQ/pixels-dml/blob/272d4560caed9c03d3c0d85a293e33d0992386d3/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
+[runs]: https://github.com/LeaseQ/pixels-dml/blob/d407414101519abf554d5af246cc5a9155862a11/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283
 
 2026-11-25 reader-side single-entry dictionary fast path：主测例的 tag 列确实是单值字典，
@@ -563,9 +569,9 @@ profile，不修改Trino/connector默认。共享8090未触碰。
 本次推送前重新检查的远端`PROGRESS.md` blob为
 `95fc7b81c6b02c05685d3168ed328fb22cbbe772`。
 
-[compact-timer]: https://github.com/LeaseQ/pixels-dml/blob/272d4560caed9c03d3c0d85a293e33d0992386d3/pixels-cli/src/main/java/io/pixelsdb/pixels/cli/executor/CompactExecutor.java#L267
-[rocks-lookup]: https://github.com/LeaseQ/pixels-dml/blob/272d4560caed9c03d3c0d85a293e33d0992386d3/pixels-index/pixels-index-rocksdb/src/main/java/io/pixelsdb/pixels/index/rocksdb/RocksDBIndex.java#L138
-[resolve-metrics]: https://github.com/LeaseQ/pixels-dml/blob/272d4560caed9c03d3c0d85a293e33d0992386d3/pixels-daemon/src/main/java/io/pixelsdb/pixels/daemon/index/IndexServiceImpl.java#L1255
+[compact-timer]: https://github.com/LeaseQ/pixels-dml/blob/d407414101519abf554d5af246cc5a9155862a11/pixels-cli/src/main/java/io/pixelsdb/pixels/cli/executor/CompactExecutor.java#L267
+[rocks-lookup]: https://github.com/LeaseQ/pixels-dml/blob/d407414101519abf554d5af246cc5a9155862a11/pixels-index/pixels-index-rocksdb/src/main/java/io/pixelsdb/pixels/index/rocksdb/RocksDBIndex.java#L138
+[resolve-metrics]: https://github.com/LeaseQ/pixels-dml/blob/d407414101519abf554d5af246cc5a9155862a11/pixels-daemon/src/main/java/io/pixelsdb/pixels/daemon/index/IndexServiceImpl.java#L1255
 
 2026-11-25 继续在同一已验证目标上做INSERT组合矩阵，均保持
 `redistribute_writes=false`，每臂追加1M平移ID并做完整标签读回。8 writers +
@@ -637,3 +643,28 @@ offset,8)`生成切片，避免每行分配独立短`byte[]`；编码字节、pr
 
 本次修订前重新检查的远端`PROGRESS.md` blob为
 `48891a065ffed2392523e08b8daded1f3532fae1`。
+
+[insert-classification]: https://github.com/LeaseQ/pixels-dml/blob/d407414101519abf554d5af246cc5a9155862a11/RFC_MILLION_UPDATE_INSERT_DURABILITY.md#correction-the-historical-476ks-soak-was-not-an-indexed-insert-2026-11-25
+[bucket-candidate]: https://github.com/LeaseQ/pixels-dml/blob/d407414101519abf554d5af246cc5a9155862a11/RFC_MILLION_UPDATE_INSERT_DURABILITY.md#rejected-reuse-grouped-bucket-ranges-for-abort-bookkeeping-2026-11-25
+[key-candidate]: https://github.com/LeaseQ/pixels-dml/blob/d407414101519abf554d5af246cc5a9155862a11/RFC_MILLION_UPDATE_INSERT_DURABILITY.md#rejected-batch-backed-long-primary-key-bytestring-slices-2026-11-25
+
+2026-11-25 继续探测 grouped primary 路径的 daemon 聚合开销。候选把
+`List<Boolean>` 结果改为 `boolean` 聚合返回，试图消除每行 Boolean 列表；候选 daemon
+构建SHA为`664f1ce6485930f08453b4a962b6d0f71ad25d690117f5873c06f6e73b4883d6`。
+首次部署时发现 daemon full jar 与正在运行的 Retina 共用路径，直接替换会让 Retina
+加载到不完整/不匹配的类；随后改为候选 daemon jar 与 stable Retina jar 分离，候选
+不会覆盖 stable active jar。
+
+该候选没有形成有效吞吐样本：在已有23M索引目标上执行的 query
+`20261125_091949_00005_f48rh` 以 Trino `GENERIC_INTERNAL_ERROR`/连接GOAWAY失败，
+失败写入留下32个没有对应 Retina visibility 的 `.pxl` 文件，并触发读回时的
+`PIXELS_BAD_DATA`（`RGVisibility not found`）。现场文件已保留并恢复到原目录用于
+运行态恢复，没有据此计算吞吐，也没有把该目标的失败结果当作性能结论。stable
+daemon/connector 已恢复，Retina 已通过现有 `get status -> markReady(recoveryEpoch)`
+流程回到READY，19989/19990和8191均正常；共享8090未触碰。
+
+候选源码已回退，不进入分支或默认配置；该轮结论为“未通过E2E门禁，拒绝”，不是
+“性能变慢”的有效A/B证据。新增的运行时教训是：任何 daemon full jar 候选都必须
+使用独立daemon路径，Retina保持stable jar；checkpoint recovery后必须先完成
+`markReady`，再开始任何性能测试。本次推送前重新检查的远端`PROGRESS.md` blob为
+`5de9596bf16b53d93010b18079e8d96d50fbe417`。
