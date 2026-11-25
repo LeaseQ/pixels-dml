@@ -8497,3 +8497,22 @@ soak is still required before using it as a universal setting.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `86eda394564942e6cab01384a29e6ad454e0e25b`.
+
+### 32-writer follow-up on the bypass route
+
+The same 2M-row target was then extended by another 1M rows with 32 fixed
+writers and `redistribute_writes=false`; only the `id` was shifted by
+`+2000000000000`. Query `20261125_075520_00028_9kijf` took 4.983 s
+(`~=200.7K rows/s`). The target ended at 3M rows and 3M distinct IDs, with the
+full range `10000000001..2010001000000`; both tag-preservation predicates still
+matched all 3M rows.
+
+This did not improve the 16-writer bypass arm (4.353 s). The 32 sink metrics
+had 13.896 s aggregate `main_flush_ms` and a 2.018 s maximum
+`index_finish_ms`, confirming continued flush contention. The current session
+benchmark candidate is therefore `redistribute_writes=false` with 16 writers;
+raising writer count is rejected for this table shape. This remains a session
+profile, not a global default, and no source/runtime default was changed.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`3d9186b8b01c8c81c9985ce4bf7ef348550567ef`.

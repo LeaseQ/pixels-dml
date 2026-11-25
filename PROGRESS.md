@@ -532,3 +532,15 @@ shared 8090均未改变。
 
 本次推送前重新检查的远端`PROGRESS.md` blob为
 `86eda394564942e6cab01384a29e6ad454e0e25b`。
+
+在已通过2M行标签门禁的`e2e68_insert_probe_reverse_20261125`上又追加了1M行，
+使用32 fixed writers + `redistribute_writes=false`，id平移`+2000000000000`。
+query`20261125_075520_00028_9kijf` elapsed为4.983秒（约200.7K rows/s），目标最终
+达到3M rows、3M distinct，范围`10000000001..2010001000000`，两组标签仍各为3M。
+该臂的32个sink `main_flush_ms`总和13.896秒、`index_finish_ms`最大2.018秒，明显
+不如16 writers + false的4.353秒；因此当前INSERT benchmark组合收敛为
+`redistribute_writes=false`配16 writers，32 writers不再继续堆叠。该组合仍是会话级
+候选，不修改全局默认，也没有改变共享8090。
+
+本次推送前重新检查的远端`PROGRESS.md` blob为
+`3d9186b8b01c8c81c9985ce4bf7ef348550567ef`。
