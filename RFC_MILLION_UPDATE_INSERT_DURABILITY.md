@@ -7311,3 +7311,65 @@ encoding integration first.
 
 Before this documentation push, the remote `PROGRESS.md` was fetched at
 `2bf2c8f6b745fbfc1e4d9adbdd5da1c0081068d3`.
+
+## Trino-core uniform dictionary RLE probe: promising but not accepted (2026-11-25)
+
+The connector Block candidates were rejected, but the JFR stack and the
+upstream implementation point to a narrower core-level mechanism:
+[`DictionaryBlockEncoding.readBlock`](https://github.com/trinodb/trino/blob/master/core/trino-spi/src/main/java/io/trino/spi/block/DictionaryBlockEncoding.java#L56-L70)
+currently reads the row IDs and always flattens them with
+`dictionaryBlock.copyPositions(ids, 0, ids.length)`. A private Trino 466
+classpath probe added one special case: when all serialized IDs are equal,
+return a native `RunLengthEncodedBlock` over that dictionary value. No Pixels
+connector or Pixels core jar was changed. The private probe jar SHA was
+`2027e8a6f08c35b7b00d292e30450ae0894561067f383113476bece4f070800f`.
+
+An isolated SPI microbenchmark using 100,000 blocks of 1,024 repeated
+positions measured:
+
+```text
+VariableWidthBlock.copyPositions: 3.192--3.209 s
+RunLengthEncodedBlock.create:     19.655--21.331 ms
+```
+
+This is a mechanism measurement, not an E2E throughput claim. The actual
+8191 E2E used the materialized 68-column source, fresh indexed targets,
+`task_concurrency=64`, fixed 16 writers, writer scaling disabled, and
+`redistribute_writes=false`. The RLE probe passed the complete million-row
+gate twice:
+
+```text
+RLE candidate cold  e2e68_dict_rle_core_candidate_20261125
+  query=20261124_235919_00002_q3qma  SQL=7.024 s  ~=142.4K rows/s
+  client wall=8.878 s
+RLE candidate warm  e2e68_dict_rle_core_candidate2_20261125
+  query=20261125_000046_00001_q3qma  SQL=4.789 s  ~=208.8K rows/s
+  client wall=6.630 s
+
+stable control cold e2e68_dict_rle_core_control2_20261125
+  query=20261125_000223_00001_eja9k  SQL=8.303 s  ~=120.4K rows/s
+  client wall=10.135 s
+stable control warm e2e68_dict_rle_core_control3_20261125
+  query=20261125_000335_00005_eja9k  SQL=4.484 s  ~=223.0K rows/s
+  client wall=6.300 s
+```
+
+Every arm returned `1000000` rows, `1000000` distinct IDs, the exact
+`10000000001..10001000000` range, and one million `U111/111.0000` values.
+The cold candidate arm is faster, but the warm candidate arm is 6.8% slower
+than its stable warm counterpart; the two-arm means are not a controlled
+default-selection gate because each implementation was run in a separate
+restart/order state. The probe therefore remains a strong next direction but
+is not accepted or installed as a default.
+
+For comparison, a second private core probe that preserved a native
+`DictionaryBlock` for one-entry dictionaries also passed correctness but took
+8.314 s (`20261125_000557_00001_uguw9`) and was rejected. The isolated 8191
+runtime is now back on the original default classpath, stable connector/core
+SHAs, and `starting=false`; the private core jar is not loaded. Shared 8090
+was not changed. A future promotion requires a crossed cold/warm matrix and
+an explicit Trino-core source change with block-level regression tests, not a
+classpath-only runtime override.
+
+Before this documentation push, the remote `PROGRESS.md` was fetched at
+`6227b463612e5cc6d790ed05aba7315238fa4331`.

@@ -217,3 +217,13 @@ VariableWidthBlock/Exchange上游分配与完整双路径总体成本，不再�
 调用栈仍指向Trino Exchange解码层，后续候选必须保持标准VariableWidthBlock类型契约，
 或先完成完整的Block encoding集成测试。本轮提交前检查的远端`PROGRESS.md` blob为
 `2bf2c8f6b745fbfc1e4d9adbdd5da1c0081068d3`。
+
+随后完成了Trino-core私有classpath探针：`DictionaryBlockEncoding.readBlock`的
+uniform-ID特判把单值字典转为原生RLE。SPI微基准显示重复flatten约3.20秒，而RLE
+构造约0.020秒；真实E2E候选冷/热为7.024/4.789秒，stable对应8.303/4.484秒，
+四臂均通过完整1M行门禁。该方向有机制和冷态信号，但热态慢6.8%，且冷热/重启状态
+尚未完全交错，暂不默认化；原生DictionaryBlock保留探针8.314秒也已拒绝。8191已
+恢复默认classpath和stable connector/core，共享8090未触碰。下一步需要真正的
+Trino-core源码改动、block级回归测试和交错冷/热矩阵，而不是继续使用classpath覆盖。
+本轮提交前检查的远端`PROGRESS.md` blob为
+`6227b463612e5cc6d790ed05aba7315238fa4331`。
