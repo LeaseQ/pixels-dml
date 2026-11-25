@@ -586,3 +586,25 @@ Trino/connector默认。当前下一步转向代码级减少finish/main-index fl
 
 本次推送前重新检查的远端`PROGRESS.md` blob为
 `e3c3157abb60a9115578ae84bcdae2ae27fddf06`。
+
+2026-11-25 对历史高值记录做了索引路径复核。此前记录为`e2e68_matrix16a/b_20261125`
+的9M soak曾写成“indexed INSERT”，并据此报告false/true约476K/339K rows/s；但在
+当前8191日志中复用这两张表追加1M时，query
+`20261125_083021_00060_9kijf`（false，3.019s，331K/s）和
+`20261125_083026_00061_9kijf`（true，2.780s，360K/s）均没有产生任何
+`PIXELS_INSERT_INDEX_METRIC`，只有sink/write指标。表的`SHOW CREATE`也没有显示
+`pk`/`pk_scheme`，且路径已经出现重复的`v-0-compact`/`v-0-ordered`组合。
+因此这组历史高值只能归类为“无主索引宽表写入观察”，不能作为支持打标/主索引的
+table-to-table INSERT吞吐，也不能用来证明百万行目标已接近。该纠正不影响它们的
+行数、distinct、范围和标签读回结果，但收紧了测例资格。
+
+当前真实索引路径的可复核点仍是
+`e2e68_insert_probe_reverse_20261125`：32 fixed writers、
+`redistribute_writes=false`追加query`20261125_081617_00046_9kijf`为4.103s
+（约244K/s），随后同配置的`082114_00049`、`082729_00055`、
+`082736_00056`分别为4.642/4.790/4.762s；累计15M rows、15M distinct、精确范围、
+`tag_1`和`tag_30`全量门禁均通过。这个结果再次说明当前真实索引路径仍处于约
+200K--260K/s区间，下一步必须继续优化主索引写入/finish尾部，而不是引用无索引高值。
+
+本次修订前重新检查的远端`PROGRESS.md` blob为
+`90dfeabcee9820313052e49d27894d8cca19f3d5`。

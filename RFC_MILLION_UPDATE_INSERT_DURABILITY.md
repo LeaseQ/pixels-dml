@@ -6853,7 +6853,7 @@ server default.
 Before this clean-process correction push, the remote progress file was fetched
 and checked at `b0a4ac0d2d2f1ba898380f7f09198cf404e6a2c7`.
 
-## Longer fixed-32 soak to 9M rows (2026-11-25)
+## Longer fixed-32 soak to 9M rows (2026-11-25; later reclassified)
 
 The candidate profile was extended without creating another indexed target.
 The two pre-existing targets `e2e68_matrix16a_20261125` (false) and
@@ -6894,13 +6894,13 @@ isolated Trino coordinator remained healthy on port `8191` and reported
 `starting=false`; shared port `8090` was not touched. This is a useful
 single-sequence memory guard, not a long-term leak proof.
 
-The result strengthens fixed 32 writers plus `redistribute_writes=false` as
-the current INSERT benchmark profile, but it does not establish the overall
-million-row/s target: this complete indexed/tagged sample is approximately
-`323K--508K rows/s` by Trino SQL elapsed, or `201K--260K rows/s` by client wall
-time including CLI overhead. It also does not authorize changing a server or
-production default; the next meaningful check is repeated clean process runs
-or a controlled default-vs-session comparison with the same memory observation.
+At the time this section was written, the result was treated as an indexed
+sample. A later audit found that these two tables emitted no
+`PIXELS_INSERT_INDEX_METRIC` and had malformed/duplicated path metadata, so the
+throughput is retained only as a no-primary-index wide-table observation. It
+must not be used as the indexed INSERT headline or as evidence that the
+million-row/s target has been reached. The row/distinct/range/tag readback and
+the memory guard remain valid for the narrower no-index observation.
 
 Before this documentation push, the remote progress file was fetched and
 checked at `62d33b0fba8919469e961b3ea1251fca83bbbc90`.
@@ -8560,3 +8560,39 @@ finish/main-index flush boundary; no Trino or connector default was changed.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `e3c3157abb60a9115578ae84bcdae2ae27fddf06`.
+
+### Correction: the historical 476K/s soak was not an indexed INSERT (2026-11-25)
+
+The earlier `e2e68_matrix16a_20261125` / `e2e68_matrix16b_20261125` 9M soak was
+described as an indexed/tag-aware INSERT and reported approximately 476K versus
+339K rows/s for the no-redistribution and redistributed routes. A later audit on
+the same 8191 runtime found that this classification was wrong. Appending one
+million rows to those existing tables produced:
+
+```text
+false route: 20261125_083021_00060_9kijf, 3.019 s ~=331K rows/s
+true route:  20261125_083026_00061_9kijf, 2.780 s ~=360K rows/s
+```
+
+Neither query emitted a `PIXELS_INSERT_INDEX_METRIC`; both emitted only the
+ordinary sink/write metrics. `SHOW CREATE TABLE` did not expose `pk`/
+`pk_scheme`, and the table paths already contained duplicated
+`v-0-compact`/`v-0-ordered` components. The rows, distinct IDs, ranges, and tag
+predicates still read back correctly, but the evidence is therefore classified
+as a wide-table/no-primary-index write observation. It cannot support the
+tag-aware, primary-indexed INSERT headline and must not be used as evidence that
+the million-row target is close.
+
+The valid indexed continuation on
+`e2e68_insert_probe_reverse_20261125` remains materially lower. With fixed
+32 writers and `redistribute_writes=false`, query
+`20261125_081617_00046_9kijf` took 4.103 s (approximately 244K rows/s), and the
+next three disjoint append arms took 4.642, 4.790, and 4.762 s. The accumulated
+target passed 15M rows, 15M distinct IDs, the exact ID range, and full
+`tag_1`/`tag_30` predicates. The accepted indexed INSERT band is therefore
+still approximately 200K--260K rows/s on this current runtime; the next code
+work must target primary-index/finish tail cost rather than no-index write
+throughput.
+
+Before this correction, the fetched remote `PROGRESS.md` blob was
+`90dfeabcee9820313052e49d27894d8cca19f3d5`.
