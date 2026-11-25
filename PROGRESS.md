@@ -426,3 +426,24 @@ precreate负例，不能做tag-aware COMPACT，所以只记录为resolver方向�
 
 [update-executor]: https://github.com/LeaseQ/pixels-trino-dml/blob/6b569544b7579ac3b0482941027b5e89e6b06534/connector/src/main/java/io/pixelsdb/pixels/trino/PixelsUpdateExecutor.java
 [string-conversion]: https://github.com/LeaseQ/pixels-dml/blob/6108b7029d79d2abbdb574130f17a2d13b7830f1/pixels-core/src/main/java/io/pixelsdb/pixels/core/TypeDescription.java#L1801
+
+2026-11-25 补做了真正的fresh single-root UPDATE完整闭环，修复了此前只在历史
+precreate负例上比较p32的问题。以同一物化68列源表
+`e2e68_fresh_candidate86_20261124`分别INSERT到新建的
+`e2e68_update_p16_20261125`和`e2e68_update_p32_20261125`，两个目标均显式使用
+单一table-root、`pk='id', pk_scheme='rocksdb'`，INSERT前均通过1M行、1M distinct
+和精确ID范围门禁。p16 UPDATE冷/暖SQL elapsed为2.275/2.054秒，connector
+total为1975.294/1871.248ms，resolve为1076.703/1027.485ms；p32为4.060/1.852秒，
+connector total为2257.253/1487.603ms，resolve为1357.309/911.537ms。p32首臂有明显
+planning/waiting/scheduling排队，暖臂更可比；暖轮connector total较p16低20.5%，但
+仍只有一组fresh pair，暂不修改源码默认值。
+
+两目标随后用修复目录过滤的`pixels-cli` target full jar（SHA
+`e0d46cf1a3ed908b85b3037339abf63c12cafb69a30db66af9cbacd0c091d4aa`）、Java 23
+`java.nio/sun.nio.ch`模块开放参数、`primary-resolve-parallelism=8`完成tag-aware
+COMPACT；p16的tag snapshot/physical rewrite/resolve/publish为2.290/7.335/16.544/
+9.991秒，CLI约17秒；p32为2.281/6.910/12.087/9.046秒，CLI约16秒。两个目标最终均
+通过1M rows、1M distinct、精确范围、全量新tag及旧`U111`清零；Trino 8191重启后
+再次读回仍通过。隔离Trino已恢复p16并ready，共享8090未触碰。Retina本轮未重启，
+因此不把该记录扩展成新的Retina重启耐久性保证。本次推送前检查的远端
+`PROGRESS.md` blob为`e6f41d8707bf9d05e08415b0c73cbcc735dc0679`。

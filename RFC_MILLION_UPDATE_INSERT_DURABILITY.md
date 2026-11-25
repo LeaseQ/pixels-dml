@@ -8252,3 +8252,68 @@ required before promoting p32.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `5ee444a979185b8acc51efdd3c7bc37684635e0b`.
+
+## Fresh standard-root p16/p32 UPDATE -> COMPACT -> readback (2026-11-25)
+
+To close the fixture gap in the previous resolver point test, two new targets
+were created from the same materialized 68-column source
+`validationfresh.e2e68_fresh_candidate86_20261124`. Each target used one new
+table-root URI and explicit `pk='id', pk_scheme='rocksdb'`; no old `v-0-*`
+paths were copied into the DDL:
+
+```text
+e2e68_update_p16_20261125
+e2e68_update_p32_20261125
+```
+
+Both table-to-table INSERTs passed the input gate before UPDATE:
+1,000,000 rows, 1,000,000 distinct IDs, and the exact range
+`10000000001..10001000000`. The stable daemon SHA was
+`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`, and only
+the isolated Trino resolver setting changed between arms. The p16 arm used
+queries `20261125_064902_00008_4pbb6` and
+`20261125_064908_00009_4pbb6`; the p32 arm used
+`20261125_065025_00000_dqky6` and `20261125_065033_00001_dqky6`:
+
+```text
+setting  SQL elapsed cold/warm  connector total cold/warm  resolve_ms cold/warm
+p16      2.275 s / 2.054 s      1975.294 / 1871.248       1076.703 / 1027.485
+p32      4.060 s / 1.852 s      2257.253 / 1487.603       1357.309 /  911.537
+```
+
+The first p32 SQL arm had unusually high planning/waiting/scheduling time, so
+the warm arm is the useful crossed comparison: p32 reduced connector total by
+20.5% versus p16 and reduced primary resolution by 11.3%. This is now a valid
+standard-root UPDATE point, but it is still one fresh pair rather than enough
+evidence to change the source default.
+
+Both targets then completed tag-aware COMPACT with the rebuilt CLI
+`pixels-cli-0.2.0-SNAPSHOT-full.jar` (SHA
+`e0d46cf1a3ed908b85b3037339abf63c12cafb69a30db66af9cbacd0c091d4aa`), using
+`-Dpixels.compact.primary-resolve-parallelism=8`, `-c 8`, and the Java 23
+`java.nio`/`sun.nio.ch` module opens required by the local reader. The stage
+metrics were:
+
+```text
+setting  tag snapshot  physical rewrite  compact resolve  publish  CLI report
+p16      2.290 s       7.335 s            16.544 s         9.991 s  17 s
+p32      2.281 s       6.910 s            12.087 s         9.046 s  16 s
+```
+
+Stage values overlap and must not be added as wall time. Final readback passed
+for both targets before and after a Trino 8191 restart:
+
+```text
+target / final tag       rows       distinct  id range                  tag rows  old U111
+p16 / P16B, 16.0000      1000000    1000000   10000000001..10001000000   1000000    0
+p32 / P32B, 32.0000      1000000    1000000   10000000001..10001000000   1000000    0
+```
+
+The isolated Trino runtime was restored to p16 and passed readiness; shared
+Trino 8090 was untouched. Retina itself was not restarted in this pair because
+the current validation environment has a known `TEMPORARY_INGEST` recovery
+cleanser risk; this result therefore proves normal UPDATE -> COMPACT -> query
+readback plus Trino restart persistence, not a new Retina-restart guarantee.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`e6f41d8707bf9d05e08415b0c73cbcc735dc0679`.
