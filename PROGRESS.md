@@ -803,3 +803,25 @@ Retina 29990/28995，32 fixed writers、`task_concurrency=64`、
 
 本次推送前重新检查的远端 `PROGRESS.md` blob 为
 `28f0894c40dca0c9829a026792db3eb6c34d7e34`。
+
+2026-11-25 完成 `new-main-index` 独立 A/B，并按“必须出现索引指标”重新审计样本。
+clean runtime `e2e-clean-20261125` 保持健康，stable full daemon/connector、Trino
+8291、32 fixed writers、`task_concurrency=64`、`redistribute_writes=false`，目标均为
+完整68列、`pk=id, pk_scheme=rocksdb` 的1M数据集。稳定包、只切换
+`pixels.index.grouped.primary.write.new-main-index` 的有效结果为：true 的
+`e2e68_newmain_control_20251125` 14.555秒（68.7K/s）、
+`e2e68_newmain_control2_20251125` 15.627秒（64.0K/s）、
+`e2e68_newmain_true3_20251125` 14.414秒（69.4K/s）；false 的
+`e2e68_newmain_off3_20251125` 14.063秒（71.1K/s）。全部通过1M rows、distinct、范围、
+4项代表性tag全量门禁，并同时出现 Trino `PIXELS_INSERT_INDEX_METRIC` 与 daemon
+`PIXELS_PRIMARY_INDEX_GROUPED_METRIC`。直接可比的 true3/off3 只相差约2.4%，落在本轮
+运行波动内，不能证明 `new-main-index=true` 有独立收益，因此继续保持默认 false。
+
+此前 `e2e68_newmain_off2_20251125` 虽然读回行数和tag正确，但没有任何 primary-index
+metric，判定为无主索引样本并排除，不参与吞吐结论。aggregate-result 候选在 false 下
+两组warm A/B约快3.1%，而在 true 下观察到的更大信号混合了两项改动，不能归因给
+`new-main-index`。详细实验见 `RFC_NEW_MAIN_INDEX_INSERT_AB_20261125.md`；下一步仍聚焦
+grouped primary-index/write 的 `main_index_ms` 长尾、分配和锁竞争。
+
+本次推送前重新检查的远端 `PROGRESS.md` blob 为
+`f334d466abe3693131a4e30349993dbce5070f4a`。
