@@ -1,21 +1,47 @@
 # Pixels DML 研究进度
 
-更新时间：2026-11-25（Asia/Shanghai）。本文件是两个DML仓库的统一进度入口。
-本次核对截止Pixels `195fb105`（2026-11-25 18:14:06 +08:00）、Trino `6b56954`。
+更新时间：2026-11-26（Asia/Shanghai）。本文件是两个DML仓库的统一进度入口。
+本次核对截止Pixels `83cbb75f`（2026-11-25 22:29:42 +08:00）、Trino `6b56954`。
 依据fetch后的提交、源码及实验RFC核对，未独立复跑或连接部署环境。下文保留的
 “现场”“本轮”等历史补记属于原执行端记录，不能理解为本次核对重新验收。
 
-**当前结论：** INSERT历史约47.6万/33.9万行每秒高值已被执行端纠正为无主索引写入，
-不能作为带索引导入成绩。当前稳定带索引追加样本主要约20万至26万行/秒。本轮新增
-daemon聚合候选E2E失败、pipelined write候选未显示收益的记录，均未进入分支源码。
-UPDATE没有新增实验，保持p16的结论不变。
+**当前结论：** 分支新增grouped主索引聚合返回代码，但其“约3.1%独立提升”已被
+执行端撤回：候选包同时包含lazy MainIndexBuffer，旧stable包没有，不能单因素归因。
+最新clean环境后续有效索引样本约6.4万至8.7万行/秒；不能与此前20万至26万的增长目标
+追加样本直接算性能升降，更不能沿用已纠正为无主索引的47.6万/33.9万高值。
+lazy路径是待验证候选，不是已证实的独立收益；UPDATE无新实验，保持p16结论。
 两条路径相对原Retina的完整任务成本收益仍未证明，不据此改变整体研究方向。
-自上次进度摘要提交`8ce6778c`新增2条实验文档提交及1条合并提交，仅修改PROGRESS和实验RFC；
-无新运行时代码或默认参数改动。本次提交仅同步进度摘要，不是新增实测或优化实现。
+自上次摘要提交`848e0de3`新增7条提交，其中`dcc4e40c`修改3个Java文件，其余为
+实验/纠正文档；Trino远端未变。本次提交仅同步进度，不是新增实测或部署。
 
 本轮主要变化：
 
-- **daemon聚合候选没有有效性能结果：** `94bd93f5`记录尝试消除每行`List<Boolean>`，
+- **新增代码与撤回收益声明同时存在：** [源码提交][aggregate-code]新增MainIndex聚合
+  接口、SqliteMainIndex覆盖实现并接入grouped路由，普通路径不变。源码默认路由已
+  调用聚合方法，不是仅有文档或未接通实验项；但部署是否启用以实际jar为准。
+  [最新归因纠正][attribution]撤回[原聚合RFC][aggregate-rfc]的3.1%提升说法。
+  原聚合RFC和[new-main-index RFC][newmain-rfc]仍有该旧表述，不能绕过纠正继续引用。
+- **lazy收益仍缺独立对照：** 最新记录中lazy+aggregate首轮/后续为17.236/12.523秒，
+  lazy-only为16.447/11.901秒；后续样本约79.9K/84.0K rows/s。两臂都有lazy，且非
+  随机交错，所以约5.2%耗时差不能证明lazy相对旧版的收益，也不能定量归因aggregate。
+  Retina JFR中旧路径HashMap.removeNode约50%的Java执行样本是热点线索，不是
+  端到端时间占比。正常正确性记录覆盖行数、唯一键、范围及4个代表标签，不等于68列
+  全值核验。本轮没有独立复跑或读取远端原始JFR/字节码。
+- **new-main-index保持false：** 记录true三次14.555/15.627/14.414秒，false一次
+  14.063秒；另一个false目标因缺索引指标被排除。单次false对照不足以支持开关收益。
+  最新纠正又称stable包缺少insertNew，后续还须核验开关两臂实际调用是否不同，不能
+  只凭配置true/false认定不同实现均被测到。此疑点不影响继续保持默认false。
+- **bucket hint未采纳：** 首轮依赖污染及错误class overlay作无效样本保留；校正后
+  候选/对照10.363/10.580秒、13.004/10.997秒，未见可重复收益，不进入分支。文档称
+  第二对“反向”，但列出的query时间仍是candidate先、stable后，暂不作为已证明的
+  AB/BA顺序控制证据。
+- **实验环境变化：** 记录8191对照受Retina OOM影响，没有有效吞吐；后续切至独立
+  clean运行环境8291。其首轮/后续均需与进程冷热、空表首写/同表追加分开标记：
+  “warm”不自动等于“已有表追加”。不将跨环境差值解释为代码退化或收益。
+
+此前已确认、此次仍需保留的限制：
+
+- **早期daemon聚合候选没有有效性能结果：** `94bd93f5`记录尝试消除每行`List<Boolean>`，
   但查询以`GENERIC_INTERNAL_ERROR`/GOAWAY失败，32个文件缺少对应Retina visibility，
   后续读回报`RGVisibility not found`。不能把失败当作吞吐下降证据，也不能继续将原23M
   目标视为当前可读已复验。记录称文件保留、stable已恢复并完成READY握手；没有提供该
@@ -29,7 +55,7 @@ UPDATE没有新增实验，保持p16的结论不变。
   后续候选需独立jar路径；如果发生恢复，应先确认READY和目标读回再计时。这是避免
   污染正常性能样本的运行前检查，不增加故障注入或恢复能力研究目标。
 
-此前已确认、此次保持的结论：
+更早的有效样本及尚未解决的问题：
 
 - **纠正样本资格：** 历史两张matrix16目标的9M soak曾被标为indexed INSERT；最新
   审核记录显示追加查询没有`PIXELS_INSERT_INDEX_METRIC`，SHOW CREATE未显示
@@ -77,27 +103,35 @@ Pixels本地已快进至下列版本；Trino按fetch后的远端引用核对，�
 
 | 仓库 | 本次核对SHA | 主要变化 |
 | --- | --- | --- |
-| pixels-dml | [`195fb105`](https://github.com/LeaseQ/pixels-dml/commit/195fb105826ffeb7091868f1f81fb8b20af71da3) | 自摘要8ce6778c新增daemon聚合失败及pipelined write无收益记录、1条合并提交；无新运行时代码 |
+| pixels-dml | [`83cbb75f`](https://github.com/LeaseQ/pixels-dml/commit/83cbb75ff7de75127d491a06f72adb74d6eada77) | 自摘要848e0de3新增7提交：聚合方法代码、bucket hint否决、clean样本及归因撤回；没有新UPDATE实现 |
 | pixels-trino-dml | [`6b56954`](https://github.com/LeaseQ/pixels-trino-dml/commit/6b569544b7579ac3b0482941027b5e89e6b06534) | 与上次核对相同；主键解析默认并行度16，已有INSERT收尾计时 |
 | 已确认研究范围 | [`93d98a51`](https://github.com/LeaseQ/pixels-dml/commit/93d98a517ab66da5403a7dc647b92e14ade3b3e4) | INSERT/UPDATE双目标、收窄实验范围及基线验证顺序 |
 
 ## 3. 已有什么证据，还缺什么
 
 状态只表示证据进展；“代码已提交”“记录有实测”“运行中已部署”不能互相替代。
-表中运行事实均来自[固定版本实验记录][runs]，不是本次现场复验。
+表中运行事实来自[主实验记录][runs]及上述三份固定版本专题RFC，不是本次现场复验；
+结论冲突时采用[最新归因纠正][attribution]，保留旧记录但不沿用被撤回的结论。
 
 | 工作项 | 当前状态 | 已有证据 | 尚缺证据 |
 | --- | --- | --- | --- |
-| 运行包与路径一致性 | 新增共享jar故障记录，执行端称已隔离 | daemon候选替换共用路径影响Retina类加载；已改为独立jar并记录stable恢复 | 逐臂核验实际加载产物、READY及目标读回；端口健康不等于失败目标数据已恢复 |
-| INSERT | 新增一次无效E2E和一次未见收益的对照 | 稳定追加主要约200K–260K rows/s；pipelined候选/对照追加4.711/4.704秒，两新目标各2M指定检查通过；历史23M目标随后发生读回错误 | 重复且交错的等初态对照；失败目标后续读回；收尾关键路径与原Retina同口径总体对照 |
+| 运行包与路径一致性 | 已记录clean隔离；仍发现baseline混包 | javap审计记录旧stable与candidate的MainIndexBuffer不一致；bucket hint还曾overlay错误类 | 锁定daemon、Retina、connector及依赖完整哈希和被改类字节码；证明测到正确路径，不只检查包名和配置 |
+| INSERT | 有新代码与正常读回记录；独立收益仍未证明 | clean后续索引样本约64K–87K rows/s；lazy+aggregate后续12.523秒、lazy-only 11.901秒，均有两端索引指标及指定标签检查 | 等目标生命周期及相同基线上的重复交错对照；finish关键路径与原Retina同口径总体成本；不能跨环境比较历史200K–260K追加 |
 | UPDATE | 本轮无新实验；既有p32优势不稳定 | 早期串行/并行SQL对照已有；既有p16热态重复1.531/1.535秒、最新标签物化通过，首组两侧有CLI内部17/16秒记录 | 包含快照准备与发布的完整墙钟、相对既定基线的配对及独立多轮；U222/P2待核实 |
-| MainIndexBuffer反向映射 | 记录有测试与对照；INSERT优化未采纳 | 惰性版本记录3项测试通过；同32 fragments稳定版5.759秒、候选6.446秒，运行包已恢复稳定版本 | UPDATE/COMPACT收益及内存代价；分支保留代码不等于默认部署采用 |
+| MainIndexBuffer反向映射 | 从早期无收益转为优先复验线索，未定论 | 旧JFR的removeNode热点及新lazy-only 11.901秒记录；旧5.759/6.446秒否决记录仍保留 | 统一基线的lazy开/关独立对照、内存代价及UPDATE/COMPACT正常语义；新两臂都有lazy，不能据其证明lazy收益 |
+| 主索引聚合返回 | dcc4e40c已接入grouped源码；3.1%归因撤回 | 正常成功路径省结果列表；当前false路径在已有锁内调用insert；新增提交未包含测试文件 | 相同MainIndexBuffer版本下单独切聚合实现并重复；不把代码存在当作独立性能或全面语义验证通过 |
 | 原Retina对照 | 已识别语义缺口 | 现有测试“更新”为删除旧键并插入新键 | 保留主键、相同标签赋值及完成边界的适配；INSERT需对齐输入准备及发布成本 |
 | Hudi/StarRocks/Iceberg | 计划阶段 | 已列选型与语义核验要求 | 本次记录未见可比外部实测闭环，不能宣称领先 |
 | 鲲鹏 | 计划阶段 | 已列平台兼容性与实验设计 | 机器规格、部署与同平台实验结果尚未核验 |
 
 读数限制：
 
+- 原聚合RFC称“冷启动异常”而排除首对，只可据此单列预热条件；不能因其慢就省略
+  首写成本。最新clean fresh-target与旧同表追加不能共用一个headline；SQL elapsed
+  也不是含准备与最终查询验证的完整任务墙钟。
+- [归因纠正][attribution]的lazy-only与lazy+aggregate缺少同轮旧buffer单独对照。
+  [MainIndexBuffer.insert][buffer-source]仍在无反向映射命中时扫描file buffers（containsKey），
+  不应把lazy简单解释为所有新行查找都已O(1)。旧JFR不能证明新版本瓶颈已消失。
 - 历史matrix16高值已重新归为无主索引观察；第7节保留原记录，仅作历史，不沿用其
   indexed标签及默认候选判断。此前bucket/key候选的热轮差异不构成单因素因果证明，顺序追加
   的目标大小、缓存与进程状态仍需控制。23M累计校验不等于23M单次导入测量。
@@ -126,8 +160,8 @@ Pixels本地已快进至下列版本；Trino按fetch后的远端引用核对，�
 | --- | --- | --- | --- |
 | P0 / EVID-01 | 单条正确性证据冲突 | 核对U222/P2记录的原始SQL、query日志、读回谓词和中间覆盖 | 解释并修正文档；如仍无法解释，在新标准根复测相同赋值；此前不把该条算作正确性通过 |
 | P0 / BASE-01 | 内部基线已有；原Retina仍缺 | 区分并行解析、分组写入收益与原架构收益 | 补原Retina同主键标签赋值及输入/发布适配，不以内部路由对照替代整行回放比较 |
-| P0 / ENV-01 | 新增共享jar与缺失visibility记录；本会话未复验 | 每臂固定独立运行包、参数、端口、表DDL/元数据与索引路径 | 保留部署哈希、READY、索引指标和读回；失败目标未经复验不再使用；历史无索引数据单列 |
-| P1 / INS-01 | daemon聚合E2E失败；pipelined write未见收益 | 不保留这两次候选；固定首写/追加初态，继续既定交错配对与转换、索引、finish关键路径测量 | 逐臂真实索引证据、等价数据状态、重复SQL与可查询墙钟、指定标签读回；以净总体收益决定候选 |
+| P0 / ENV-01 | clean环境建立后仍发现归因污染 | 锁定运行包依赖及实际调用类；核实stable缺insertNew与开关A/B的路径关系 | 每臂完整产物哈希、字节码/路由证据、索引指标、正常读回；失败目标未经复验不再使用；无索引样本单列 |
+| P1 / INS-01 | 聚合代码已入分支但收益撤回；lazy待独立复验 | 先修统一基线，再分别隔离lazy和aggregate，使用等价新目标与重复交错顺序，记录首轮及后续样本、转换/索引/finish关键路径 | 逐臂实际索引和单变量证据、等价目标/进程状态、SQL与可查询墙钟、指定标签读回；以净总体收益决定候选 |
 | P1 / UPD-01 | 既有四表物化；本轮总体计时未补 | 保留p16，补既定基线与候选的连续任务墙钟，解析singlePoint访问代价 | 包含SQL、快照准备、COMPACT/发布，明确读回计时边界；独立多轮正确；p32已反转，不再以单点推动默认变更 |
 | P2 / OPT-01 | primary lookup热点收窄，改进尚未成立 | 先确认路径覆盖及查找分段，再探索保序的本地索引访问 | 若排序/批量访问必须还原输入位置并保持可见性语义；旧漏行和变慢负结果不得忽略；最终以完整任务配对验收 |
 | 后续 / EXT-01 | 待平台与接口核验 | 外部基线与鲲鹏实验 | 按既有方案推进；正常运行语义与计时可比，实际结果留证 |
@@ -142,6 +176,8 @@ Pixels本地已快进至下列版本；Trino按fetch后的远端引用核对，�
 | 本地执行端到验证机器 | 2026-11-24从本会话环境连接此前指定机器的SSH 22端口超时，未进入认证；11月25日未重试。其他执行端有运行记录，不能推断机器整体不可用 | 从实际执行环境核验连通性、身份及隔离实例 |
 | 单条标签证据冲突 | RFC的Full UPDATE-to-queryable段赋值U222却校验P2；[赋值编码][update-executor]与[字符串转换][string-conversion]未提供该映射依据 | 完成EVID-01，不能沿用该条“正确性通过”解释 |
 | 索引负载资格误标 | 历史matrix16高值已更正为无主索引；行数和标签检查不能证明执行索引维护 | 核对表元数据及每臂索引指标，重新建立带索引基线，禁止混用两类headline |
+| 已撤回结论仍留在专题RFC | 最新审计撤回aggregate独立3.1%收益，但原聚合RFC与new-main-index RFC仍引用它 | 引用时同步提供归因纠正；后续由执行端修正原结论；本次仅改进度文件，不扩大修改范围 |
+| clean基线与开关路径不明 | 最新记录称stable无insertNew，却另有stable上true/false性能对照；缺少逐臂实际类/方法对应说明 | 用实际加载字节码和路径指标证明开关测到两种实现；缺证据前保持false，不宣称已排除该优化 |
 | 失败目标可读性未重新证明 | daemon聚合候选失败留下32个缺失visibility文件；记录称服务恢复READY，但未给出原23M目标恢复后的全量读回 | 保留现场，不把健康端口或新目标通过当作旧目标恢复；复用前单独验证，性能测试沿用新标准根 |
 | 历史目标无法物化 | 早期p32和部分候选使用双路径目标而无法COMPACT；最新四张标准根新表已补正常物化，旧样本仍不能作为可查询结果 | 后续沿用等价标准根，旧失败记录不混入性能通过样本 |
 | 计时与目标生命周期 | 新CLI报告排除快照准备；INSERT反序及concurrency sweep混用首写/追加与增长目标 | 在实际执行脚本保留连续墙钟并固定目标初态，不能只汇总最好分段 |
@@ -237,7 +273,12 @@ stable true对照为6.22/2.32秒；候选约慢10%，已撤回且没有pixels-tr
 connector与默认args。本次提交前检查的远端进度文件版本为
 `5cf8f3a78d4489984382721824ea8b0c886eb518`。
 
-[runs]: https://github.com/LeaseQ/pixels-dml/blob/195fb105826ffeb7091868f1f81fb8b20af71da3/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
+[runs]: https://github.com/LeaseQ/pixels-dml/blob/83cbb75ff7de75127d491a06f72adb74d6eada77/RFC_MILLION_UPDATE_INSERT_DURABILITY.md
+[aggregate-code]: https://github.com/LeaseQ/pixels-dml/commit/dcc4e40c3f4837cecd22ee7e06a3f10a69f946eb
+[buffer-source]: https://github.com/LeaseQ/pixels-dml/blob/83cbb75ff7de75127d491a06f72adb74d6eada77/pixels-common/src/main/java/io/pixelsdb/pixels/common/index/MainIndexBuffer.java#L126
+[aggregate-rfc]: https://github.com/LeaseQ/pixels-dml/blob/83cbb75ff7de75127d491a06f72adb74d6eada77/RFC_GROUPED_MAIN_INDEX_AGGREGATE_RESULT_20261125.md
+[newmain-rfc]: https://github.com/LeaseQ/pixels-dml/blob/83cbb75ff7de75127d491a06f72adb74d6eada77/RFC_NEW_MAIN_INDEX_INSERT_AB_20261125.md
+[attribution]: https://github.com/LeaseQ/pixels-dml/blob/83cbb75ff7de75127d491a06f72adb74d6eada77/RFC_RUNTIME_BASELINE_ATTRIBUTION_CORRECTION_20261125.md
 [retina-test]: https://github.com/LeaseQ/pixels-dml/blob/a8e821b038dc365619510b09dac8db33bcfdf6b3/pixels-common/src/test/java/io/pixelsdb/pixels/common/retina/TestRetinaService.java#L283
 
 2026-11-25 reader-side single-entry dictionary fast path：主测例的 tag 列确实是单值字典，
