@@ -370,3 +370,18 @@ Trino 16 writer的候选/稳定交错四臂SQL elapsed为7.741/6.306/6.735/6.887
 第二组均保留1M，不能把重启结果当耐久性证明。候选源文件保留为未提交本地改动，
 远端源码和隔离运行态均恢复稳定版本。本轮提交前检查的远端`PROGRESS.md` blob
 为`0cca896a7b720b0463421ea9e91284c6b1990863`。
+
+2026-11-25 继续验证JFR暴露的`RocksDBFactory.preCreateColumnFamilies`全局锁：候选
+保留缺失CF创建的串行慢路径，对已缓存CF走无锁快路径，并将状态map改为
+`ConcurrentHashMap`。候选daemon SHA为`0c2f221c64c85ec4940c78586f4603ca863518a6f3b631702fc868e23ca3902b`，
+稳定对照为`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`。
+固定16个Trino writer、task_concurrency=64、关闭writer scaling，在同一68列物化源上
+使用四个独立fresh indexed root：候选重启/暖臂为9.32/7.04秒（约107.3K/142.0K），
+稳定重启/暖臂为9.00/6.58秒（约111.1K/152.0K）。四目标均通过1M行、distinct、精确
+范围与全量`U111/111.0000`标签门禁；候选均值8.18秒反而比对照7.79秒慢约5%，暖臂慢约7%，
+拒绝，不提交、不改变默认。远端源码恢复SHA
+`c890238edaaa7c9ffa7d32a656e85a62786da9a7c65080ef3fe2e9f7e83b9732`，8191/19990已恢复
+稳定jar并完成`SELECT 1`，共享8090未触碰。对应query为
+`20261125_051345_00081_bwk6b`、`20261125_051436_00084_bwk6b`、
+`20261125_051938_00090_bwk6b`、`20261125_052016_00092_bwk6b`。本次提交前检查的远端
+`PROGRESS.md` blob为`8fb0e75dbee2b8b6f27cf4c605f39aa4c1cb3847`。

@@ -8080,3 +8080,46 @@ successful pre-restart commit/readback evidence. The remote source file was rest
 to its pre-candidate hash and the isolated runtime was restored to stable Retina
 threads=32. The rejected candidate remains only as an uncommitted local change for
 traceability.
+
+## Rejected RocksDB pre-create monitor fast path (2026-11-25)
+
+The finish-probe JFR showed `RocksDBFactory.preCreateColumnFamilies` as a concrete
+contention site: 15 monitor-contention events averaged about 535 ms while 16 grouped
+primary RPCs entered the method. The existing method is a globally synchronized
+batch-create operation. The candidate kept the slow path serialized, but changed
+the factory state map to `ConcurrentHashMap` and returned before taking the factory
+monitor when all requested column-family handles were already cached. The candidate
+was built on cds20 with daemon fat-jar SHA
+`0c2f221c64c85ec4940c78586f4603ca863518a6f3b631702fc868e23ca3902b`; the stable
+control jar was SHA
+`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`.
+
+The isolated runtime used Retina `8191/19990`, grouped threads=32, Trino fixed at
+16 writers, `task_concurrency=64`, writer scaling disabled, the same materialized
+68-column source `e2e68_fresh_candidate86_20261124`, and independent fresh indexed
+roots. The four INSERTs all committed one million rows and passed the strict gate:
+count=1,000,000, distinct IDs=1,000,000, IDs `10000000001..10001000000`, and one
+million `U111/111.0000` tags.
+
+```text
+arm       target                                  query                         CLI wall  rows/s
+candidate e2e68_precreate_fp_candidate_20261125  20261125_051345_00081_bwk6b  9.32 s   107.3K
+candidate e2e68_precreate_fp_candidate2_20261125 20261125_051436_00084_bwk6b  7.04 s   142.0K
+control   e2e68_precreate_fp_control_20261125    20261125_051938_00090_bwk6b  9.00 s   111.1K
+control   e2e68_precreate_fp_control2_20261125   20261125_052016_00092_bwk6b  6.58 s   152.0K
+```
+
+The first arm of each process epoch was the post-restart/cold arm; the second was
+the warm arm. The candidate mean was 8.18 s versus 7.79 s for control, and the
+warm candidate arm was about 7.0% slower than the warm control. Thus the JFR
+contention is real, but removing the monitor from the already-known-CF calls does
+not improve the end-to-end path; the cost is either in CF creation/first-use and
+downstream queueing or hidden by normal writer/finish variance. The candidate is
+rejected, was not committed or pushed, and is not a production-default change.
+The remote source was restored byte-for-byte to SHA
+`c890238edaaa7c9ffa7d32a656e85a62786da9a7c65080ef3fe2e9f7e83b9732`, the isolated
+jar was restored to the stable SHA above, and `SELECT 1` plus the final four target
+gates passed. Shared Trino `8090` was untouched.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`8fb0e75dbee2b8b6f27cf4c605f39aa4c1cb3847`.
