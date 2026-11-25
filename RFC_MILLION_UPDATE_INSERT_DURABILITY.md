@@ -8317,3 +8317,37 @@ readback plus Trino restart persistence, not a new Retina-restart guarantee.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `e6f41d8707bf9d05e08415b0c73cbcc735dc0679`.
+
+## Reverse-order fresh-root resolver crossover (2026-11-25)
+
+The preceding p16-then-p32 pair showed a warm p32 advantage, so a second pair
+was run in the reverse order on new standard roots:
+`e2e68_update_rev_p32_20261125` first, then
+`e2e68_update_rev_p16_20261125`. Both targets used the same 1M-row source,
+explicit primary-index metadata, and the same exact range. Each arm again ran a
+post-restart update followed by a warm repeat:
+
+```text
+setting  SQL elapsed cold/warm  connector total cold/warm  resolve_ms cold/warm
+p32      3.829 s / 1.809 s      2090.934 / 1538.005       1255.115 /  930.887
+p16      4.181 s / 1.639 s      2438.027 / 1353.059       1580.068 /  816.544
+```
+
+The reverse pair does not reproduce a p32 win: p16 is 12.0% faster in warm
+connector total and has the lower warm resolver time. Both targets completed
+the same repaired-CLI tag-aware COMPACT and final readback gates:
+
+```text
+target / final tag       rows       distinct  id range                  tag rows  old U tag
+reverse p32 / R32B       1000000    1000000   10000000001..10001000000   1000000    0
+reverse p16 / R16B       1000000    1000000   10000000001..10001000000   1000000    0
+```
+
+Together with the preceding pair, this is evidence for a concurrency/queue
+interaction rather than a stable p32 algorithmic gain. p32 remains a valid
+experimental setting, but the source default stays p16. The next useful work is
+queue-depth/JFR evidence or a resolver scheduling improvement, not promotion of
+a single parallelism point.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`f146bfaaedd3510d5c5345b2447ccdb5b4fab95b`.

@@ -447,3 +447,14 @@ COMPACT；p16的tag snapshot/physical rewrite/resolve/publish为2.290/7.335/16.5
 再次读回仍通过。隔离Trino已恢复p16并ready，共享8090未触碰。Retina本轮未重启，
 因此不把该记录扩展成新的Retina重启耐久性保证。本次推送前检查的远端
 `PROGRESS.md` blob为`e6f41d8707bf9d05e08415b0c73cbcc735dc0679`。
+
+随后做了反向顺序fresh-root交叉，以排除p16先跑造成的缓存/队列偏差：新建
+`e2e68_update_rev_p32_20261125`和`e2e68_update_rev_p16_20261125`，先p32后p16，
+两张表均完成1M INSERT门禁、UPDATE、tag-aware COMPACT和最终读回。p32冷/暖SQL
+elapsed为3.829/1.809秒，connector total为2090.934/1538.005ms，resolve为
+1255.115/930.887ms；p16为4.181/1.639秒，connector total为2438.027/1353.059ms，
+resolve为1580.068/816.544ms。反向暖轮p16反而比p32快12.0%，两目标最终均为1M
+rows、1M distinct、范围完整、指定新tag全量且旧U tag为0。两组完整E2E合并后，
+p32不能被解释为稳定算法收益，更像resolver服务队列/缓存状态交互；源码默认继续
+保持p16，下一步优先做队列深度/JFR和调度证据，不推广单个并发点。本次推送前检查的
+远端`PROGRESS.md` blob为`f146bfaaedd3510d5c5345b2447ccdb5b4fab95b`。
