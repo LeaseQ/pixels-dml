@@ -359,3 +359,14 @@ finishing为4.091--5.297秒；Retina grouped聚合日志显示32线程臂的main
 最终隔离运行态恢复Retina 32线程、Trino p16，`SELECT 1`通过，共享8090未触碰。
 当前仍不修改生产默认，下一步转向connector `index_finish`/flush边界的JFR或队列深度
 证据。本轮提交前检查的远端`PROGRESS.md` blob为`8f9d573fd0be43540747736714df2dfc5fcd8d08`。
+
+2026-11-25 对JFR指向的`MainIndexBuffer.snapshotForFlush()`做了primitive sort候选：
+将百万级`Long[] + Collections.sort`改为`long[] + Arrays.sort`。cds20上
+`TestMainIndexBuffer`通过3/3，daemon fat jar也成功构建。固定Retina 16线程和
+Trino 16 writer的候选/稳定交错四臂SQL elapsed为7.741/6.306/6.735/6.887秒，
+候选均值7.238秒，稳定均值6.597秒，候选反而慢约9.7%，故拒绝，不提交代码。
+四臂初始1M行、distinct、范围和`U666/666.0000`标签门禁均通过；重启后第一组
+出现已知的checkpoint前`TEMPORARY_INGEST`可见性丢失（候选940641、稳定0），
+第二组均保留1M，不能把重启结果当耐久性证明。候选源文件保留为未提交本地改动，
+远端源码和隔离运行态均恢复稳定版本。本轮提交前检查的远端`PROGRESS.md` blob
+为`0cca896a7b720b0463421ea9e91284c6b1990863`。

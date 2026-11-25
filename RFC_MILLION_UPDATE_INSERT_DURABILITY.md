@@ -8033,3 +8033,50 @@ queueing consume most of the timeline. The next code investigation should target
 the finish/flush boundary and collect a JFR or queue-depth trace there before any
 default change. The isolated runtime was restored to Retina grouped threads=32,
 Trino p16; `SELECT 1` passed and shared 8090 was untouched.
+
+## Rejected primitive MainIndex flush-sort candidate (2026-11-25)
+
+The route decomposition and the earlier JFR both pointed at the main-index flush
+snapshot: `MainIndexBuffer.snapshotForFlush()` copied a million boxed `Long` keys
+into `Long[]` and sorted them through `Collections.sort`, matching the observed
+`ComparableTimSort` allocation hotspot. A narrow candidate changed only that
+conversion to a primitive `long[]` followed by `Arrays.sort`; the range-building and
+flush-marker protocol were unchanged.
+
+The candidate compiled on cds20 and passed the focused test suite:
+
+```text
+mvn -pl pixels-common -am -Dpixels.skip.tests=false \
+  -Dtest=TestMainIndexBuffer -Dsurefire.failIfNoSpecifiedTests=false test
+Tests run: 3, Failures: 0, Errors: 0
+```
+
+The isolated Retina was then run with the candidate daemon fat jar first on its
+classpath (SHA256
+`a9b2d14a7e31da6c66ccd842f553d765a5fcd54fce33cb052b3b1a7b0e96d144`). Both
+candidate and control used grouped threads=16, Trino fixed 16 writers, the same
+68-column source, and independent fresh roots:
+
+```text
+arm        target                              query                         SQL elapsed
+candidate  e2e68_primitive_canda_20261125      20261125_044408_00055_bwk6b  7.741 s
+control    e2e68_primitive_stablea_20261125    20261125_044518_00059_bwk6b  6.306 s
+candidate  e2e68_primitive_candb_20261125      20261125_044626_00063_bwk6b  6.735 s
+control    e2e68_primitive_stableb_20261125    20261125_044735_00067_bwk6b  6.887 s
+```
+
+All four initial query readbacks passed the exact one-million-row, distinct-ID,
+range, and `U666/666.0000` gates. The candidate average was 7.238 s versus 6.597 s
+for control, about 9.7% slower; the route timelines also did not show a consistent
+reduction in `index_finish` or finishing time. The candidate is therefore rejected
+and is not a production default or a pushed source change.
+
+The post-restart check also reproduced the existing validation-runtime lifecycle
+boundary: the first candidate target retained 940,641 visible rows and the first
+control target retained zero, while the second candidate/control pair each retained
+1,000,000. This is the known pre-checkpoint `TEMPORARY_INGEST` visibility behavior,
+not a correctness pass for restart durability; the performance arms use only their
+successful pre-restart commit/readback evidence. The remote source file was restored
+to its pre-candidate hash and the isolated runtime was restored to stable Retina
+threads=32. The rejected candidate remains only as an uncommitted local change for
+traceability.
