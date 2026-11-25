@@ -280,3 +280,14 @@ smoke test。本次提交前检查的远端 `PROGRESS.md` blob 为
 `20261125_021806_00026_ew9z2`、`20261125_021810_00027_ew9z2`（true），完整门禁与
 分析见RFC末尾。本次提交前检查的远端`PROGRESS.md` blob为
 `faaed7bd6661d0a042eb5bb59c1893da8ed896c0`。
+
+随后完成了一次只读定位和严格connector候选复核。JFR（真实1M行INSERT，query
+`20261125_022249_00031_ew9z2`）的热点集中在`VarcharType.getSlice`、
+`VariableWidthBlock.getSlice`、UTF-8 decode、`StringColumnWriter.writeCurPartWithDict`
+以及`StringColumnReader.readSelected`；allocation视图中`double[]`约35%、`byte[]`
+约10%，说明剩余成本确实在Block/字符串转换与对象分配边界。基于此做的DictionaryBlock
+批量预解引用候选已编译且`PixelsPageSinkTest`通过，但两轮重启交叉的热臂为candidate
+3.087/2.943秒、stable 3.329/2.954秒，优势不复现，冷臂也基本持平；四目标最终
+均通过完整标签门禁。候选已撤回，stable connector恢复，未提交代码。完整证据和query
+ID见RFC末尾。本次提交前检查的远端`PROGRESS.md` blob为
+`1a0c36ebba0ddffe296b846df9949c403bd9cea8`。

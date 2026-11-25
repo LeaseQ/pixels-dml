@@ -7615,3 +7615,61 @@ not promotion of `redistribute_writes=false` as a universal default.
 
 Before this documentation push, the remote `PROGRESS.md` blob was fetched and checked at
 `faaed7bd6661d0a042eb5bb59c1893da8ed896c0`.
+
+## Rejected connector DictionaryBlock pre-resolution candidate (2026-11-25)
+
+The remaining INSERT conversion hotspot was sampled on the stable isolated Trino `8191`
+with a real one-million-row append (`20261125_022249_00031_ew9z2`). JFR's hot-method view
+reported `VarcharType.getSlice` and `VariableWidthBlock.getSlice` at the top, followed by
+UTF-8 decoding, `StringColumnWriter.writeCurPartWithDict`, and
+`StringColumnReader.readSelected`. A representative stack was:
+
+```text
+VarcharType.getSlice
+  -> PixelsPageSink.appendSliceValues
+  -> TableWriterOperator.addInput
+```
+
+The allocation view was also dominated by primitive arrays and character/byte buffers:
+`double[]` about 35%, `byte[]` about 10%, `long[]` about 6%, `HeapCharBuffer` about 5%,
+and `HashTableDictionary.KeyBuffer` about 4.5%. This supports focusing on the
+Exchange/Block-to-sink conversion boundary, but is a sampling diagnosis rather than a
+throughput claim.
+
+The bounded candidate added no file-format or daemon change. For string-like columns only,
+when the incoming block was a `DictionaryBlock`, it resolved each dictionary position to a
+Slice once per page and reused those references while retaining the existing
+`BinaryColumnVector` write path. The candidate built remotely and `PixelsPageSinkTest`
+passed with exit code 0. It was installed only in the isolated connector plugin; shared
+8090 was untouched.
+
+Two restart-paired runs were made with the same fixed-32-writer,
+`redistribute_writes=false` session and disjoint one-million-row appends:
+
+```text
+run 1, candidate: q=20261125_023801_00000_kj6x3  cold 7.117 s, warm 3.087 s
+run 1, stable:    q=20261125_023926_00000_bhasv  cold 6.983 s, warm 3.329 s
+
+run 2, candidate: q=20261125_024122_00000_hnirt  cold 6.841 s, warm 2.943 s
+run 2, stable:    q=20261125_024214_00000_7xtbj  cold 6.864 s, warm 2.954 s
+```
+
+The first warm pair favored the candidate by about 7%, but the reversed repeat was
+effectively equal (2.943s versus 2.954s); cold pairs were also equal within noise. The
+candidate is therefore **rejected** as an optimization and was not committed. The runtime
+connector was restored to the stable SHA
+`a49a1cb1788ecf9305d1555e4e667e763f670ecb4e1a9636686cf8446701c2f0`, and the remote source
+file was restored after the build. Final gates were exact:
+
+```text
+candidate target e2e68_matrix16a_20261125: 9M rows, 9M distinct, tag_1/tag_30 = 9M
+stable target    e2e68_matrix16b_20261125: 8M rows, 8M distinct, tag_1/tag_30 = 8M
+```
+
+The negative result narrows the next work: avoid another narrow dictionary-cache variant;
+the high-value path is a Trino-core Exchange/Block representation change with standard
+Block contract tests, or a larger-granularity conversion API that can be measured without
+changing the Pixels file representation.
+
+Before this documentation push, the remote `PROGRESS.md` blob was fetched and checked at
+`1a0c36ebba0ddffe296b846df9949c403bd9cea8`.
