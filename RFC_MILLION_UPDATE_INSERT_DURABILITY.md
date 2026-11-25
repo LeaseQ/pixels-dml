@@ -8729,3 +8729,48 @@ pipeline does not remove the observed end-to-end ceiling.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `370f5689ecd8c357e6566180b41ea34d0acbfd4b`.
+
+### Rejected: producer-side grouped primary bucket hint (2026-11-25)
+
+JFR had shown repeated daemon-side `IndexUtils.getBucketIdFromByteBuffer`
+work. The Trino INSERT writer already computes the bucket while staging each
+primary entry, so this candidate added two backward-compatible fields to
+`PrimaryIndexEntry` (`bucketId` and `bucketIdValid`). The connector populated
+them, and the daemon used them only with the explicit benchmark property
+`pixels.index.grouped.primary.write.trust-bucket-hint=true`; old clients and
+the default path continued to hash the key in the daemon. The candidate was
+compiled as daemon SHA
+`b23851e79f9a8e408b79e7bce34c4170ab93f546c4a4a8bcf5f0887026c09abd` and used
+only on the isolated 8191 runtime. Stable Retina and shared 8090 were not
+changed.
+
+The A/B used two fresh 68-column `pk=id, pk_scheme=rocksdb` targets, the same
+materialized 1M-row source, 32 fixed writers, `task_concurrency=64`, writer
+scaling disabled, and `redistribute_writes=false`:
+
+```text
+candidate: e2e68_bucket_hint_candidate_20251125
+  query 20261125_103345_00003_jwp4f  11.785 s  ~=84.9K rows/s
+  count/distinct/min/max = 1000000/1000000/19000000002/19001000001
+
+stable control: e2e68_bucket_hint_control_20251125
+  query 20261125_103628_00002_pfxhr  10.501 s  ~=95.2K rows/s
+  count/distinct/min/max = 1000000/1000000/30000000002/30001000001
+```
+
+The candidate was about 12.2% slower in wall time. More importantly, after
+restarting the isolated daemon back to stable, the candidate table's
+`count(*)` and `id`/dimension reads still worked, but reading tag columns
+failed with Trino `GENERIC_INTERNAL_ERROR`; the stable control returned tag
+values normally (`U111`, `111.0000`). Therefore the candidate did not pass the
+required tag-aware readback/durability gate, regardless of its performance.
+The likely lesson is that routing hints cannot be trusted without tracing the
+full primary/tag-index visibility contract; a producer-side duplicate hash is
+not the dominant safe optimization by itself.
+
+The proto, connector, and daemon changes were reverted and are not part of
+the branch or default runtime. The isolated runtime is back on stable daemon
+SHA `44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`5c4492f8750a8ea5cb54c20186b97151622b1edc`.

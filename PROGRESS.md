@@ -703,3 +703,24 @@ distinct、精确范围与tag_1/tag_30全量门禁；候选热态与stable无差
 SHA为`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`，共享8090
 未触碰。本次推送前重新检查的远端`PROGRESS.md` blob为
 `370f5689ecd8c357e6566180b41ea34d0acbfd4b`。
+
+2026-11-25 继续验证“connector 已算 bucket、daemon 再算一次 SHA-256”的重复路径。
+候选给`PrimaryIndexEntry`增加向后兼容的`bucketId/bucketIdValid`字段，connector写入，
+daemon仅在显式`pixels.index.grouped.primary.write.trust-bucket-hint=true`时使用；旧客户端
+和默认路径仍走daemon hash。候选daemon full jar SHA为
+`b23851e79f9a8e408b79e7bce34c4170ab93f546c4a4a8bcf5f0887026c09abd`，只部署到隔离8191，
+stable Retina和共享8090未改变。
+
+候选新建完整`pk=id, pk_scheme=rocksdb`的68列目标，query
+`20261125_103345_00003_jwp4f`耗时11.785秒，约84.9K rows/s；count/distinct/min/max为
+`1000000/1000000/19000000002/19001000001`。stable新建同形control目标，query
+`20261125_103628_00002_pfxhr`耗时10.501秒，约95.2K rows/s；count/distinct/min/max为
+`1000000/1000000/30000000002/30001000001`。候选慢约12.2%。更关键的是切回stable
+daemon重启后，候选表的count和id/dim读取仍可用，但读取tag列报Trino
+`GENERIC_INTERNAL_ERROR`；control可正常读回`U111/111.0000`，所以候选未通过支持打标的
+读回/耐久门禁，直接拒绝，不进入源码或默认配置。候选proto、connector、daemon改动均已
+回退；8191恢复stable daemon/connector，active SHA仍为
+`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`。
+
+本次修订前重新检查的远端`PROGRESS.md` blob为
+`5c4492f8750a8ea5cb54c20186b97151622b1edc`。
