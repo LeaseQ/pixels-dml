@@ -334,3 +334,15 @@ candidate热臂为2.948/3.358秒，stable热臂为3.079/3.317秒；candidate两�
 connector SHA `62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`；
 两张目标最终为13M/12M行，distinct、范围、tag_1/tag_30全量通过。本次提交前检查的
 远端`PROGRESS.md` blob为`298c33d55812588bb13a63dede825f3515f4ebd7`。
+
+2026-11-25 完成 fresh-root 的 grouped-primary 线程/Trino writer 交叉复测。固定
+`task_concurrency=64`、`task_min_writer_count=16`、`task_max_writer_count=16`、
+关闭writer scaling，只在隔离 Retina 中切换 grouped primary threads：32线程臂的
+SQL elapsed 为8.218/7.166秒（约121.7K/139.5K rows/s），16线程臂为7.275/6.179秒
+（约137.5K/161.8K rows/s）。四个全新标准根目标均通过1M行、1M distinct、精确
+主键范围和全量`U666/666.0000`标签门禁；在恢复32线程后再次读回仍全部通过。
+本轮因此确认16 grouped threads在固定16 writers下有约13%--16%的交叉优势，但
+样本仍只有两点/臂，不能宣称百万行/秒，也暂不改生产默认。隔离运行态已恢复32
+线程稳定配置，共享8090未触碰。Retina重启后的`RECOVERING -> READY`使用既有
+`markReady(recoveryEpoch)`本地流程完成。本轮提交前检查的远端`PROGRESS.md` blob
+为`353b26305b1e738bff794ece8a4f834a8db88efa`。

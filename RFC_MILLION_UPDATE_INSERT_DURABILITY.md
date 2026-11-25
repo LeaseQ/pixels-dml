@@ -7920,3 +7920,47 @@ The next performance experiment should hold a single Trino/daemon state constant
 sampling repeated disjoint ranges, and should report cold, warm, resolver, planning,
 and scheduling components separately before attempting a p32 default or daemon-side
 queue change.
+
+## Fresh-root INSERT thread/writer crossed recheck (2026-11-25)
+
+The previous grouped-primary sweep showed a promising `16 grouped threads + 16
+writers` point, but it mixed target state and writer counts. This recheck fixed the
+Trino session at 16 writers and changed only the grouped-primary executor in the
+isolated Retina process. The source was the already validated indexed table
+`validationfresh.e2e68_profile_idx_20261125`, containing exactly one million rows,
+range `3010000000001..3010001000000`, and source tag `U666/666.0000`. Each arm used a
+new standard-root target with `pk='id', pk_scheme='rocksdb'` and the session:
+
+```text
+task_concurrency=64
+task_min_writer_count=16
+task_max_writer_count=16
+task_scale_writers_enabled=false
+```
+
+The first pair was run as `32 Retina grouped threads` followed by `16 Retina grouped
+threads`; a second target was then run under each same process state:
+
+```text
+Retina grouped threads  target                              query                         SQL elapsed  rows/s
+32                      e2e68_threads32_w16_20261125        20261125_035805_00005_bwk6b  8.218 s      121.7K
+16                      e2e68_threads16_w16_20261125        20261125_040250_00011_bwk6b  7.275 s      137.5K
+16 (repeat)             e2e68_threads16_w16_b_20261125      20261125_040400_00018_bwk6b  6.179 s      161.8K
+32 (repeat)             e2e68_threads32_w16_b_20261125      20261125_040546_00022_bwk6b  7.166 s      139.5K
+```
+
+All four targets passed the strict post-INSERT gate both before and after the final
+Retina restore: `count=1000000`, `distinct(id)=1000000`, exact min/max range, and
+`count_if(tag_1_type='U666' AND tag_1_para=666.0000)=1000000`. Retina was restarted
+between the two settings and its existing local `get status -> markReady(epoch)` RPC
+was used to move `RECOVERING -> READY`; the shared Trino 8090 process was untouched.
+
+This is a stronger fresh-root crossed signal than the earlier mixed sweep: with the
+same 16 Trino writers, 16 grouped threads beat 32 grouped threads in both observed
+points, by 12.9% on the first pair and 16.0% on the repeat pair. It is still not a
+million-row/s result and is not sufficient by itself to change the production
+default: the sample is two points per arm, and SQL elapsed includes Trino planning,
+scheduling, exchange, and finish costs. The current conclusion is to retain the
+candidate profile `grouped threads=16, Trino writers=16` for the next interleaved
+multi-range run, while leaving the isolated runtime restored to the stable
+`grouped threads=32` profile and making no source-default change.
