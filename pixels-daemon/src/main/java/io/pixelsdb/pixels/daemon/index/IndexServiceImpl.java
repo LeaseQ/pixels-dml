@@ -325,15 +325,12 @@ public class IndexServiceImpl extends IndexServiceGrpc.IndexServiceImplBase
                 MainIndex mainIndex = MainIndexFactory.Instance().getMainIndex(tableId);
                 long mainIndexInitNanos = System.nanoTime() - mainIndexInitStartNanos;
                 long mainIndexStartNanos = System.nanoTime();
-                List<Boolean> mainResults = GROUPED_PRIMARY_NEW_MAIN_INDEX
-                        ? mainIndex.putNewEntries(entries)
-                        : mainIndex.putEntries(entries);
-                for (Boolean mainSuccess : mainResults)
+                boolean mainSuccess = GROUPED_PRIMARY_NEW_MAIN_INDEX
+                        ? mainIndex.putNewEntriesAndCheck(entries)
+                        : mainIndex.putEntriesAndCheck(entries);
+                if (!mainSuccess)
                 {
-                    if (!mainSuccess)
-                    {
-                        throw new MainIndexException("Failed to put entry into main index");
-                    }
+                    throw new MainIndexException("Failed to put entry into main index");
                 }
                 long mainIndexNanos = System.nanoTime() - mainIndexStartNanos;
                 builder.setErrorCode(ErrorCode.SUCCESS);

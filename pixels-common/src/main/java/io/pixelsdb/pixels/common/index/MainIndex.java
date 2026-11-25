@@ -145,6 +145,40 @@ public interface MainIndex extends Closeable
     }
 
     /**
+     * Put a batch of entries and return whether every entry was accepted.
+     * Implementations may override this to avoid allocating one Boolean result
+     * per entry when the caller only needs the aggregate result.
+     */
+    default boolean putEntriesAndCheck(List<IndexProto.PrimaryIndexEntry> primaryEntries)
+    {
+        for (Boolean success : putEntries(primaryEntries))
+        {
+            if (!success)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Put newly allocated entries and return whether every entry was accepted.
+     * Implementations may override this to avoid allocating one Boolean result
+     * per entry when the caller only needs the aggregate result.
+     */
+    default boolean putNewEntriesAndCheck(List<IndexProto.PrimaryIndexEntry> primaryEntries)
+    {
+        for (Boolean success : putNewEntries(primaryEntries))
+        {
+            if (!success)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Delete a range of row ids from the main index. This method only has effect on the persistent storage
      * of the main index. {@link #flushCache(long fileId)} should be called before this method
      * delete the row ids from both cache and persistent storage.

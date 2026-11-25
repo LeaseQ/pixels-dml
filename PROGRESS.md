@@ -779,3 +779,27 @@ overlay `IndexServiceImpl`、`MainIndex` 和 `SqliteMainIndex`；但本轮同时
 
 本次推送前重新检查的远端 `PROGRESS.md` blob 为
 `e60dba0c735c475490b5b432d94c213fbe2a715a`。
+
+2026-11-25 对上一轮 aggregate candidate 做了干净隔离的单变量复验。候选仍只
+改变 grouped primary INSERT 的主索引结果检查：新增 `MainIndex` 的聚合检查接口，
+`SqliteMainIndex` 直接在已有写锁内执行并返回单个 boolean，`IndexServiceImpl` 仅在
+分组路径调用；`pixels.index.grouped.primary.write.new-main-index=false` 保持关闭，
+普通单点路径不变。候选 jar SHA 为
+`664f1ce6485930f08453b4a962b6d0f71ad25d690117f5873c06f6e73b4883d6`。
+
+新建 clean runtime `e2e-clean-20261125`，Trino 8291、clean daemon 29988/29989、
+Retina 29990/28995，32 fixed writers、`task_concurrency=64`、
+`redistribute_writes=false`。stable 首对为 19.734s、candidate 首对为 11.658s，
+但首对属于冷启动，不用于归因。反向 warm 对为 candidate
+`20261125_122934_00009_5i88v` 13.297s vs stable
+`20261125_123109_00012_5i88v` 13.780s；第三对为 candidate
+`20261125_123301_00015_5i88v` 11.479s vs stable
+`20261125_123514_00018_5i88v` 11.777s。两对平均 candidate 12.388s、stable
+12.779s，约快 3.1%。六个目标均通过 1M rows、1M distinct、精确范围和
+`U111/111.0000/AAA/3.1400` 全量 tag 门禁；clean daemon 已恢复 stable。该结果是
+小幅、可重复的默认安全优化，不代表已达到总体目标；当前 clean E2E 仍约 75K–87K/s，
+后续继续定位 grouped primary 和 writer 阶段，并补重启及 tag-aware compaction/readback
+耐久门禁。详细实现和样本见 `RFC_GROUPED_MAIN_INDEX_AGGREGATE_RESULT_20261125.md`。
+
+本次推送前重新检查的远端 `PROGRESS.md` blob 为
+`28f0894c40dca0c9829a026792db3eb6c34d7e34`。

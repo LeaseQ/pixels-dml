@@ -373,6 +373,48 @@ public class SqliteMainIndex implements MainIndex
     }
 
     @Override
+    public boolean putEntriesAndCheck(List<IndexProto.PrimaryIndexEntry> primaryEntries)
+    {
+        this.cacheRwLock.writeLock().lock();
+        try
+        {
+            for (IndexProto.PrimaryIndexEntry entry : primaryEntries)
+            {
+                if (!this.indexBuffer.insert(entry.getRowId(), entry.getRowLocation()))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        finally
+        {
+            this.cacheRwLock.writeLock().unlock();
+        }
+    }
+
+    @Override
+    public boolean putNewEntriesAndCheck(List<IndexProto.PrimaryIndexEntry> primaryEntries)
+    {
+        this.cacheRwLock.writeLock().lock();
+        try
+        {
+            for (IndexProto.PrimaryIndexEntry entry : primaryEntries)
+            {
+                if (!this.indexBuffer.insertNew(entry.getRowId(), entry.getRowLocation()))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        finally
+        {
+            this.cacheRwLock.writeLock().unlock();
+        }
+    }
+
+    @Override
     public boolean deleteRowIdRange(RowIdRange rowIdRange) throws MainIndexException
     {
         long rowIdStart = rowIdRange.getRowIdStart();
