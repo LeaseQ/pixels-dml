@@ -623,3 +623,17 @@ indexed INSERT的主导瓶颈。8191已恢复stable connector并`starting=false`
 
 本次修订前重新检查的远端`PROGRESS.md` blob为
 `c9229cd50b9bb13a3ddf554b65a9fe20105728e7`。
+
+2026-11-25 继续探测真实索引INSERT的主键构造成本：针对当前单`LONG`主键，候选在
+每个row-batch分配连续8-byte backing array，并用`UnsafeByteOperations.unsafeWrap(array,
+offset,8)`生成切片，避免每行分配独立短`byte[]`；编码字节、protobuf key和索引协议均
+保持不变。候选只部署到隔离8191，在已通过19M门禁的同一目标追加两轮：
+`20261125_090436_00000_5cb2y`为8.863s，`20261125_090447_00001_5cb2y`为5.689s，
+最终21M门禁通过。恢复stable后追加交叉两轮：
+`20261125_090624_00000_f48rh`为9.019s，`20261125_090635_00001_f48rh`为4.196s，
+最终23M rows/23M distinct、精确范围及`tag_1`/`tag_30`全量门禁通过。可比热轮候选
+约176K/s，stable约238K/s，候选明显变慢；因此该候选拒绝，不进入分支源码或默认配置。
+8191已恢复stable connector并`starting=false`。
+
+本次修订前重新检查的远端`PROGRESS.md` blob为
+`48891a065ffed2392523e08b8daded1f3532fae1`。

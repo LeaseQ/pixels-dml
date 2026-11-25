@@ -8628,3 +8628,32 @@ abort-only bookkeeping loop.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `c9229cd50b9bb13a3ddf554b65a9fe20105728e7`.
+
+### Rejected: batch-backed `LONG` primary-key ByteString slices (2026-11-25)
+
+The indexed INSERT fixture uses one `LONG` primary key. The existing encoder
+allocates one eight-byte array per row before wrapping it as an unsafe
+`ByteString`. A candidate allocated one contiguous eight-byte backing array per
+row batch and wrapped each row as an offset/length `ByteString` slice. The byte
+order, protobuf key bytes, primary-index RPCs, and abort semantics were
+unchanged.
+
+The candidate was built and deployed only to isolated Trino `8191`, then tested
+on the already validated indexed target. Both candidate arms passed the full
+row/distinct/range/tag gate and brought the target to 21M rows:
+
+```text
+candidate cold  20261125_090436_00000_5cb2y  8.863 s
+candidate warm  20261125_090447_00001_5cb2y  5.689 s  ~=176K rows/s
+stable cold     20261125_090624_00000_f48rh  9.019 s
+stable warm     20261125_090635_00001_f48rh  4.196 s  ~=238K rows/s
+```
+
+The candidate is substantially slower on the comparable warm arm and is
+rejected. It is not part of the pushed source or the runtime. The result means
+that short-array allocation is not an isolated dominant cost in this E2E; the
+next work remains the combined page conversion, primary-index write, and
+main-index finish tail.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`48891a065ffed2392523e08b8daded1f3532fae1`.
