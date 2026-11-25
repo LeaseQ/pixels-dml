@@ -8184,3 +8184,39 @@ and use a single-root target for any subsequent full UPDATE -> COMPACT -> readba
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `7e655401692721aa9c9bda7e534fd092156dd79e`.
+
+## Rejected daemon strict-resolve batching probe (2026-11-25)
+
+The daemon implementation appeared to batch primary lookups only when
+`ignoreMissing=true`; the strict branch called `getUniqueRowId()` per key. A
+candidate changed the strict branch to use the existing per-vnode
+`getUniqueRowIds()` API while retaining the missing-key error contract. The
+candidate daemon jar was `d457b322362299dc14379139059dadd462aed8233556f13c4690bd671483f63a`;
+the stable jar was `44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`.
+
+The probe then exposed that this is not the UPDATE hot path: the connector's
+`resolvePrimaryKeyBatch()` calls `resolvePrimaryEntries(tableId, indexId,
+lookupKeys, true)`, so the million-row exact UPDATE already enters the existing
+batched branch. The candidate and stable runs therefore do not establish a
+strict-branch performance improvement. Candidate measurements on the isolated
+target were:
+
+```text
+candidate query=20261125_061846_00001_7w7ux
+  CLI wall=7.960 s; primary_key_resolve_ms=3853.254; total_ms=4968.360
+candidate warm query=20261125_062105_00002_7w7ux
+  CLI wall=3.906 s; primary_key_resolve_ms=1126.415; total_ms=1799.703
+stable crossed query=20261125_062345_00000_dgeth
+  CLI wall=9.401 s; primary_key_resolve_ms=4495.885; total_ms=5620.913
+```
+
+The large cross-run spread is service-queue variance, not evidence for the
+strict-path change. The candidate source was restored to its pre-probe SHA,
+the active isolated daemon was restored to stable SHA `44615ac...`, and Trino
+8191 passed `SELECT 1`; shared 8090 was untouched. This candidate is rejected
+and not pushed. The next daemon work must instrument or reduce the already
+batched RocksDB/queue path, and any correctness gate must use a single-root
+target because the precreate fixture remains non-compactable.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`a86609c395b4040309035c13466876ae7f9468c4`.

@@ -395,6 +395,19 @@ finishing分别为4.573/2.855秒对4.623/2.625秒。sink日志的最大
 该补充不改变候选拒绝结论。本次提交前检查的远端`PROGRESS.md` blob为
 `7e655401692721aa9c9bda7e534fd092156dd79e`。
 
+2026-11-25 继续检查daemon主键解析：候选将`ignoreMissing=false`分支从逐key
+`getUniqueRowId()`改为按vnode调用已有的`getUniqueRowIds()`，候选daemon SHA为
+`d457b322362299dc14379139059dadd462aed8233556f13c4690bd671483f63a`，稳定SHA为
+`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`。随后确认
+connector的`resolvePrimaryKeyBatch()`实际调用`resolvePrimaryEntries(..., true)`，
+百万UPDATE已经走现有批量分支，因此候选不覆盖目标热路径；候选warm query
+`20261125_062105_00002_7w7ux`为total=1799.703ms、primary resolve=1126.415ms，
+稳定交叉query`20261125_062345_00000_dgeth`为total=5620.913ms、primary resolve=
+4495.885ms，差异属于服务队列波动，不能归因于strict分支。候选源码和运行态均恢复
+稳定，8191通过`SELECT 1`，共享8090未触碰；候选拒绝不推送。下一步应针对已经批量化
+的RocksDB/队列路径做证据化优化，并继续使用single-root目标做完整物化门禁。
+本次提交前检查的远端`PROGRESS.md` blob为`a86609c395b4040309035c13466876ae7f9468c4`。
+
 2026-11-25 继续验证UPDATE的低风险connector候选：在`PixelsMergeSink`构造时预计算
 更新列ordinal，消除每行/每列的`List.indexOf`。候选jar SHA为
 `856bbd9e10b9024948f4f1df6402b3a7551815285778dbcf223478c68537d350`，稳定jar为
