@@ -8351,3 +8351,58 @@ a single parallelism point.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `f146bfaaedd3510d5c5345b2447ccdb5b4fab95b`.
+
+## p16 warm repeat with resolver/JFR evidence (2026-11-25)
+
+After the reverse-order p32/p16 crossover, the isolated Trino runtime was left
+at stable p16. Two additional exact 1M-row UPDATEs were run against
+`validationfresh.e2e68_update_rev_p16_20261125`, changing the tag to `JFR28`
+and then `JFR29`. The SQL timelines were 1.531 s and 1.535 s; the connector
+metrics were:
+
+```text
+query                         total_ms   primary_resolve_ms   rpc_ms
+20261125_073000_00008_9kijf   1335.349   790.521               340.853
+20261125_073004_00009_9kijf   1350.100   706.468               443.817
+```
+
+The corresponding connector throughput is about 741K rows/s in both runs. The
+3.497 s and 3.551 s shell measurements include starting the Trino CLI and are
+not used as SQL throughput.
+
+The daemon log contained 62 `resolvePrimaryEntries` RPCs for the 1M keys. Their
+aggregate and mean phase metrics were:
+
+```text
+phase            aggregate_ms   mean_ms/RPC
+bucket build     1037.490       16.734
+single point     5413.876       87.321
+location         2139.612       34.510
+service          8592.746       138.593
+```
+
+The phase numbers overlap across concurrent RPCs. `singlePoint` is the main
+stable per-RPC segment; the current IndexServer runs resolver code on the gRPC
+default worker and does not have a dedicated fixed executor. An explicit JFR
+recording on the coordinator was collected with `jdk.ExecutionSample` enabled,
+but it did not provide a reliable Java RocksDB stack attribution. Therefore this
+is evidence for the local primary-index lookup path, not proof that a gRPC
+executor change will improve throughput.
+
+The latest `JFR29` state was then materialized with the repaired CLI using
+tag-aware COMPACT, `-c 8`, and compact primary-resolve parallelism 8. Its
+reported tag snapshot, physical rewrite, compact resolve, and publish phases
+were 2.612 s, 6.806 s, 13.741 s, and 9.112 s respectively; these stages overlap
+and are not additive. Final readback passed with 1M rows, 1M distinct IDs, the
+exact `10000000001..10001000000` range, 1M `JFR29` rows, and zero old `U111`
+rows. Retina was not restarted in this probe; shared Trino 8090 was untouched.
+
+The next candidate must preserve input/output order explicitly if it sorts keys
+for RocksDB access. The earlier sequential iterator candidate was rejected
+because it updated only 7,935/1M rows; a later corrected total-order variant
+raised resolution time from 3.31 s to 7.16 s. We therefore keep p16 as the
+default and will only promote a new lookup strategy after the same full
+UPDATE -> COMPACT -> readback gates.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`7231a67475b2314c21fe2045353bb58d76aa13a6`.

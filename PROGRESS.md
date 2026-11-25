@@ -458,3 +458,32 @@ rows、1M distinct、范围完整、指定新tag全量且旧U tag为0。两组�
 p32不能被解释为稳定算法收益，更像resolver服务队列/缓存状态交互；源码默认继续
 保持p16，下一步优先做队列深度/JFR和调度证据，不推广单个并发点。本次推送前检查的
 远端`PROGRESS.md` blob为`f146bfaaedd3510d5c5345b2447ccdb5b4fab95b`。
+
+2026-11-25 继续做真实single-root resolver探针：隔离8191保持stable p16，daemon
+SHA仍为`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`。
+在`validationfresh.e2e68_update_rev_p16_20261125`上连续执行两次1M行精确UPDATE，
+query分别为`20261125_073000_00008_9kijf`和`20261125_073004_00009_9kijf`，
+Trino timeline elapsed为1.531/1.535秒，connector total为1335.349/1350.100ms，
+primary-key resolve为790.521/706.468ms，折算connector吞吐约741K/秒和741K/秒。
+此前直接用shell包住trino CLI的3.497/3.551秒包含CLI启动开销，不作为SQL吞吐。
+
+同步在真实UPDATE期间对coordinator做JFR显式`jdk.ExecutionSample`采样，并检查
+daemon的`PIXELS_PRIMARY_RESOLVE_METRIC`。一轮62个RPC共1,000,000 keys，累计
+bucket/singlePoint/location/service分别为1037.490/5413.876/2139.612/8592.746ms；
+单RPC均值为16.734/87.321/34.510/138.593ms，singlePoint约占service的63%，且是
+最稳定的主要分段。gRPC IndexServer没有自建固定executor，resolver直接运行在gRPC
+默认worker上；本轮JFR没有捕获到可归因的Java RocksDB栈，不能据此声称线程池是
+瓶颈。当前证据更支持“RocksDB逐key seek/本地索引访问”为主热段，p16/p32差异仍
+受队列和缓存状态影响。
+
+随后将该目标最新`JFR29`版本执行tag-aware COMPACT（修复版CLI，`-c 8`，compact
+primary resolve parallelism=8）。COMPACT的tag snapshot为2.612秒，physical
+rewrite为6.806秒，compact resolve为13.741秒，publish为9.112秒，CLI报告约16秒；
+最终读回门禁通过：1,000,000 rows、1,000,000 distinct、ID范围
+`10000000001..10001000000`完整、`tag_1_type='JFR29'`为1,000,000、旧`U111`为0。
+这轮没有重启Retina，共享8090未触碰；隔离8191仍为stable p16。下一步不直接推广
+p32，而是围绕RocksDB primary lookup设计带正确性置换的排序/批量访问候选，并保留
+UPDATE->COMPACT->readback门禁。
+
+本次推送前重新检查的远端`PROGRESS.md` blob为
+`7231a67475b2314c21fe2045353bb58d76aa13a6`。
