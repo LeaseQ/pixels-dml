@@ -268,3 +268,15 @@ checkpoint 的临时可见性，因此跨重启累计行数不作为吞吐证据
 均在当次成功提交后完成正确性门禁。独立服务最终恢复稳定参数和 SELECT 1
 smoke test。本次提交前检查的远端 `PROGRESS.md` blob 为
 `55cbfbd9b1c5aef8166500a071b59619ad083735`。
+
+2026-11-25现场交错复测进一步收窄了`redistribute_writes=false`的结论：在恢复后的
+稳定隔离运行态、同一组已存在索引目标上，固定32 writers、`task_concurrency=64`、
+关闭writer scaling的两臂交错追加分别为2.077/3.491秒，开启为3.155/3.320秒；
+平均SQL elapsed约2.78秒（约360K rows/s）对3.24秒（约309K rows/s），false约快14%。
+两张目标均通过4M行、4M distinct id、精确范围以及tag_1/tag_30全量校验；Retina RSS
+约33GB，未见本轮追加导致的异常增长。由于首轮冷热和目标状态仍有影响，该结果只保留
+为条件性benchmark profile，不改Trino默认，也不宣称百万行/秒。对应query为
+`20261125_021804_00025_ew9z2`、`20261125_021813_00028_ew9z2`（false）和
+`20261125_021806_00026_ew9z2`、`20261125_021810_00027_ew9z2`（true），完整门禁与
+分析见RFC末尾。本次提交前检查的远端`PROGRESS.md` blob为
+`faaed7bd6661d0a042eb5bb59c1893da8ed896c0`。

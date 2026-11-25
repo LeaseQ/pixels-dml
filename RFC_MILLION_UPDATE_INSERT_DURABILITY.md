@@ -7565,3 +7565,53 @@ a production default and requires a crossed repeated soak before promotion.
 
 Before this documentation push, the remote `PROGRESS.md` blob was fetched at
 `55cbfbd9b1c5aef8166500a071b59619ad083735`.
+
+## Same-target crossed recheck of `redistribute_writes` after runtime recovery (2026-11-25)
+
+The isolated runtime had been restored to the stable connector/core and default daemon
+arguments. Retina was explicitly transitioned from `RECOVERING` to `READY` through the
+existing local `markReady(recoveryEpoch)` RPC; transaction port 19989 then returned. The
+recheck reused two already-created indexed targets rather than creating more RocksDB
+column families:
+
+```text
+source: validationfresh.e2e68_fresh_candidate86_20261124 (1,000,000 rows)
+targets: validationfresh.e2e68_matrix16a_20261125 / e2e68_matrix16b_20261125
+endpoint: Trino 8191; shared 8090 untouched
+session: task_concurrency=64, fixed 32 writers, writer scaling disabled
+route: grouped primary writes, stable connector/core
+```
+
+Each arm appended a disjoint one-million-row ID range. The execution order was
+false, true, true, false so that both settings appeared in both warm positions:
+
+```text
+redistribute_writes=false  q=20261125_021804_00025_ew9z2  2.077 s  ~=481.5K rows/s
+redistribute_writes=true   q=20261125_021806_00026_ew9z2  3.155 s  ~=317.0K rows/s
+redistribute_writes=true   q=20261125_021810_00027_ew9z2  3.320 s  ~=301.2K rows/s
+redistribute_writes=false  q=20261125_021813_00028_ew9z2  3.491 s  ~=286.5K rows/s
+```
+
+The crossed means are 2.784s for false (about 359.2K rows/s) and 3.238s for true
+(about 308.8K rows/s), a roughly 14% false-route advantage. This is weaker than the
+earlier 1.96--2.00s false arms and shows that runtime/cache state still matters; it is
+evidence for a conditional session benchmark profile, not a stable server-default
+improvement. A first false arm in the same recovered epoch took 5.902s and a warm
+follow-up 3.810s; the corresponding true pair took 4.185s and 3.628s, so those four
+measurements are retained as a cold/warm context but are not the crossed headline.
+
+Both targets passed the post-run gate:
+
+```text
+target                         rows       distinct_ids  min_id         max_id          tag_1_ok  tag_30_ok
+e2e68_matrix16a_20261125       4000000    4000000       13010000000001 16010001000000 4000000   4000000
+e2e68_matrix16b_20261125       4000000    4000000       13010000000001 16010001000000 4000000   4000000
+```
+
+Retina RSS was about 33GB after the run and no abnormal growth was observed. No source,
+connector, daemon, or Trino default was changed by this recheck. The next useful step is
+therefore code-level instrumentation or a carefully scoped Exchange/Block experiment,
+not promotion of `redistribute_writes=false` as a universal default.
+
+Before this documentation push, the remote `PROGRESS.md` blob was fetched and checked at
+`faaed7bd6661d0a042eb5bb59c1893da8ed896c0`.
