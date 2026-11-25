@@ -729,3 +729,28 @@ reader/writer优化。因此12.2%的墙钟差和candidate decimal tag读失败�
 
 本次修订前重新检查的远端`PROGRESS.md` blob为
 `5c4492f8750a8ea5cb54c20186b97151622b1edc`。
+
+2026-11-25 完成 producer-side grouped primary bucket hint 的校正单变量 A/B。
+先修正了上一轮 harness 问题：daemon 的候选类实际是
+`io/pixelsdb/pixels/daemon/index/IndexServiceImpl`，此前错误 overlay 了稳定类，
+所以中间轮不作为性能结论。校正轮使用候选 daemon SHA
+`b23851e79f9a8e408b79e7bce34c4170ab93f546c4a4a8bcf5f0887026c09abd`，只 overlay
+候选 `IndexServiceImpl` 和 `IndexProto`；Trino 只替换 connector 主 jar
+`add0b5545bca8c6e3b3d5eaef9d3a37a4b9af5e72eda5282de42d949d6ed5228`，其余依赖沿用
+stable。两组都是新建完整68列、`pk=id, pk_scheme=rocksdb`、相同1M source、32 fixed
+writers、`task_concurrency=64`、`redistribute_writes=false`，并完成行数/distinct/范围和
+4个代表性tag全量门禁。
+
+第一对：candidate `e2e68_bucket_hint_valid_candidate_20251125`，query
+`20261125_111447_00003_ztg4j`，10.363s（约96.5K/s）；stable control
+`e2e68_bucket_hint_valid_control_20251125`，query `20261125_111709_00003_jdueu`，
+10.580s（约94.5K/s）。反向第二对：candidate
+`e2e68_bucket_hint_valid_candidate2_20251125`，query
+`20261125_111939_00003_sy24w`，13.004s（约76.9K/s）；stable control
+`e2e68_bucket_hint_valid_control2_20251125`，query
+`20261125_112151_00003_kaxtp`，10.997s（约90.9K/s）。候选第一对仅快约2.1%，
+第二对反而慢约18.2%，不具备可重复收益，因此拒绝，不进入分支源码或默认配置。
+8191 已恢复 stable daemon/connector，shared 8090 和 Retina 未触碰。
+
+本次推送前重新检查的远端`PROGRESS.md` blob为
+`e60dba0c735c475490b5b432d94c213fbe2a715a`。

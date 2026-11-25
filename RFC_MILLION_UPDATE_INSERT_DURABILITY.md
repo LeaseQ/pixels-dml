@@ -8782,3 +8782,52 @@ SHA `44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`.
 
 Before this documentation edit, the fetched remote `PROGRESS.md` blob was
 `5c4492f8750a8ea5cb54c20186b97151622b1edc`.
+
+### Rejected: corrected single-variable producer-side bucket hint A/B (2026-11-25)
+
+The previous bucket-hint retry still had a harness defect: the overlay used
+the stable `IndexServiceImpl` because the daemon class is in
+`io/pixelsdb/pixels/daemon/index`, not `io/pixelsdb/pixels/index`. It therefore
+measured an incomplete connector/proto overlay and is not a performance result.
+That run is intentionally not used below.
+
+The corrected retry used the candidate daemon jar
+`b23851e79f9a8e408b79e7bce34c4170ab93f546c4a4a8bcf5f0887026c09abd` and
+overlaid only `IndexServiceImpl` plus the generated `IndexProto` classes. The
+Trino plugin kept the stable dependency tree and replaced only the connector
+main jar (`add0b5545bca8c6e3b3d5eaef9d3a37a4b9af5e72eda5282de42d949d6ed5228`)
+and the generated proto classes. The stable control used connector SHA
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`, stable
+common SHA `296b19053d52653099736fbf0a89dba124afa5d647d2fc959edeb5f4bf3d59ce`,
+stable core SHA `baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`,
+and stable daemon SHA
+`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`.
+The candidate property was explicitly enabled with
+`pixels.index.grouped.primary.write.trust-bucket-hint=true`; shared port 8090
+and the stable Retina process were untouched.
+
+Both pairs used fresh 68-column `pk=id, pk_scheme=rocksdb` targets, the same
+materialized 1M-row source, 32 fixed writers, `task_concurrency=64`, writer
+scaling disabled, and `redistribute_writes=false`. Every target passed the
+complete gate: `count/distinct/min/max = 1000000/1000000/10000000001/10001000000`
+and all four representative tag predicates (`tag_1_type`, `tag_1_para`,
+`tag_30_type`, `tag_30_para`) matched 1,000,000 rows.
+
+```text
+pair 1 candidate  e2e68_bucket_hint_valid_candidate_20251125  20261125_111447_00003_ztg4j  10.363 s  ~=96.5K rows/s
+pair 1 stable     e2e68_bucket_hint_valid_control_20251125    20261125_111709_00003_jdueu  10.580 s  ~=94.5K rows/s
+pair 2 candidate  e2e68_bucket_hint_valid_candidate2_20251125 20261125_111939_00003_sy24w  13.004 s  ~=76.9K rows/s
+pair 2 stable     e2e68_bucket_hint_valid_control2_20251125   20261125_112151_00003_kaxtp  10.997 s  ~=90.9K rows/s
+```
+
+The candidate wins the first pair by only about 2.1% but loses the reverse
+pair by about 18.2%; its own repeated wall time varies from 10.363 s to
+13.004 s while the stable controls are 10.580 s and 10.997 s. This is not a
+repeatable improvement and does not support removing the daemon-side hash.
+The producer-side bucket hint is therefore rejected and remains absent from
+the branch and default runtime. The isolated runtime was restored to stable
+daemon/connector; the next INSERT work should target the primary-index write
+and finish tail rather than this hint.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`e60dba0c735c475490b5b432d94c213fbe2a715a`.
