@@ -8758,15 +8758,23 @@ stable control: e2e68_bucket_hint_control_20251125
   count/distinct/min/max = 1000000/1000000/30000000002/30001000001
 ```
 
-The candidate was about 12.2% slower in wall time. More importantly, after
-restarting the isolated daemon back to stable, the candidate table's
-`count(*)` and `id`/dimension reads still worked, but reading tag columns
-failed with Trino `GENERIC_INTERNAL_ERROR`; the stable control returned tag
-values normally (`U111`, `111.0000`). Therefore the candidate did not pass the
-required tag-aware readback/durability gate, regardless of its performance.
-The likely lesson is that routing hints cannot be trusted without tracing the
-full primary/tag-index visibility contract; a producer-side duplicate hash is
-not the dominant safe optimization by itself.
+This first A/B is not a causal performance result. The rebuilt candidate
+connector package embedded different `pixels-common` and `pixels-core` jars
+from the active stable package: candidate hashes were
+`040259e1da1cc48d134413a6de0a4744f00855395bb3a5d9b4e63ec0a8f732fe` and
+`c9d2f23a447a0b8542c99272436e30aae4639f983664a857a5da1d9a1da3344f`, while
+the stable package loaded
+`296b19053d52653099736fbf0a89dba124afa5d647d2fc959edeb5f4bf3d59ce` and
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`.
+The difference includes pre-existing uncommitted reader/writer work, so the
+12.2% wall-time gap and the candidate's decimal-tag read failures cannot be
+attributed to the bucket hint. The raw run is retained only as a harness
+failure/contamination finding, not as a slowdown or correctness conclusion.
+
+The safe lesson is that a candidate must preserve the complete loaded
+dependency closure. The next retry uses the stable plugin/dependency tree and
+overlays only the changed connector and daemon classes before judging the
+producer-side hash idea.
 
 The proto, connector, and daemon changes were reverted and are not part of
 the branch or default runtime. The isolated runtime is back on stable daemon

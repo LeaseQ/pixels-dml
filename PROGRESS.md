@@ -715,12 +715,17 @@ stable Retina和共享8090未改变。
 `20261125_103345_00003_jwp4f`耗时11.785秒，约84.9K rows/s；count/distinct/min/max为
 `1000000/1000000/19000000002/19001000001`。stable新建同形control目标，query
 `20261125_103628_00002_pfxhr`耗时10.501秒，约95.2K rows/s；count/distinct/min/max为
-`1000000/1000000/30000000002/30001000001`。候选慢约12.2%。更关键的是切回stable
-daemon重启后，候选表的count和id/dim读取仍可用，但读取tag列报Trino
-`GENERIC_INTERNAL_ERROR`；control可正常读回`U111/111.0000`，所以候选未通过支持打标的
-读回/耐久门禁，直接拒绝，不进入源码或默认配置。候选proto、connector、daemon改动均已
-回退；8191恢复stable daemon/connector，active SHA仍为
-`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`。
+`1000000/1000000/30000000002/30001000001`。但这组A/B无效：candidate重打包connector
+内嵌的`pixels-common/pixels-core`哈希分别为
+`040259e1da1cc48d134413a6de0a4744f00855395bb3a5d9b4e63ec0a8f732fe`/
+`c9d2f23a447a0b8542c99272436e30aae4639f983664a857a5da1d9a1da3344f`，stable实际加载的
+哈希为`296b19053d52653099736fbf0a89dba124afa5d647d2fc959edeb5f4bf3d59ce`/
+`baa636cc67772c5c078a30a10cd7c3891aab11ec3dd0f02a48a32254b2cdfa12`；差异包含已有未提交
+reader/writer优化。因此12.2%的墙钟差和candidate decimal tag读失败不能归因于bucket hint，
+只记为运行包污染/无效E2E，不作为性能下降或正确性结论。候选proto、connector、daemon
+改动已回退；8191恢复stable daemon/connector，active SHA仍为
+`44615acdc6271b72599cf679def05f86b863e87f1de962d93b8fe4998fa8dfc1`。下一轮将沿用stable
+依赖树，只overlay变更class后重测。
 
 本次修订前重新检查的远端`PROGRESS.md` blob为
 `5c4492f8750a8ea5cb54c20186b97151622b1edc`。
