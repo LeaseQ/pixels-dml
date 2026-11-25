@@ -8144,3 +8144,43 @@ the original rejection rather than changing it.
 
 Before this follow-up documentation edit, the fetched remote `PROGRESS.md` blob
 was `7e655401692721aa9c9bda7e534fd092156dd79e`.
+
+## Rejected UPDATE column-ordinal cache probe (2026-11-25)
+
+`PixelsMergeSink.storeMergedRows()` previously called `dataColumns.indexOf(updatedColumn)`
+for every row and updated column. A connector-only candidate precomputed the updated
+column ordinals once in the sink constructor, without changing tag encoding, RPC shape,
+or update semantics. The candidate connector jar was
+`856bbd9e10b9024948f4f1df6402b3a7551815285778dbcf223478c68537d350`; the stable control
+jar was `62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`.
+
+The candidate UPDATE on `validationfresh.e2e68_precreate_fp_candidate2_20261125`
+returned one million rows:
+
+```text
+query=20261125_055514_00001_5j9pn
+CLI wall=11.431 s
+encoding_ms=109.157 primary_key_resolve_ms=7148.172
+request_build_ms=304.587 rpc_count=1 request_bytes=10000061 rpc_ms=845.480 total_ms=8429.514
+```
+
+The stable control UPDATE on the independent `validationfresh.e2e68_precreate_fp_control2_20261125`
+also returned one million rows:
+
+```text
+query=20261125_060411_00000_qg6tf
+CLI wall=6.296 s; Trino elapsed=4.274 s
+encoding_ms=50.607 primary_key_resolve_ms=1621.180
+request_build_ms=315.207 rpc_count=1 request_bytes=10000061 rpc_ms=614.815 total_ms=2615.908
+```
+
+This pair is not a materialized correctness gate: both precreate targets use a two-path
+directory shape, and tag-aware COMPACT rejected that fixture with `path metadata not found`.
+The candidate nevertheless fails the intended performance test: its encoding phase was not
+lower, and the dominant cost remained primary-key resolution/queueing. The candidate was
+withdrawn and the isolated connector was restored to the stable SHA; shared Trino `8090`
+was untouched. The next performance work should target primary-key resolver queue depth
+and use a single-root target for any subsequent full UPDATE -> COMPACT -> readback gate.
+
+Before this documentation edit, the fetched remote `PROGRESS.md` blob was
+`7e655401692721aa9c9bda7e534fd092156dd79e`.

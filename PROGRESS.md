@@ -394,3 +394,18 @@ finishing分别为4.573/2.855秒对4.623/2.625秒。sink日志的最大
 `index_finish_ms`约为候选4.02/2.46秒、对照4.08/2.39秒，未显示快路径消除finish尾部。
 该补充不改变候选拒绝结论。本次提交前检查的远端`PROGRESS.md` blob为
 `7e655401692721aa9c9bda7e534fd092156dd79e`。
+
+2026-11-25 继续验证UPDATE的低风险connector候选：在`PixelsMergeSink`构造时预计算
+更新列ordinal，消除每行/每列的`List.indexOf`。候选jar SHA为
+`856bbd9e10b9024948f4f1df6402b3a7551815285778dbcf223478c68537d350`，稳定jar为
+`62ecabdcb2c4ae384ee7f1603f938bc3a27c1d93f139a274c61cff490fe94039`。候选目标
+`e2e68_precreate_fp_candidate2_20261125`的1M UPDATE query
+`20261125_055514_00001_5j9pn`耗时11.431秒，connector total=8429.514ms，
+encoding=109.157ms，primary-key resolve=7148.172ms；独立稳定控制目标
+`e2e68_precreate_fp_control2_20261125`的query`20261125_060411_00000_qg6tf`
+耗时6.296秒，total=2615.908ms，encoding=50.607ms，primary-key resolve=1621.180ms。
+候选没有改善编码，且主要瓶颈仍是主键解析/服务队列，故拒绝并恢复稳定connector。
+两目标为历史双path负例，COMPACT因`path metadata not found`不能作为最终物化正确性门禁；
+后续完整E2E必须使用single-root目标。8191已恢复稳定并通过ready/SELECT 1，共享8090未触碰。
+本轮推送同步记录本轮结果；本次提交前检查的远端`PROGRESS.md` blob为
+`7e655401692721aa9c9bda7e534fd092156dd79e`。
