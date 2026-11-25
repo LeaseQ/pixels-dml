@@ -7860,3 +7860,63 @@ slightly ahead of p32 and p8 in SQL wall time (approximately 234.7K, 229.8K, and
 215.3K rows/s respectively), while all three avoid the severe p64 queueing observed
 earlier. The isolated Trino endpoint was restored to p16 after the point test; no
 repository default or shared 8090 process was changed.
+
+## Fresh-root crossed UPDATE/COMPACT/readback matrix (2026-11-25)
+
+To remove the historical nested-layout confounder, six new table roots were created
+with identical 68-column schemas and explicit `pk='id', pk_scheme='rocksdb'` metadata:
+
+```text
+e2e68_resolve_a_20261125 ... e2e68_resolve_f_20261125
+```
+
+Each target was populated from the materialized source
+`validationfresh.e2e68_fresh_candidate86_20261124`. The source range was
+`10000000001..10001000000`, and every INSERT returned 1,000,000 rows. The INSERT
+session used `task_concurrency=64`, fixed `task_min_writer_count=32`,
+`task_max_writer_count=32`, and writer scaling disabled. The six SQL elapsed times
+were 10.225, 7.114, 6.133, 7.007, 6.898, and 6.663 s; all six targets passed the
+1M-row, 1M-distinct, exact-range, and `U111/111.0000` source checks. A first attempt
+to use 24 writers was rejected during analysis because this Trino 466 build requires
+writer counts to be powers of two; it committed no rows.
+
+The targets were then assigned to resolver settings and updated over the exact full
+range. The final crossed paired points were:
+
+```text
+setting  target/query                         SQL elapsed   resolve_ms  final tag
+p16      a / 20261125_034025_00000_rxfr6       4.122 s        1590.257    U811
+p16      e / 20261125_034030_00001_rxfr6       1.847 s         900.568    U812
+p8       b / 20261125_034129_00000_nkpk9       4.654 s        1969.000    U821
+p8       f / 20261125_034134_00001_nkpk9       2.390 s        1431.257    U822
+p32      c / 20261125_033655_00000_cu8c9       4.159 s        1323.647    U803
+p32      d / 20261125_033700_00001_cu8c9       1.984 s         929.054    U804
+```
+
+The second query under each setting was much faster than the first, and p32's second
+arm was similarly fast. This separates two facts that had previously been mixed
+together: p8 is consistently behind the p16/p32 resolver points, but SQL wall time
+also contains Trino planning, scheduling, JVM warmup, and daemon/cache state. A single
+scalar rows/s number is not enough to choose p16 versus p32.
+
+All six targets then completed tag-aware COMPACT from their standard roots. Final
+readback for every target returned exactly:
+
+```text
+count=1000000
+distinct(id)=1000000
+min(id)=10000000001
+max(id)=10001000000
+latest assigned tag count=1000000
+old U111/111.0000 count=0
+```
+
+This is the first fresh-root six-target UPDATE-to-queryable matrix in the current
+runtime. It validates correctness and shows repeatable warm SQL points in the
+500K-rows/s band, but cold first-arm points remain around 215--240K rows/s. The
+connector branch already has default resolver parallelism 16 in commit
+`6b569544b7579ac3b0482941027b5e89e6b06534`; no duplicate default change is needed.
+The next performance experiment should hold a single Trino/daemon state constant while
+sampling repeated disjoint ranges, and should report cold, warm, resolver, planning,
+and scheduling components separately before attempting a p32 default or daemon-side
+queue change.

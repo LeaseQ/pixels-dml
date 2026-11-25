@@ -45,6 +45,14 @@
   COMPACT后，1M行、1M distinct、范围及全量`U666/666.0000`读回通过。p8/p16/p32
   的SQL点分别约215K/235K/230K，当前p16略优；8191已恢复p16，源码默认仍未改动。
   本次推送前远端`PROGRESS.md` blob为`da48d76515ace1e7bac2969eeca3577ca911c552`。
+- 在六个全新标准table-root、带primary index的目标上完成了交叉验证。统一的
+  table-to-table INSERT均为1M行、固定32 writers并通过完整源数据门禁；随后每张表
+  做UPDATE、COMPACT和最终读回。连续双臂的SQL elapsed为：p16 4.122/1.847s、
+  p8 4.654/2.390s、p32 4.159/1.984s；对应resolve指标也随第二个同进程query
+  明显下降，证明warm/cache和Trino调度状态不可忽略。六张表最终均为1M rows、
+  1M distinct、精确范围，最后一次tag全量正确且旧U111为0。当前结论是p16/p32
+  都能达到约500K级warm SQL点，p16默认更保守；尚不足以宣称稳定百万或完成跨重启
+  的最终参数选择。本次推送前远端`PROGRESS.md` blob为`f43b5ff318dcb4f2f1d9fc8752a184ea37a9fcaa`。
 
 ## 1. 已确认的目标与边界
 
