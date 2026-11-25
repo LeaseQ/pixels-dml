@@ -227,3 +227,14 @@ uniform-ID特判把单值字典转为原生RLE。SPI微基准显示重复flatten
 Trino-core源码改动、block级回归测试和交错冷/热矩阵，而不是继续使用classpath覆盖。
 本轮提交前检查的远端`PROGRESS.md` blob为
 `6227b463612e5cc6d790ed05aba7315238fa4331`。
+
+2026-11-25 对 Trino 466 的 `PageSplitterUtil` 做了隔离 2MiB 最小分页阈值
+探针，私有 jar SHA 为 `e88b1913581b61a00a6bb7de768db1189c37b898d1f95ac44ddf4fdd0d697eff`。
+候选在新建索引目标上冷/热 SQL 为 7.27/4.74 秒（约 137.6K/211.0K 行每秒），
+默认 1MiB 对照为 9.71/4.47 秒（约 103.0K/223.7K 行每秒）；两张目标均通过
+2M 行、distinct-ID、连续范围和完整 tag 门禁，但候选热态慢 5.7%，因此拒绝默认化。
+本轮同时发现隔离 `pixels.properties` 的 etcd 端口曾被改成 12389，而实际隔离 etcd
+监听 12379；已保留备份并修正为 12379，否则 Trino 重启会卡在 catalog 初始化等待。
+8191 已恢复默认 classpath、stable connector/core 且 `starting=false`，共享 8090 未触碰。
+本轮提交前检查的远端 `PROGRESS.md` blob 为
+`ad74a9859427de269923e11d3d3b29524d82d79f`。

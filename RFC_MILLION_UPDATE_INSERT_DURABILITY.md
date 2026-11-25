@@ -7373,3 +7373,56 @@ classpath-only runtime override.
 
 Before this documentation push, the remote `PROGRESS.md` was fetched at
 `6227b463612e5cc6d790ed05aba7315238fa4331`.
+
+## Rejected Trino 466 two-megabyte page-split backport (2026-11-25)
+
+The upstream Trino change history also shows a later increase of the output
+page split threshold from 1 MiB to 2 MiB. The Trino 466 runtime still calls
+`PageSplitterUtil.splitPage(page, 1048576)` from `TaskOutputOperator`, so an
+isolated classpath probe changed only `PageSplitterUtil` to use a minimum 2 MiB
+threshold. The probe jar was loaded alone (historical private jars were not on
+the classpath); its SHA was
+`e88b1913581b61a00a6bb7de768db1189c37b898d1f95ac44ddf4fdd0d697eff`.
+
+The first restart also exposed an environment drift unrelated to the probe:
+the isolated etcd process listens on `12379`, while `pixels.properties` had
+been left at `12389` by an earlier experiment. The file was backed up as
+`pixels.properties.before-pagesplit-2mb-20261125` and corrected to `12379` so
+the isolated Trino could initialize. No shared service was changed.
+
+The E2E used two fresh indexed targets, the same materialized 68-column source,
+fixed 24--32 writers, `task_concurrency=64`, writer scaling disabled, and
+`redistribute_writes=false`:
+
+```text
+2 MiB candidate cold  e2e68_pagesplit2_candidate2_20261125
+  query=20261125_003555_00010_kr472  SQL=7.27 s  ~=137.6K rows/s
+  client wall=9.420 s
+2 MiB candidate warm  e2e68_pagesplit2_candidate2_20261125
+  query=20261125_003716_00017_kr472  SQL=4.74 s  ~=211.0K rows/s
+  client wall=6.777 s
+
+1 MiB stable control  e2e68_pagesplit2_control_20261125
+  query=20261125_003848_00005_yedgr  SQL=9.71 s  ~=103.0K rows/s
+  client wall=12.246 s
+1 MiB stable control  e2e68_pagesplit2_control_20261125
+  query=20261125_003927_00011_yedgr  SQL=4.47 s  ~=223.7K rows/s
+  client wall=6.581 s
+```
+
+Both targets passed the full 2M-row gate. The candidate range was
+`73000000001..74001000000`; the control range was
+`75000000001..76001000000`; each had 2M distinct IDs and 2M exact
+`U111/111.0000` tag values. The candidate's cold result is not sufficient
+evidence because it was measured before the control restart, while the matched
+warm result is 5.7% slower than stable. This backport is therefore rejected
+for default use. It does not explain the persistent warm-state ceiling.
+
+8191 has been restored to the default classpath and stable connector/core,
+with `starting=false`; the private page-split jar is not loaded. Shared 8090
+was not touched. The remaining value of this line of research is upstream
+comparison: a production change would need the complete Trino-core source
+change and regression/benchmark coverage, not a private classpath override.
+
+Before this documentation push, the remote `PROGRESS.md` was fetched at
+`ad74a9859427de269923e11d3d3b29524d82d79f`.
