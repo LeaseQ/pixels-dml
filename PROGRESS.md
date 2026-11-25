@@ -825,3 +825,31 @@ grouped primary-index/write 的 `main_index_ms` 长尾、分配和锁竞争。
 
 本次推送前重新检查的远端 `PROGRESS.md` blob 为
 `f334d466abe3693131a4e30349993dbce5070f4a`。
+
+2026-11-25 修正 INSERT 性能归因：核对 clean runtime 部署 jar 后发现，stable full jar
+仍是旧版 `MainIndexBuffer`，每行在 `insert()` 中扫描 file buffers 并执行
+`HashMap.remove`；aggregate candidate jar 除了 aggregate result 变更，还混入了 commit
+`71eda92a` 的 lazy reverse lookup。因此此前 aggregate-only A/B 约快3.1%的结论撤回，
+不能归因给 aggregate。`javap` 核对为 stable 无 `insertNew()`，candidate 同时有 lazy
+`insert()` 和 `insertNew()`。
+
+随后在同一 clean runtime 使用统一1M/68列、pk=id、32 fixed writers、
+`task_concurrency=64`、`redistribute_writes=false` 与完整 rows/distinct/range/tag 门禁，
+做了两组隔离：当前分支 candidate（lazy MainIndexBuffer + aggregate methods）首轮
+17.236秒、warm轮 `e2e68_current_branch_candidate2_20251125` 12.523秒（约79.9K/s）；
+只覆盖当前 `MainIndexBuffer`、其余仍用旧 stable 类的 lazy-only overlay 首轮
+16.447秒、warm轮 `e2e68_lazy_only2_20251125` 11.901秒（约84.0K/s）。两组都出现
+`PIXELS_INSERT_INDEX_METRIC` 与 grouped metric 并通过完整标签校验；由于不是随机交叉
+实验，5.2%差异只作方向性证据，但与 Retina JFR 中 `HashMap.removeNode` 约50% Java
+样本、调用链落在 `MainIndexBuffer.insert` 的证据一致。当前最可信的收益来自 lazy
+MainIndexBuffer 路径，clean warm E2E 约84K/s；aggregate 保留为语义安全实验项，撤回
+其单独性能收益声明，后续需同一 baseline 的 randomized A/B。
+
+本轮 candidate jar SHA 为
+`664f1ce6485930f08453b4a962b6d0f71ad25d690117f5873c06f6e73b4883d6`，lazy-only overlay
+SHA 为 `5efcad8f8174c1e2ab4e5c97a049887ffbc4685f3ebf60f65edf0724cf15dec1`。详细纠正见
+`RFC_RUNTIME_BASELINE_ATTRIBUTION_CORRECTION_20261125.md`。此前 `new-main-index` 独立
+A/B 结论不变：默认继续 false。
+
+本次推送前重新检查的远端 `PROGRESS.md` blob 为
+`7f04864caecc9471a126f977ec0eb23e51a8eeed`。
